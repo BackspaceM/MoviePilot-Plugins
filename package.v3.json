@@ -29,19 +29,19 @@
       "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。"
     }
   },
-  "瓷器CrossSeed": {
-    "name": "辅种",
-    "description": "从本地下载器取已完成任务，在 瓷器（瓷器.org）按名称检索候选种子，文件一致时下载原种加入做种，提升站点做种收益。",
+  "HDWinGCrossSeed": {
+    "name": "HDWinG 辅种",
+    "description": "从本地下载器取已完成任务，在 HDWinG（hdwing.org）按名称检索候选种子，文件一致时下载原种加入做种，提升站点做种收益。",
     "labels": "做种",
     "version": "1.0.0",
     "release": true,
     "author": "BackspaceM",
-    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/瓷器crossseed.png",
+    "icon": "https://raw.githubusercontent.com/GITHUB_USER/MoviePilot-Plugins/main/icons/hdwingcrossseed.png",
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
-      "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、瓷器 检索匹配、严格文件级校验、自动辅种与去重缓存。"
+      "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、HDWinG 检索匹配、严格文件级校验、自动辅种与去重缓存。"
     }
   }
 }
