@@ -19,13 +19,14 @@
     "name": "Cloudflare 优选 IP → RouterOS",
     "description": "识别解析到 Cloudflare 的 PT 站点，实测 Cloudflare 官方网段内 IP 的 TCP 握手延迟，取最优若干写入 RouterOS 的 /ip/dns/static，实现内网 DNS 优选解析；自动收集启用中的站点域名，按备注前缀只清理自己写入的记录。",
     "labels": "网络",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "release": true,
     "author": "BackspaceM",
-    "icon": "https://raw.githubusercontent.com/GITHUB_USER/MoviePilot-Plugins/main/icons/cfrouteros.png",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.1.0": "新增配置页「立即执行一次」与详情页有效按钮；修复插件日志不可见（关键路径 INFO 日志 + 详情页运行日志 + /logs）；通知改用 MoviePilot 通知链并支持全部/仅异常/关闭三种模式，远程命令按来源渠道回复；补 AAAA 解析、先写后删保护、最少可用 IP 表单项、实例级运行锁、事件循环兼容与图标地址修复。",
       "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。"
     }
   },
@@ -36,7 +37,7 @@
     "version": "1.0.0",
     "release": true,
     "author": "BackspaceM",
-    "icon": "https://raw.githubusercontent.com/GITHUB_USER/MoviePilot-Plugins/main/icons/hdwingcrossseed.png",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png",
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "level": 1,
     "system_version": ">=3.0.0",

@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import html as _html
 import threading
 import time
 import traceback
@@ -27,6 +29,13 @@ from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 from app.sdk.network import AsyncRequestUtils, SitesHelper
 from app.sdk.plugin import _PluginBase
+
+try:
+    # V3 宿主的插件通知类型；旧宿主或离线桩环境没有该枚举时退化为宿主默认类型
+    from app.schemas.types import MessageType as _MessageType
+    _PLUGIN_MTYPE = getattr(_MessageType, "Plugin", None)
+except Exception:  # noqa: BLE001
+    _PLUGIN_MTYPE = None
 
 from .cfopt import (
     CF_V4_LIST_URL,
@@ -48,12 +57,17 @@ from .routeros import RouterOSClient, normalize_base_url
 _STATS_KEY = "stats"
 _HISTORY_KEY = "history"
 _CIDR_KEY = "cidr_cache"
+_LOG_KEY = "run_logs"
 _MAX_HISTORY = 50
+_MAX_LOGS = 200
 _CMD_ACTION = "cfrouteros_run"
+_CMD_CHECK_ACTION = "cfrouteros_check"
+_CMD_STOP_ACTION = "cfrouteros_stop"
 _ONCE_JOB_ID = "CFRouterOS.RunOnce"
 _STALE_RUN_SECONDS = 1800
 _CIDR_TTL = 7 * 86400
 _SITE_ONLY_ERROR = "未配置任何域名"
+_NOTIFY_MODES = ("全部", "仅异常", "关闭")
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +109,9 @@ class CFRouterOS(_PluginBase):
         "取最优若干写入 RouterOS 的 /ip/dns/static，实现内网 DNS 优选解析。"
     )
     plugin_icon = (
-        "https://raw.githubusercontent.com/GITHUB_USER/MoviePilot-Plugins/main/icons/cfrouteros.png"
+        "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png"
     )
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -108,6 +122,7 @@ class CFRouterOS(_PluginBase):
     # --- 基础 ---
     _enabled: bool = False
     _notify: bool = True
+    _notify_mode: str = "全部"
     _cron: str = "0 5 * * *"
     _dry_run: bool = False
 
@@ -143,12 +158,12 @@ class CFRouterOS(_PluginBase):
     _cleanup_names: bool = False
     _min_success: int = 1
 
-    # --- 运行态 ---
-    _state_lock = threading.Lock()
-    _running: bool = False
+    # --- 运行态：全部为实例属性，避免虚拟分身之间共享锁与运行标记 ---
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self._state_lock = threading.Lock()
+        self._running: bool = False
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._run_started: float = 0.0
@@ -160,8 +175,10 @@ class CFRouterOS(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         """载入配置并复位运行态。"""
         self.stop_service()
+        self._log("INFO", "初始化 Cloudflare 优选插件")
         self._enabled = False
         self._notify = True
+        self._notify_mode = "全部"
         self._cron = "0 5 * * *"
         self._dry_run = False
         self._router_host = ""
@@ -189,9 +206,12 @@ class CFRouterOS(_PluginBase):
         self._cleanup_names = False
         self._min_success = 1
         if not config:
+            self._log("INFO", "未载入配置，插件保持停用")
             return
         self._enabled = bool(config.get("enabled"))
         self._notify = bool(config.get("notify", True))
+        mode = str(config.get("notify_mode") or "").strip()
+        self._notify_mode = mode if mode in _NOTIFY_MODES else ("全部" if self._notify else "关闭")
         self._cron = str(config.get("cron") or "0 5 * * *").strip()
         self._dry_run = bool(config.get("dry_run"))
         self._router_host = str(config.get("router_host") or "").strip()
@@ -218,6 +238,28 @@ class CFRouterOS(_PluginBase):
         self._comment_prefix = str(config.get("comment_prefix") or "cfopt").strip() or "cfopt"
         self._cleanup_names = bool(config.get("cleanup_names"))
         self._min_success = max(_to_int(config.get("min_success"), 1), 1)
+        self._log(
+            "INFO",
+            f"配置已载入：启用={self._enabled}，周期={self._cron}，仅测速={self._dry_run}，"
+            f"通知={self._notify_mode}，IP版本={self._ip_version}，"
+            f"路由器={self._router_host or '未配置'}",
+        )
+        if config.get("run_now"):
+            # 官方 onlyonce 模式：保存配置立即执行一轮，并复位开关避免重复触发
+            reset = dict(config)
+            reset["run_now"] = False
+            try:
+                self.update_config(reset)
+            except Exception as err:  # noqa: BLE001 - 复位失败不应阻断本次执行
+                logger.warning(f"Cloudflare 优选：复位立即执行开关失败 {err}")
+            if not self._enabled:
+                self._log("WARN", "插件未启用，已忽略「立即执行一次」")
+                self._send_message("Cloudflare 优选 IP → RouterOS", "插件未启用，请先启用后再执行")
+            elif self.start_run(trigger="配置页", prefer_thread=True):
+                # 配置保存常伴随插件重载，独立线程可避免一次性调度任务被 stop_service 取消
+                self._log("INFO", "配置页触发「立即执行一次」（独立线程）")
+            else:
+                self._log("WARN", "配置页触发被跳过：已有任务在运行")
 
     def get_state(self) -> bool:
         """返回插件是否启用。"""
@@ -236,7 +278,8 @@ class CFRouterOS(_PluginBase):
                 logger.debug(f"Cloudflare 优选：取消一次性任务失败 {err}")
         thread = getattr(self, "_thread", None)
         if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=10)
+            # 保存配置不应被上一轮任务长时间阻塞，任务会自行检查中止信号
+            thread.join(timeout=3)
         with self._state_lock:
             self._running = False
 
@@ -269,7 +312,21 @@ class CFRouterOS(_PluginBase):
                 "desc": "立即执行一次 Cloudflare 优选并写入 RouterOS",
                 "category": "网络",
                 "data": {"action": _CMD_ACTION},
-            }
+            },
+            {
+                "cmd": "/cfrouteros_check",
+                "event": EventType.PluginAction,
+                "desc": "检测 RouterOS 连通与账号权限",
+                "category": "网络",
+                "data": {"action": _CMD_CHECK_ACTION},
+            },
+            {
+                "cmd": "/cfrouteros_stop",
+                "event": EventType.PluginAction,
+                "desc": "中止正在执行的 Cloudflare 优选任务",
+                "category": "网络",
+                "data": {"action": _CMD_STOP_ACTION},
+            },
         ]
 
     @eventmanager.register(EventType.PluginAction)
@@ -278,16 +335,36 @@ class CFRouterOS(_PluginBase):
         if not event:
             return
         data = event.event_data or {}
-        if not isinstance(data, dict) or data.get("action") != _CMD_ACTION:
+        if not isinstance(data, dict):
+            return
+        action = data.get("action")
+        if action not in (_CMD_ACTION, _CMD_CHECK_ACTION, _CMD_STOP_ACTION):
             return
         target = data.get("plugin_id")
         if target and target != self.__class__.__name__:
             return
-        if not self._enabled:
-            self.post_message(title="Cloudflare 优选", text="插件未启用，命令已忽略")
+        channel, userid = data.get("channel"), data.get("user")
+        title = "Cloudflare 优选 IP → RouterOS"
+        if action == _CMD_STOP_ACTION:
+            self._stop_event.set()
+            self._log("WARN", "远程命令请求中止当前任务")
+            self._send_message(title, "已发送中止信号，当前轮次将尽快结束",
+                               channel=channel, userid=userid)
             return
-        if not self.start_run(trigger="命令"):
-            self.post_message(title="Cloudflare 优选", text="上一轮任务尚未结束，请稍后再试")
+        if not self._enabled:
+            self._send_message(title, "插件未启用，命令已忽略", channel=channel, userid=userid)
+            return
+        if action == _CMD_CHECK_ACTION:
+            ok, message = self._check_router_sync()
+            self._log("INFO" if ok else "WARN", f"远程命令检测路由器：{message}")
+            self._send_message(title, f"路由器检测：{message}", channel=channel, userid=userid)
+            return
+        if self.start_run(trigger="命令"):
+            self._send_message(title, "已开始执行，完成后将按通知设置推送结果",
+                               channel=channel, userid=userid)
+        else:
+            self._send_message(title, "上一轮任务尚未结束，请稍后再试",
+                               channel=channel, userid=userid)
 
     # ------------------------------------------------------------------
     # 表单
@@ -296,6 +373,29 @@ class CFRouterOS(_PluginBase):
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回配置表单与默认值。"""
         content: List[dict] = [
+            {
+                "component": "VRow",
+                "content": [
+                    self._col(12, 4, [{"component": "VSwitch", "props": {
+                        "model": "run_now", "label": "立即执行一次", "color": "primary",
+                        "hint": "保存配置后立即运行一轮，开关会自动复位；也可在插件详情页点「立即执行」",
+                        "persistentHint": True}}]),
+                    self._col(12, 4, [{"component": "VSelect", "props": {
+                        "model": "notify_mode", "label": "通知方式",
+                        "items": [
+                            {"title": "全部通知（成功与异常）", "value": "全部"},
+                            {"title": "仅异常通知", "value": "仅异常"},
+                            {"title": "关闭通知", "value": "关闭"},
+                        ],
+                        "hint": "通知走 MoviePilot 全局通知开关与收件人路由，点击可跳回插件页",
+                        "persistentHint": True}}]),
+                    self._col(12, 4, [{"component": "VTextField", "props": {
+                        "model": "min_success", "label": "最少可用 IP 数",
+                        "type": "number", "placeholder": "1",
+                        "hint": "可用 IP 少于该值时不写入，避免把已有 DNS 记录清掉",
+                        "persistentHint": True}}]),
+                ],
+            },
             {
                 "component": "VRow",
                 "content": [
@@ -443,6 +543,8 @@ class CFRouterOS(_PluginBase):
         return [{"component": "VForm", "content": content}], {
             "enabled": False,
             "notify": True,
+            "notify_mode": "全部",
+            "run_now": False,
             "dry_run": False,
             "cron": "0 5 * * *",
             "router_host": "",
@@ -479,89 +581,109 @@ class CFRouterOS(_PluginBase):
     # 详情页
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _html_block(title: str, lines: List[str], limit: int = 60) -> dict:
+        """用可换行的纯文本块展示明细，避免 VAlert 把换行压平。"""
+        body = "\n".join(_html.escape(str(item)) for item in lines[:limit]) or "暂无数据"
+        return {
+            "component": "VCard",
+            "props": {"variant": "tonal", "class": "mt-2"},
+            "content": [
+                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": title},
+                {"component": "VCardText", "props": {"class": "text-caption"},
+                 "html": f'<pre style="white-space:pre-wrap;word-break:break-all;margin:0">{body}</pre>'},
+            ],
+        }
+
+    def _action_button(self, text: str, icon: str, path: str, color: str,
+                       method: str = "post") -> dict:
+        """V3 详情页按钮：PageRender 只识别 events.<事件>.{api, method, params}。"""
+        return {
+            "component": "VBtn",
+            "props": {
+                "variant": "tonal", "color": color, "size": "small",
+                "class": "me-2 mb-2", "prepend-icon": icon,
+            },
+            "text": text,
+            "events": {"click": {
+                "api": f"plugin/{self.__class__.__name__}{path}",
+                "method": method,
+            }},
+        }
+
     def get_page(self) -> List[dict]:
-        """返回插件详情页。"""
-        if not self._enabled:
-            return [
-                {"component": "VAlert", "props": {
-                    "type": "warning", "variant": "tonal",
-                    "text": "插件未启用，请先在配置中启用并填写 RouterOS 地址与账号。"}}
-            ]
+        """返回插件详情页；未启用时也保留操作入口。"""
         stats = self.get_data(_STATS_KEY) or {}
         last = stats.get("last_result") or {}
-        content: List[dict] = [
-            {
-                "component": "VRow",
-                "content": [
-                    self._stat_card("符合域名", str(last.get("domains_cf", 0)), "mdi-cloud-check-outline"),
-                    self._stat_card("写入记录", str(last.get("written", 0)), "mdi-dns-outline"),
-                    self._stat_card("最快延迟", format_latency(float(last.get("best_latency", 0) or 0)),
-                                    "mdi-speedometer"),
-                    self._stat_card("上轮耗时", f"{stats.get('last_duration', '-')}s", "mdi-timer-outline"),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VAlert", "props": {
-                        "type": "info", "variant": "tonal", "class": "mt-2",
-                        "text": (f"上次运行：{stats.get('last_run_text', '尚未运行')}　"
-                                 f"触发：{stats.get('last_trigger', '-')}　"
-                                 f"域名 {last.get('domains_total', 0)} / 符合 {last.get('domains_cf', 0)} / "
-                                 f"候选 {last.get('probed', 0)} / 可用 {last.get('alive', 0)} / "
-                                 f"写入 {last.get('written', 0)}"
-                                 + (f"　说明：{last.get('message')}" if last.get("message") else ""))}}
-                    ]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VAlert", "props": {
-                        "type": "success" if last.get("best") else "secondary",
-                        "variant": "tonal", "class": "mt-2",
-                        "title": "本轮优选 IP",
-                        "text": "　".join(
-                            f"{item.get('ip')}（{format_latency(float(item.get('latency_ms') or 0))}）"
-                            for item in (last.get("best") or [])
-                        ) or "暂无数据，点击下方按钮执行一次。"}}
-                    ]),
-                ],
-            },
-        ]
-        rows = stats.get("last_domains") or []
-        if rows:
-            content.append({
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VAlert", "props": {
-                        "type": "secondary", "variant": "tonal", "class": "mt-2",
-                        "title": "域名处理明细",
-                        "text": "\n".join(
-                            f"{item.get('domain')}：{item.get('state')}"
-                            + (f"　{', '.join(item.get('addresses') or [])}" if item.get("addresses") else "")
-                            + (f"　{item.get('message')}" if item.get("message") else "")
-                            for item in rows
-                        )}}
-                    ]),
-                ],
-            })
+        logs = list(self.get_data(_LOG_KEY) or [])
+        history = list(self.get_data(_HISTORY_KEY) or [])
+        content: List[dict] = []
+        if not self._enabled:
+            content.append({"component": "VAlert", "props": {
+                "type": "warning", "variant": "tonal", "class": "mb-2",
+                "text": "插件未启用：请先在配置中启用并填写 RouterOS 地址与账号。"
+                        "下方仍可手动检测路由器，但定时与立即执行需要先启用。"}})
         content.append({
             "component": "VRow",
             "content": [
-                self._col(12, 12, [
-                    {"component": "VBtn", "props": {
-                        "variant": "tonal", "color": "primary", "class": "me-2",
-                        "prependIcon": "mdi-play", "text": "立即执行"},
-                     "actions": [{"component": "VOn", "props": {"event": "click",
-                                                                "handler": "api_run"}}]},
-                    {"component": "VBtn", "props": {
-                        "variant": "tonal", "color": "info",
-                        "prependIcon": "mdi-lan-connect", "text": "检测路由器"},
-                     "actions": [{"component": "VOn", "props": {"event": "click",
-                                                                "handler": "api_check"}}]},
-                ]),
+                self._stat_card("符合域名", str(last.get("domains_cf", 0)), "mdi-cloud-check-outline"),
+                self._stat_card("写入记录", str(last.get("written", 0)), "mdi-dns-outline"),
+                self._stat_card("最快延迟",
+                                format_latency(float(last.get("best_latency", 0) or 0)),
+                                "mdi-speedometer"),
+                self._stat_card("上轮耗时", f"{stats.get('last_duration', '-')}s", "mdi-timer-outline"),
             ],
+        })
+        content.append({
+            "component": "VRow",
+            "content": [self._col(12, 12, [{"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal", "class": "mt-2",
+                "text": (f"上次运行：{stats.get('last_run_text', '尚未运行')}　"
+                         f"触发：{stats.get('last_trigger', '-')}　"
+                         f"域名 {last.get('domains_total', 0)} / 符合 {last.get('domains_cf', 0)} / "
+                         f"候选 {last.get('probed', 0)} / 可用 {last.get('alive', 0)} / "
+                         f"写入 {last.get('written', 0)}"
+                         + (f"　说明：{last.get('message')}" if last.get("message") else ""))}}])],
+        })
+        content.append({
+            "component": "VRow",
+            "content": [self._col(12, 12, [{"component": "VAlert", "props": {
+                "type": "success" if last.get("best") else "secondary",
+                "variant": "tonal", "class": "mt-2",
+                "title": "本轮优选 IP",
+                "text": "　".join(
+                    f"{item.get('ip')}（{format_latency(float(item.get('latency_ms') or 0))}）"
+                    for item in (last.get("best") or [])
+                ) or "暂无数据，点击下方「立即执行」。"}}])],
+        })
+        domain_lines = [
+            f"{item.get('domain')}：{item.get('state')}"
+            + (f"　{', '.join(item.get('addresses') or [])}" if item.get("addresses") else "")
+            + (f"　{item.get('message')}" if item.get("message") else "")
+            for item in (stats.get("last_domains") or [])
+        ]
+        content.append(self._html_block("域名处理明细", domain_lines, 40))
+        history_lines = [
+            f"{item.get('time')}　[{item.get('trigger')}]　符合 {item.get('domains_cf')}　"
+            f"写入 {item.get('written')}　{item.get('message') or ''}"
+            for item in history
+        ]
+        content.append(self._html_block("运行历史（最近 20 条）", history_lines, 20))
+        log_lines = [
+            f"{item.get('time')}　[{item.get('level')}]　{item.get('message')}"
+            for item in logs
+        ]
+        content.append(self._html_block(
+            "运行日志（最近 60 条；MP「查看日志」对应 plugins/cfrouteros.log）", log_lines, 60))
+        content.append({
+            "component": "VRow",
+            "content": [self._col(12, 12, [
+                self._action_button("立即执行", "mdi-play", "/run", "primary"),
+                self._action_button("检测路由器", "mdi-lan-connect", "/check", "info"),
+                self._action_button("刷新页面", "mdi-refresh", "/status", "secondary", "get"),
+                self._action_button("中止任务", "mdi-stop", "/stop", "warning"),
+                self._action_button("清空日志", "mdi-delete-sweep", "/clear_logs", "error"),
+            ])],
         })
         return content
 
@@ -599,8 +721,14 @@ class CFRouterOS(_PluginBase):
              "auth": "bear", "summary": "检测 RouterOS 连通与账号权限"},
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询上轮结果"},
+            {"path": "/logs", "endpoint": self.api_logs, "methods": ["GET"],
+             "auth": "bear", "summary": "查询插件运行日志"},
             {"path": "/clear_cache", "endpoint": self.api_clear_cache, "methods": ["POST"],
              "auth": "bear", "summary": "清空网段缓存与历史"},
+            {"path": "/clear_logs", "endpoint": self.api_clear_logs, "methods": ["POST"],
+             "auth": "bear", "summary": "清空运行日志"},
+            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"],
+             "auth": "bear", "summary": "中止正在执行的任务"},
         ]
 
     def api_run(self) -> schemas.Response:
@@ -612,19 +740,20 @@ class CFRouterOS(_PluginBase):
         if self._running:
             return schemas.Response(success=False, message="已有任务在运行")
         started = self.start_run(trigger="手动")
+        if started:
+            self._log("INFO", "详情页触发「立即执行」")
         return schemas.Response(
             success=started,
             message="已开始执行，稍后刷新页面查看结果" if started else "任务启动失败",
         )
 
     def api_check(self) -> schemas.Response:
-        """检测 RouterOS 连通性、认证与 REST 可用性。"""
+        """检测 RouterOS 连通性、认证与 REST 可用性，并把结果推送到 MP 通知。"""
         if not self._router_host:
             return schemas.Response(success=False, message="未配置 RouterOS 地址")
-        try:
-            ok, message = asyncio.run(self._check_router_async())
-        except Exception as err:  # noqa: BLE001 - 检测失败要返回可读原因
-            return schemas.Response(success=False, message=f"检测异常：{err}")
+        ok, message = self._check_router_sync()
+        self._log("INFO" if ok else "WARN", f"检测路由器：{message}")
+        self._send_message("Cloudflare 优选 IP → RouterOS", f"路由器检测：{message}")
         return schemas.Response(success=ok, message=message)
 
     def api_status(self) -> schemas.Response:
@@ -634,14 +763,35 @@ class CFRouterOS(_PluginBase):
             "running": self._running,
             "cron": self._cron,
             "dry_run": self._dry_run,
+            "notify_mode": self._notify_mode,
+            "log_count": len(self.get_data(_LOG_KEY) or []),
             "stats": self.get_data(_STATS_KEY) or {},
+        })
+
+    def api_logs(self) -> schemas.Response:
+        """返回持久化运行日志，供详情之外直接排查。"""
+        return schemas.Response(success=True, data={
+            "logfile": f"plugins/{self.__class__.__name__.lower()}.log",
+            "logs": list(self.get_data(_LOG_KEY) or []),
         })
 
     def api_clear_cache(self) -> schemas.Response:
         """清空网段缓存与历史记录。"""
         self.save_data(_CIDR_KEY, {})
         self.save_data(_HISTORY_KEY, [])
+        self._log("INFO", "已清空网段缓存与运行历史")
         return schemas.Response(success=True, message="网段缓存与历史已清空")
+
+    def api_clear_logs(self) -> schemas.Response:
+        """清空插件运行日志（不影响 MP 主日志）。"""
+        self.save_data(_LOG_KEY, [])
+        return schemas.Response(success=True, message="运行日志已清空")
+
+    def api_stop(self) -> schemas.Response:
+        """向正在执行的任务发送中止信号。"""
+        self._stop_event.set()
+        self._log("WARN", "收到中止请求，当前轮次将在下一个检查点退出")
+        return schemas.Response(success=True, message="已发送中止信号")
 
     # ------------------------------------------------------------------
     # 调度
@@ -651,14 +801,14 @@ class CFRouterOS(_PluginBase):
         """定时入口。"""
         self.start_run(trigger="定时")
 
-    def start_run(self, trigger: str = "手动") -> bool:
-        """异步启动一轮优选，避免阻塞调用方。"""
+    def start_run(self, trigger: str = "手动", prefer_thread: bool = False) -> bool:
+        """异步启动一轮优选；配置页触发时强制用独立线程，避免被插件重载取消。"""
         with self._state_lock:
             if self._running:
                 if time.time() - self._run_started < _STALE_RUN_SECONDS:
-                    logger.info("Cloudflare 优选：上一轮尚未结束，本次跳过")
+                    self._log("WARN", "上一轮尚未结束，本次触发已跳过")
                     return False
-                logger.warning("Cloudflare 优选：运行状态疑似残留，强制重置后继续")
+                self._log("WARN", "运行状态疑似残留，强制重置后继续")
             self._running = True
             self._run_started = time.time()
         stop_event = getattr(self, "_stop_event", None)
@@ -666,7 +816,7 @@ class CFRouterOS(_PluginBase):
             self._stop_event = stop_event = threading.Event()
         stop_event.clear()
 
-        add_once = getattr(scheduler_sdk, "add_plugin_once_job", None)
+        add_once = None if prefer_thread else getattr(scheduler_sdk, "add_plugin_once_job", None)
         if callable(add_once):
             try:
                 scheduled = add_once(
@@ -697,12 +847,15 @@ class CFRouterOS(_PluginBase):
         try:
             self._run_once(trigger)
         except Exception as err:  # noqa: BLE001 - 后台任务必须兜底
-            logger.error(f"Cloudflare 优选执行异常：{err} - {traceback.format_exc()}")
-            self._save_result({
+            self._log("ERROR", f"执行异常：{err} - {traceback.format_exc()}")
+            failure = {
                 "trigger": trigger,
                 "domains_total": 0, "domains_cf": 0, "probed": 0, "alive": 0,
-                "written": 0, "best_latency": 0, "best": [], "message": f"执行异常：{err}",
-            }, time.time())
+                "written": 0, "best_latency": 0, "best": [], "domains": [],
+                "message": f"执行异常：{err}",
+            }
+            self._save_result(failure, time.time())
+            self._notify_result(failure)
         finally:
             with self._state_lock:
                 self._running = False
@@ -715,9 +868,16 @@ class CFRouterOS(_PluginBase):
 
     def _run_once(self, trigger: str) -> None:
         started = time.time()
-        result = asyncio.run(self._run_async(trigger))
+        self._log("INFO", f"开始执行（触发：{trigger}）")
+        result = self._run_coroutine(self._run_async(trigger))
+        duration = round(max(time.time() - started, 0.1), 1)
         self._save_result(result, started)
-        self._notify_result(result)
+        self._log(
+            "INFO",
+            f"本轮完成：{result.get('message') or '无说明'}；符合域名 {result.get('domains_cf', 0)}，"
+            f"写入 {result.get('written', 0)} 条，耗时 {duration}s",
+        )
+        self._notify_result(result, duration)
 
     async def _run_async(self, trigger: str) -> Dict[str, Any]:
         """完整一轮：解析 → 测速 → 写入。"""
@@ -743,6 +903,7 @@ class CFRouterOS(_PluginBase):
         result["domains_total"] = len(domains)
         if not domains:
             result["message"] = _SITE_ONLY_ERROR
+            self._log("WARN", "未配置任何域名，也未从站点收集到域名")
             return result
 
         doh_http = AsyncRequestUtils(timeout=self._doh_timeout, verify=False)
@@ -750,6 +911,7 @@ class CFRouterOS(_PluginBase):
         networks = build_networks(v4_text, v6_text)
         if not networks:
             result["message"] = "Cloudflare 网段为空"
+            self._log("ERROR", "Cloudflare 网段为空，且内置段不可用")
             return result
 
         eligible: List[str] = []
@@ -769,6 +931,8 @@ class CFRouterOS(_PluginBase):
                     "message": "解析未落在 Cloudflare 网段" if resolved else "DoH 解析失败或无 A 记录",
                 })
         result["domains_cf"] = len(eligible)
+        self._log("INFO", f"域名判定：共 {len(domains)} 个，符合 Cloudflare {len(eligible)} 个，"
+                          f"跳过 {len(domains) - len(eligible)} 个")
         if not eligible:
             result["message"] = "没有域名解析到 Cloudflare，未写入"
             return result
@@ -793,11 +957,16 @@ class CFRouterOS(_PluginBase):
         best = pick_fastest(probes, self._top_n)
         result["best"] = [item.as_dict() for item in best]
         result["best_latency"] = round(best[0].latency_ms, 1) if best else 0
+        self._log("INFO", f"测速完成：候选 {len(candidates)}，可用 {len(alive)}，"
+                          f"最优 {format_latency(float(result['best_latency']))}"
+                          + (f"（{best[0].ip}）" if best else ""))
         if len(best) < self._min_success:
             result["message"] = f"可用 IP 不足（{len(best)}/{self._min_success}），未写入"
+            self._log("WARN", result["message"])
             return result
 
         if self._dry_run:
+            self._log("INFO", "仅测速模式：跳过路由器写入")
             for row in result["domains"]:
                 if row["domain"] in eligible:
                     row["addresses"] = [item.ip for item in best]
@@ -806,6 +975,7 @@ class CFRouterOS(_PluginBase):
 
         if not self._router_host:
             result["message"] = "未配置 RouterOS 地址，仅完成测速"
+            self._log("WARN", result["message"])
             return result
 
         router_http = AsyncRequestUtils(timeout=self._router_timeout, verify=self._router_verify)
@@ -819,6 +989,7 @@ class CFRouterOS(_PluginBase):
         ok, message = await client.check(router_http)
         if not ok:
             result["message"] = f"路由器连接失败：{message}"
+            self._log("ERROR", result["message"])
             return result
 
         for domain in eligible:
@@ -831,6 +1002,13 @@ class CFRouterOS(_PluginBase):
                 cleanup_names=self._cleanup_names,
             )
             result["written"] += int(applied.get("added") or 0)
+            self._log(
+                "INFO" if applied.get("added") else "WARN",
+                f"写入 {domain}：新增 {applied.get('added') or 0} 条，"
+                f"清理 {applied.get('deleted') or 0} 条"
+                + (f"，错误：{'; '.join(applied.get('errors') or [])[:200]}"
+                   if applied.get("errors") else ""),
+            )
             for row in result["domains"]:
                 if row["domain"] == domain:
                     row["state"] = "已写入" if applied.get("added") else "写入失败"
@@ -863,24 +1041,26 @@ class CFRouterOS(_PluginBase):
         return list(dict.fromkeys(domains))
 
     async def _resolve_domain(self, http: AsyncRequestUtils, domain: str) -> List[str]:
-        """用 DoH 解析 A 记录。"""
-        try:
-            response = await http.request(
-                "GET",
-                self._doh_url,
-                params={"name": domain, "type": "A"},
-                headers={"Accept": "application/dns-json"},
-            )
-        except Exception as err:  # noqa: BLE001 - 单个域名失败不阻断整体
-            logger.debug(f"Cloudflare 优选：DoH 解析 {domain} 失败 {err}")
-            return []
-        if response is None or int(getattr(response, "status_code", 0) or 0) != 200:
-            return []
-        try:
-            payload = response.json()
-        except Exception:  # noqa: BLE001
-            return []
-        return parse_doh_answer(payload)
+        """用 DoH 解析 A 记录；IPv4+IPv6 模式下追加 AAAA。"""
+        record_types = ("A", "AAAA") if self._ip_version == "46" else ("A",)
+        found: List[str] = []
+        for record_type in record_types:
+            try:
+                response = await http.request(
+                    "GET", self._doh_url,
+                    params={"name": domain, "type": record_type},
+                    headers={"Accept": "application/dns-json"},
+                )
+            except Exception as err:  # noqa: BLE001 - 单个域名失败不阻断整体
+                logger.debug(f"Cloudflare 优选：DoH 解析 {domain}/{record_type} 失败 {err}")
+                continue
+            if response is None or int(getattr(response, "status_code", 0) or 0) != 200:
+                continue
+            try:
+                found.extend(parse_doh_answer(response.json()))
+            except Exception:  # noqa: BLE001
+                continue
+        return list(dict.fromkeys(found))
 
     async def _cidr_texts(self, http: AsyncRequestUtils) -> Tuple[str, str]:
         """返回官方网段文本，按需刷新并缓存 7 天。"""
@@ -961,21 +1141,94 @@ class CFRouterOS(_PluginBase):
         })
         self.save_data(_HISTORY_KEY, history[:_MAX_HISTORY])
 
-    def _notify_result(self, result: Dict[str, Any]) -> None:
-        """按配置发送运行结果通知。"""
-        if not self._notify:
+    def _notify_result(self, result: Dict[str, Any], duration: float = 0.0) -> None:
+        """按通知模式把运行结果交给 MoviePilot 通知链。"""
+        if self._notify_mode == "关闭":
+            return
+        written = int(result.get("written") or 0)
+        dry_run = bool(result.get("dry_run"))
+        message = str(result.get("message") or "")
+        abnormal = (
+            (not written and not dry_run)
+            or int(result.get("domains_cf") or 0) == 0
+            or any(word in message for word in
+                   ("失败", "异常", "不足", "未配置", "取消", "未写入", "为空", "忽略"))
+        )
+        if self._notify_mode == "仅异常" and not abnormal:
             return
         best = result.get("best") or []
+        title = ("Cloudflare 优选 IP → RouterOS｜执行异常" if abnormal
+                 else "Cloudflare 优选 IP → RouterOS｜执行完成")
         lines = [
+            f"触发方式：{result.get('trigger', '-')}",
             f"域名：{result.get('domains_total', 0)} 个，符合 Cloudflare {result.get('domains_cf', 0)} 个",
             f"测速：候选 {result.get('probed', 0)}，可用 {result.get('alive', 0)}",
-            f"写入：{result.get('written', 0)} 条" + ("（仅测速，未写入）" if result.get("dry_run") else ""),
+            f"写入：{written} 条" + ("（仅测速，未写入）" if dry_run else ""),
         ]
+        if duration:
+            lines.append(f"耗时：{duration}s")
         if best:
             lines.append("优选：" + "，".join(
-                f"{item.get('ip')}({format_latency(float(item.get('latency_ms') or 0))})" for item in best[:4]
+                f"{item.get('ip')}({format_latency(float(item.get('latency_ms') or 0))})"
+                for item in best[:4]
             ))
-        if result.get("message"):
-            lines.append(f"说明：{result['message']}")
-        level = "info" if result.get("written") or result.get("dry_run") else "warning"
-        self.post_message(title="Cloudflare 优选 IP → RouterOS", text="\n".join(lines), level=level)
+        if message:
+            lines.append(f"说明：{message}")
+        lines.append("通知来自 MoviePilot 插件，点击消息可回到插件详情页。")
+        if abnormal:
+            lines.append("排查：插件详情页「运行日志」，或插件卡片「查看日志」（plugins/cfrouteros.log）。")
+        self._send_message(title, "\n".join(lines))
+
+    def _send_message(self, title: str, text: str, *,
+                      channel: Any = None, userid: Any = None) -> None:
+        """统一走基类 post_message，沿用宿主通知开关、收件人路由与插件跳转链接。"""
+        payload: Dict[str, Any] = {"title": title, "text": text}
+        if _PLUGIN_MTYPE is not None:
+            payload["mtype"] = _PLUGIN_MTYPE
+        if channel:
+            payload["channel"] = channel
+        if userid:
+            payload["userid"] = userid
+        try:
+            self.post_message(**payload)
+        except Exception as err:  # noqa: BLE001 - 通知失败不能影响主流程
+            logger.warning(f"Cloudflare 优选：通知发送失败 {err}")
+
+    def _log(self, level: str, message: str) -> None:
+        """同时写宿主插件日志（plugins/cfrouteros.log）与插件持久化日志缓冲。"""
+        content = str(message)
+        secret = getattr(self, "_router_password", "")
+        if secret:
+            content = content.replace(secret, "***")
+        try:
+            logs = list(self.get_data(_LOG_KEY) or [])
+            logs.insert(0, {"time": _now_text(), "level": level, "message": content})
+            self.save_data(_LOG_KEY, logs[:_MAX_LOGS])
+        except Exception as err:  # noqa: BLE001 - 日志落库失败不影响业务
+            logger.debug(f"Cloudflare 优选：写入运行日志失败 {err}")
+        line = f"Cloudflare 优选：{content}"
+        if level == "ERROR":
+            logger.error(line)
+        elif level == "WARN":
+            logger.warning(line)
+        elif level == "DEBUG":
+            logger.debug(line)
+        else:
+            logger.info(line)
+
+    def _check_router_sync(self) -> Tuple[bool, str]:
+        """同步包装路由器检测，兼容在 Web 请求线程中调用。"""
+        try:
+            return self._run_coroutine(self._check_router_async())
+        except Exception as err:  # noqa: BLE001
+            return False, f"检测异常：{err}"
+
+    @staticmethod
+    def _run_coroutine(coro: Any) -> Any:
+        """已有事件循环时（FastAPI 工作线程）改在独立线程执行，避免 asyncio.run 嵌套报错。"""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=60)

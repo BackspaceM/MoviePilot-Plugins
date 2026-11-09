@@ -173,7 +173,7 @@ class HDWinGCrossSeed(_PluginBase):
         "同 hash 或文件清单完全一致才添加，支持定时执行、请求节流与结果通知。"
     )
     plugin_icon = (
-        "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
+        "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
     )
     plugin_version = "1.0.0"
     plugin_label = "站点,辅种,HDWinG"

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 DNS_STATIC_PATH = "/rest/ip/dns/static"
 IDENTITY_PATH = "/rest/system/identity"
@@ -198,7 +199,7 @@ class RouterOSClient:
         """列出 DNS static，可按备注精确过滤。"""
         path = DNS_STATIC_PATH
         if comment:
-            path = f"{path}?comment={comment}"
+            path = f"{path}?comment={quote(comment, safe='')}"
         status, body = await self.request(client, "GET", path)
         if status != 200:
             return []
@@ -206,7 +207,9 @@ class RouterOSClient:
 
     async def list_by_name(self, client: Any, name: str) -> List[DnsStaticRecord]:
         """列出指定域名的全部记录，用于按域名清理。"""
-        status, body = await self.request(client, "GET", f"{DNS_STATIC_PATH}?name={name}")
+        status, body = await self.request(
+            client, "GET", f"{DNS_STATIC_PATH}?name={quote(name, safe='')}"
+        )
         if status != 200:
             return []
         return [item for item in parse_records(body) if item.name == name]
@@ -244,9 +247,8 @@ class RouterOSClient:
         """
         用一批新记录替换某域名的旧记录。
 
-        清理范围：
-        - 默认只删 comment 命中本插件的记录（不碰用户手写的同名记录）
-        - `cleanup_names=True` 时额外清理同名 A 记录，适合希望完全接管解析的场景
+        可靠性：先写入新记录，确认至少一条成功后再清理旧记录。旧记录快照在写入前获取，
+        避免新写入的同备注记录被一起删掉；写入全部失败时保留原有解析，不让 DNS 被清空。
         """
         result: Dict[str, Any] = {"domain": domain, "deleted": 0, "added": 0, "errors": []}
         comment = records[0]["comment"] if records else ""
@@ -255,16 +257,28 @@ class RouterOSClient:
             by_name = await self.list_by_name(client, domain)
             existing = {item.id for item in stale}
             stale = list(stale) + [item for item in by_name if item.id not in existing]
+
+        new_ids: List[str] = []
+        for record in records:
+            ok, record_id, err = await self.add_record(client, record)
+            if ok:
+                result["added"] += 1
+                if record_id:
+                    new_ids.append(record_id)
+            elif err:
+                result["errors"].append(err)
+
+        if result["added"] == 0:
+            result["errors"].append("新记录全部写入失败，已保留原有记录不做清理")
+            result["addresses"] = list(addresses)
+            return result
+
         for item in stale:
+            if item.id and item.id in new_ids:
+                continue
             ok, err = await self.delete_record(client, item.id)
             if ok:
                 result["deleted"] += 1
-            elif err:
-                result["errors"].append(err)
-        for record in records:
-            ok, _record_id, err = await self.add_record(client, record)
-            if ok:
-                result["added"] += 1
             elif err:
                 result["errors"].append(err)
         result["addresses"] = list(addresses)

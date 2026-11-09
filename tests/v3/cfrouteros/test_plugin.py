@@ -266,8 +266,10 @@ def test_check_reports_identity():
 def test_plugin_metadata():
     assert CFRouterOS.plugin_author == "BackspaceM"
     assert CFRouterOS.plugin_config_prefix == "cfrouteros_"
-    assert CFRouterOS.plugin_version == "1.0.0"
-    assert CFRouterOS.get_command()[0]["cmd"] == "/cfrouteros_run"
+    assert CFRouterOS.plugin_version == "1.1.0"
+    assert "GITHUB_USER" not in CFRouterOS.plugin_icon
+    commands = {item["cmd"] for item in CFRouterOS.get_command()}
+    assert commands == {"/cfrouteros_run", "/cfrouteros_check", "/cfrouteros_stop"}
 
 
 def test_form_and_api():
@@ -278,7 +280,12 @@ def test_form_and_api():
     assert defaults["router_port"] == 443
     assert defaults["ttl"] == "10m"
     assert defaults["ip_version"] == "4"
-    assert {item["path"] for item in plugin.get_api()} == {"/run", "/check", "/status", "/clear_cache"}
+    assert defaults["notify_mode"] == "全部"
+    assert defaults["run_now"] is False
+    assert "min_success" in defaults
+    assert {item["path"] for item in plugin.get_api()} == {
+        "/run", "/check", "/status", "/logs", "/clear_cache", "/clear_logs", "/stop"
+    }
 
 
 def test_service_only_when_enabled():
@@ -328,3 +335,187 @@ def test_dry_run_result_not_written():
     result = asyncio.run(plugin._run_async("测试"))
     assert result["written"] == 0
     assert result["domains_total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 优化项回归：立即运行、日志、通知、可靠性
+# ---------------------------------------------------------------------------
+
+def _find_buttons(node):
+    """递归收集详情页 JSON 中的 VBtn。"""
+    found = []
+    if isinstance(node, dict):
+        if node.get("component") == "VBtn":
+            found.append(node)
+        for child in node.get("content") or []:
+            found.extend(_find_buttons(child))
+    elif isinstance(node, list):
+        for child in node:
+            found.extend(_find_buttons(child))
+    return found
+
+
+def test_detail_buttons_use_official_events_schema():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True})
+    buttons = _find_buttons(plugin.get_page())
+    assert len(buttons) >= 4
+    by_text = {item["text"]: item for item in buttons}
+    assert by_text["立即执行"]["events"]["click"] == {
+        "api": "plugin/CFRouterOS/run", "method": "post",
+    }
+    assert by_text["检测路由器"]["events"]["click"]["api"] == "plugin/CFRouterOS/check"
+    assert by_text["刷新页面"]["events"]["click"]["method"] == "get"
+    # 旧写法 actions/VOn/handler 前端 PageRender 完全不识别
+    assert all("actions" not in item for item in buttons)
+
+
+def test_detail_page_has_buttons_even_when_disabled():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": False})
+    page = plugin.get_page()
+    assert _find_buttons(page)
+    assert "运行日志" in str(page)
+
+
+def test_run_now_triggers_once_and_resets_switch():
+    plugin = CFRouterOS()
+    calls = []
+    plugin.update_config = lambda config, plugin_id=None: calls.append(("config", config.get("run_now"))) or True
+    plugin.start_run = lambda **kwargs: calls.append(("run", kwargs)) or True
+    plugin.init_plugin({"enabled": True, "run_now": True, "cron": "0 5 * * *"})
+    assert ("config", False) in calls
+    assert any(kind == "run" and kwargs.get("prefer_thread") is True
+               for kind, kwargs in calls if isinstance(kwargs, dict))
+
+
+def test_notify_modes_filter_success_and_failure():
+    success = {
+        "trigger": "定时", "domains_total": 1, "domains_cf": 1, "probed": 10,
+        "alive": 8, "written": 4, "best": [], "message": "完成", "dry_run": False,
+    }
+    failure = dict(success, written=0, message="路由器连接失败")
+    for mode, should_send in (("全部", True), ("仅异常", False), ("关闭", False)):
+        plugin = CFRouterOS()
+        plugin.init_plugin({"enabled": True, "notify_mode": mode})
+        plugin.messages.clear()
+        plugin._notify_result(success, 1.2)
+        assert bool(plugin.messages) is should_send
+    for mode, should_send in (("全部", True), ("仅异常", True), ("关闭", False)):
+        plugin = CFRouterOS()
+        plugin.init_plugin({"enabled": True, "notify_mode": mode})
+        plugin.messages.clear()
+        plugin._notify_result(failure, 1.2)
+        assert bool(plugin.messages) is should_send
+        if should_send:
+            assert "level" not in plugin.messages[-1]  # V3 Message 不接受 level
+            assert plugin.messages[-1]["title"].endswith("执行异常")
+
+
+def test_notification_uses_mp_channel_and_user_route():
+    from app.sdk.events import Event
+
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True})
+    plugin.messages.clear()
+    plugin._send_message("标题", "正文", channel="telegram", userid="u1")
+    assert plugin.messages[-1]["channel"] == "telegram"
+    assert plugin.messages[-1]["userid"] == "u1"
+    plugin.messages.clear()
+    plugin.handle_plugin_action(Event("plugin_action", {
+        "action": "cfrouteros_stop", "channel": "wechat", "user": "u1",
+    }))
+    assert plugin.messages[-1]["channel"] == "wechat"
+    assert plugin.messages[-1]["userid"] == "u1"
+
+
+def test_logs_persisted_masked_and_clearable():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True, "router_password": "s3cr3t"})
+    plugin._log("INFO", "连接 s3cr3t 成功")
+    logs = plugin.get_data("run_logs")
+    assert logs[0]["level"] == "INFO"
+    assert "s3cr3t" not in logs[0]["message"]
+    assert "***" in logs[0]["message"]
+    assert plugin.api_logs().data["logfile"] == "plugins/cfrouteros.log"
+    assert plugin.api_clear_logs().success is True
+    assert plugin.get_data("run_logs") == []
+
+
+def test_new_api_and_instance_state_isolation():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True})
+    assert plugin.api_status().data["notify_mode"] == "全部"
+    assert plugin.api_stop().success is True
+    assert plugin.api_logs().success is True
+    other = CFRouterOS()
+    assert plugin._state_lock is not other._state_lock
+    assert plugin._stop_event is not other._stop_event
+
+
+def test_resolve_domain_queries_aaaa_in_dual_stack():
+    class _DohResponse:
+        status_code = 200
+
+        def json(self):
+            return {"Answer": [{"type": 28, "data": "2606:4700::1"}]}
+
+    class _DohClient:
+        def __init__(self):
+            self.types = []
+
+        async def request(self, method, url, **kwargs):
+            self.types.append((kwargs.get("params") or {}).get("type"))
+            return _DohResponse()
+
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True, "ip_version": "46"})
+    client = _DohClient()
+    assert asyncio.run(plugin._resolve_domain(client, "hdwing.org")) == ["2606:4700::1"]
+    assert client.types == ["A", "AAAA"]
+
+    plugin4 = CFRouterOS()
+    plugin4.init_plugin({"enabled": True, "ip_version": "4"})
+    client4 = _DohClient()
+    asyncio.run(plugin4._resolve_domain(client4, "hdwing.org"))
+    assert client4.types == ["A"]
+
+
+def test_apply_domain_keeps_old_records_when_writes_fail():
+    class _FailClient(_FakeClient):
+        async def request(self, method, url, **kwargs):
+            if method == "PUT":
+                self.calls.append((method, url, kwargs.get("json")))
+                return _FakeResponse(400, {"detail": "bad record"})
+            return await super().request(method, url, **kwargs)
+
+    routes = {
+        ("GET", "/ip/dns/static"): [
+            {"\\.id": "*1", "name": "hdwing.org", "address": "104.16.0.9",
+             "type": "A", "comment": "cfopt:hdwing.org"},
+        ],
+    }
+    client = _FailClient(routes)
+    api = routeros.RouterOSClient("https://192.168.88.1/rest", "admin", "pwd")
+    records = [cfopt.build_record("hdwing.org", "104.16.0.1")]
+    result = asyncio.run(api.apply_domain(client, "hdwing.org", ["104.16.0.1"], records))
+    assert result["added"] == 0
+    assert result["deleted"] == 0
+    assert not any(call[0] == "DELETE" for call in client.calls)
+    assert "保留原有记录" in result["errors"][-1]
+
+
+def test_apply_domain_writes_before_deleting():
+    routes = {
+        ("GET", "/ip/dns/static"): [
+            {"\\.id": "*1", "name": "hdwing.org", "address": "104.16.0.9",
+             "type": "A", "comment": "cfopt:hdwing.org"},
+        ],
+        ("PUT", "/ip/dns/static"): {"\\.id": "*9"},
+    }
+    client = _FakeClient(routes)
+    api = routeros.RouterOSClient("https://192.168.88.1/rest", "admin", "pwd")
+    records = [cfopt.build_record("hdwing.org", "104.16.0.1")]
+    asyncio.run(api.apply_domain(client, "hdwing.org", ["104.16.0.1"], records))
+    methods = [call[0] for call in client.calls]
+    assert methods.index("PUT") < methods.index("DELETE")
