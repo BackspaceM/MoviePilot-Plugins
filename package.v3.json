@@ -1,0 +1,36 @@
+{
+  "PiecesHashReseed": {
+    "name": "Pieces Hash 辅种",
+    "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验。",
+    "labels": "做种,辅种,站点,下载器",
+    "version": "1.0.0",
+    "icon": "pieceshashreseed_A.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。"
+    }
+  }
+}
+
+{
+  "HDWinGCrossSeed": {
+    "name": "HDWinG 辅种",
+    "description": "从本地下载器取已完成任务，在 HDWinG（hdwing.org）按名称检索候选种子，文件一致时下载原种加入做种，提升站点做种收益。",
+    "labels": "做种",
+    "version": "1.0.0",
+    "release": true,
+    "author": "BackspaceM",
+    "icon": "https://raw.githubusercontent.com/GITHUB_USER/MoviePilot-Plugins/main/icons/hdwingcrossseed.png",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、HDWinG 检索匹配、严格文件级校验、自动辅种与去重缓存。"
+    }
+  }
+}
