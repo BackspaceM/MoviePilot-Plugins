@@ -100,6 +100,7 @@ class CFRouterOS(_PluginBase):
     plugin_version = "1.0.0"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
+    author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "cfrouteros_"
     plugin_order = 77
     auth_level = 1
