@@ -1,0 +1,47 @@
+{
+  "PiecesHashReseed": {
+    "name": "Pieces Hash 辅种",
+    "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验。",
+    "labels": "做种,辅种,站点,下载器",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed_A.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。"
+    }
+  },
+  "CFRouterOS": {
+    "name": "Cloudflare 优选 IP → RouterOS",
+    "description": "识别解析到 Cloudflare 的 PT 站点，实测 Cloudflare 官方网段内 IP 的 TCP 握手延迟，取最优若干写入 RouterOS 的 /ip/dns/static，实现内网 DNS 优选解析；自动收集启用中的站点域名，按备注前缀只清理自己写入的记录。",
+    "labels": "网络",
+    "version": "1.0.0",
+    "release": true,
+    "author": "BackspaceM",
+    "icon": "https://raw.githubusercontent.com/GITHUB_USER/MoviePilot-Plugins/main/icons/cfrouteros.png",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。"
+    }
+  },
+  "瓷器CrossSeed": {
+    "name": "辅种",
+    "description": "从本地下载器取已完成任务，在 瓷器（瓷器.org）按名称检索候选种子，文件一致时下载原种加入做种，提升站点做种收益。",
+    "labels": "做种",
+    "version": "1.0.0",
+    "release": true,
+    "author": "BackspaceM",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/瓷器crossseed.png",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、瓷器 检索匹配、严格文件级校验、自动辅种与去重缓存。"
+    }
+  }
+}
