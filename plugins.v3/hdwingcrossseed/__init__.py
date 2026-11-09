@@ -177,7 +177,9 @@ class HDWinGCrossSeed(_PluginBase):
     )
     plugin_version = "1.0.0"
     plugin_label = "站点,辅种,HDWinG"
-    plugin_author = "Marvis"
+    plugin_author = "BackspaceM"
+    author_url = "https://github.com/BackspaceM"
+    plugin_icon = "hdwingcrossseed.png"
     plugin_config_prefix = "hdwingcrossseed_"
     plugin_order = 88
     auth_level = 1
