@@ -266,10 +266,11 @@ def test_check_reports_identity():
 def test_plugin_metadata():
     assert CFRouterOS.plugin_author == "BackspaceM"
     assert CFRouterOS.plugin_config_prefix == "cfrouteros_"
-    assert CFRouterOS.plugin_version == "1.1.0"
+    assert CFRouterOS.plugin_version == "1.2.0"
     assert "GITHUB_USER" not in CFRouterOS.plugin_icon
     commands = {item["cmd"] for item in CFRouterOS.get_command()}
-    assert commands == {"/cfrouteros_run", "/cfrouteros_check", "/cfrouteros_stop"}
+    assert commands == {"/cfrouteros_run", "/cfrouteros_check",
+                        "/cfrouteros_pool", "/cfrouteros_stop"}
 
 
 def test_form_and_api():
@@ -284,8 +285,15 @@ def test_form_and_api():
     assert defaults["run_now"] is False
     assert "min_success" in defaults
     assert {item["path"] for item in plugin.get_api()} == {
-        "/run", "/check", "/status", "/logs", "/clear_cache", "/clear_logs", "/stop"
+        "/run", "/check", "/status", "/live", "/logs", "/refresh_pool",
+        "/clear_cache", "/clear_logs", "/stop",
     }
+    # v1.2 默认零 DoH 依赖，且带第三方 IP 池入口
+    assert defaults["check_mode"] == "all"
+    assert defaults["check_fallback"] is True
+    assert defaults["cidr_source"] == "official+custom"
+    assert "pool_urls" in defaults and "pool_text" in defaults
+    assert defaults["official_v4_url"] == cfopt.CF_V4_LIST_URL
 
 
 def test_service_only_when_enabled():
@@ -519,3 +527,365 @@ def test_apply_domain_writes_before_deleting():
     asyncio.run(api.apply_domain(client, "hdwing.org", ["104.16.0.1"], records))
     methods = [call[0] for call in client.calls]
     assert methods.index("PUT") < methods.index("DELETE")
+
+
+# ---------------------------------------------------------------------------
+# v1.2.0：去 DoH 依赖、第三方 IP 池、逐站点实时日志
+# ---------------------------------------------------------------------------
+
+def test_parse_ip_pool_text_formats():
+    parsed = cfopt.parse_ip_pool("""
+# 第三方维护的池
+104.16.0.1
+104.16.0.2:443 12ms
+104.16.0.3, 104.17.1.1; 104.18.2.2
+104.16.0.0/13
+[2606:4700::1]:443
+1.1.1.1# CF DNS
+192.168.1.1
+bad-token
+""")
+    assert "104.16.0.1" in parsed["v4"] and "104.16.0.2" in parsed["v4"]
+    assert "104.17.1.1" in parsed["v4"] and "1.1.1.1" in parsed["v4"]
+    assert "2606:4700::1" in parsed["v6"]
+    assert "104.16.0.0/13" in parsed["cidrs"]
+    assert "192.168.1.1" not in parsed["ips"]
+
+
+def test_parse_ip_pool_json_formats():
+    assert cfopt.parse_ip_pool('["104.16.0.9", "104.16.0.10"]')["ips"] == [
+        "104.16.0.9", "104.16.0.10",
+    ]
+    obj = cfopt.parse_ip_pool('{"data": [{"ip": "104.16.1.1", "ms": 12}, {"ip": "104.16.1.2"}]}')
+    assert obj["ips"] == ["104.16.1.1", "104.16.1.2"]
+    nested = cfopt.parse_ip_pool('{"ips": {"ipv4": ["172.64.0.1"], "ipv6": ["2606:4700::2"]}}')
+    assert "172.64.0.1" in nested["ips"] and "2606:4700::2" in nested["ips"]
+    assert cfopt.parse_ip_pool("")["ips"] == []
+
+
+def test_parse_ip_pool_rejects_private_and_invalid():
+    parsed = cfopt.parse_ip_pool("10.0.0.1\n127.0.0.1\n::1\n999.1.1.1\n104.16.0.5")
+    assert parsed["ips"] == ["104.16.0.5"]
+
+
+def test_classify_domain_default_is_independent_of_doh():
+    nets = cfopt.build_networks()
+    accepted, reason, _ = cfopt.classify_domain([], nets, mode="all")
+    assert accepted and "未做 DNS 判定" in reason
+
+
+def test_classify_domain_by_cloudflare_cdn_ip_and_fallback():
+    nets = cfopt.build_networks()
+    accepted, reason, cf = cfopt.classify_domain(
+        ["8.8.8.8", "104.16.0.1"], nets, mode="system", fallback=False,
+    )
+    assert accepted and cf == ["104.16.0.1"] and "CDN IP" in reason
+    skipped, reason, _ = cfopt.classify_domain(["8.8.8.8"], nets, mode="system", fallback=False)
+    assert not skipped and "已跳过" in reason
+    # 解析失败时按 fallback 决定，避免重演「全部域名被跳过」
+    failed, reason, _ = cfopt.classify_domain([], nets, mode="doh", fallback=True)
+    assert failed and "仍纳入" in reason
+    failed2, reason2, _ = cfopt.classify_domain([], nets, mode="doh", fallback=False)
+    assert not failed2 and "已跳过" in reason2
+
+
+def test_build_candidate_pool_priority_and_strict():
+    nets = cfopt.build_networks()
+    pool = cfopt.build_candidate_pool(
+        ["104.16.9.9"], ["104.16.8.8"], ["104.16.7.7"], 3,
+    )
+    assert pool == ["104.16.9.9", "104.16.7.7", "104.16.8.8"]
+    strict = cfopt.build_candidate_pool(
+        ["8.8.8.8", "104.16.9.9"], [], [], 5, networks=nets, strict_cf=True,
+    )
+    assert strict == ["104.16.9.9"]
+
+
+def test_parse_doh_urls_uses_builtin_multi_source():
+    assert cfopt.parse_doh_urls("") == list(cfopt.DEFAULT_DOH_URLS)
+    urls = cfopt.parse_doh_urls("https://a.example/dns-query\nhttps://b.example/dns-query")
+    assert len(urls) == 2
+    assert cfopt.parse_doh_urls("not-a-url\n# 注释") == list(cfopt.DEFAULT_DOH_URLS)
+
+
+def test_resolve_system_dns_uses_socket_getaddrinfo():
+    original = socket.getaddrinfo
+    socket.getaddrinfo = lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("104.16.0.1", 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("104.16.0.2", 0)),
+    ]
+    try:
+        ips = asyncio.run(cfopt.resolve_system_dns("hdwing.org", timeout=1.0))
+    finally:
+        socket.getaddrinfo = original
+    assert ips == ["104.16.0.1", "104.16.0.2"]
+
+
+def _fake_sources(plugin, pool_ips=None, cidrs=None):
+    """替换 IP 来源加载，避免测试访问网络。"""
+    from app.plugins import cfrouteros as mod
+
+    async def _load(http, force=False):
+        networks = cfopt.build_networks()
+        summary = {
+            "networks": networks,
+            "pool_ips": list(pool_ips or []),
+            "pool_cidrs": list(cidrs or []),
+            "sources": [{"name": "测试来源", "url": "", "ok": True,
+                         "ips": len(pool_ips or []), "cidrs": 0, "error": "", "cached": False}],
+            "official_ok": True,
+            "source_mode": "builtin",
+            "network_count": len(networks),
+            "pool_count": len(pool_ips or []),
+            "updated_text": "2026-11-10 00:00:00",
+            "from_cache": False,
+        }
+        plugin.save_data("pool_sources", {k: v for k, v in summary.items() if k != "networks"})
+        return summary
+
+    original = plugin._load_ip_sources
+    plugin._load_ip_sources = _load
+    return original
+
+
+def _fake_probes():
+    from app.plugins import cfrouteros as mod
+
+    async def _probe(ips, **kwargs):
+        return [cfopt.ProbeResult(ip=ip, latency_ms=10.0 + index, ok=True)
+                for index, ip in enumerate(ips)]
+
+    original = mod.probe_many
+    mod.probe_many = _probe
+    return original
+
+
+def test_default_mode_never_skips_domains_without_doh():
+    """回归用户报告：DoH 不可达时所有域名都显示「跳过」。"""
+    from app.plugins import cfrouteros as mod
+
+    plugin = CFRouterOS()
+    plugin.init_plugin({
+        "enabled": True, "dry_run": True, "auto_sites": False,
+        "domains": "hdwing.org\npt.example.com",
+        "check_mode": "all", "check_fallback": True, "log_resolved_ips": False,
+        "cidr_source": "builtin", "refresh_cidrs": False,
+        "probe_count": 4, "probe_concurrency": 2, "probe_timeout": 0.2,
+    })
+    plugin._stop_event.clear()
+    original_load = _fake_sources(plugin)
+    original_probe = _fake_probes()
+    try:
+        result = asyncio.run(plugin._run_async("测试"))
+    finally:
+        plugin._load_ip_sources = original_load
+        mod.probe_many = original_probe
+    assert result["domains_total"] == 2
+    assert result["domains_cf"] == 2
+    assert all(row["state"] != "跳过" for row in result["domains"])
+    assert result["best"] and result["best_latency"] > 0
+    logs = [item["message"] for item in plugin.get_data("run_logs")]
+    assert any("[站点" in line and "hdwing.org" in line for line in logs)
+    assert any("[写入]" in line and "仅测速" in line for line in logs)
+    assert any("[判定]" in line and "纳入 2" in line for line in logs)
+
+
+def test_doh_failure_fallback_keeps_sites_eligible():
+    """DoH 判定模式下多源全失败，解析为空仍按 fallback 纳入。"""
+    from app.plugins import cfrouteros as mod
+
+    async def _no_resolution(http, domains):
+        return ({item: [] for item in domains}, {item: "解析失败" for item in domains})
+
+    for fallback, expected in ((True, 1), (False, 0)):
+        plugin = CFRouterOS()
+        plugin.init_plugin({
+            "enabled": True, "dry_run": True, "auto_sites": False,
+            "domains": "hdwing.org", "check_mode": "doh",
+            "check_fallback": fallback, "cidr_source": "builtin", "refresh_cidrs": False,
+        })
+        plugin._stop_event.clear()
+        plugin._resolve_domains = _no_resolution
+        original_load = _fake_sources(plugin)
+        original_probe = _fake_probes()
+        try:
+            result = asyncio.run(plugin._run_async("测试"))
+        finally:
+            plugin._load_ip_sources = original_load
+            mod.probe_many = original_probe
+        assert result["domains_cf"] == expected
+
+
+def test_run_logs_include_site_ips_best_ips_and_write_status():
+    """逐站点日志应包含原始 IP、优选 IP 与 RouterOS 写入结果。"""
+    from app.plugins import cfrouteros as mod
+
+    plugin = CFRouterOS()
+    plugin.init_plugin({
+        "enabled": True, "dry_run": True, "auto_sites": False,
+        "domains": "hdwing.org", "check_mode": "all", "log_resolved_ips": True,
+        "cidr_source": "builtin", "refresh_cidrs": False,
+        "probe_count": 3, "top_n": 2,
+    })
+    plugin._stop_event.clear()
+
+    async def _dns(domain, **kwargs):
+        return ["104.16.0.1", "104.16.0.2"]
+
+    original_dns = mod.resolve_system_dns
+    mod.resolve_system_dns = _dns
+    original_load = _fake_sources(plugin)
+    original_probe = _fake_probes()
+    try:
+        result = asyncio.run(plugin._run_async("测试"))
+    finally:
+        mod.resolve_system_dns = original_dns
+        plugin._load_ip_sources = original_load
+        mod.probe_many = original_probe
+    logs = "\n".join(item["message"] for item in plugin.get_data("run_logs"))
+    assert "104.16.0.1" in logs
+    assert "[站点" in logs and "来源=系统DNS" in logs
+    assert "[优选]" in logs and "[写入]" in logs
+    row = result["domains"][0]
+    assert row["resolved"] == ["104.16.0.1", "104.16.0.2"]
+    assert len(row["addresses"]) == 2
+    assert row["state"] == "跳过（仅测速）"
+    assert "未写入" in row["message"]
+
+
+def test_ip_pool_sources_merge_and_fallback_cache():
+    class _Resp:
+        def __init__(self, text):
+            self.status_code = 200
+            self.text = text
+
+    class _Http:
+        def __init__(self, mapping):
+            self.mapping = mapping
+
+        async def request(self, method, url, **kwargs):
+            return _Resp(self.mapping[url]) if url in self.mapping else None
+
+    plugin = CFRouterOS()
+    plugin.init_plugin({
+        "enabled": True, "cidr_source": "official+custom",
+        "pool_urls": "https://pool.example/list.txt",
+        "pool_text": "104.16.7.7",
+        "refresh_cidrs": True,
+    })
+    mapping = {
+        cfopt.CF_V4_LIST_URL: "104.16.0.0/13\n172.64.0.0/13",
+        cfopt.CF_V6_LIST_URL: "2606:4700::/32",
+        "https://pool.example/list.txt": "104.16.9.9\n104.16.9.10\n104.16.100.0/24",
+    }
+    summary = asyncio.run(plugin._load_ip_sources(_Http(mapping), force=True))
+    assert summary["official_ok"] is True
+    assert "104.16.9.9" in summary["pool_ips"] and "104.16.7.7" in summary["pool_ips"]
+    assert "104.16.100.0/24" in summary["pool_cidrs"]
+    sources = plugin.get_data("pool_sources")["sources"]
+    assert any(item["url"] == "https://pool.example/list.txt" and item["ok"] for item in sources)
+    assert "networks" not in plugin.get_data("pool_sources")
+
+    # 全部源拉取失败时使用缓存与内置段，不清空池
+    failed = asyncio.run(plugin._load_ip_sources(_Http({}), force=True))
+    assert "104.16.9.9" in failed["pool_ips"]
+    assert failed["official_ok"] is False
+    assert failed["network_count"] > 0
+
+
+def test_refresh_pool_api_forces_fetch_even_when_auto_off():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True, "refresh_cidrs": False, "cidr_source": "builtin"})
+    response = plugin.api_refresh_pool()
+    assert response.success is True
+    assert "网段" in response.message
+    assert "networks" not in (response.data or {})
+    logs = "\n".join(item["message"] for item in plugin.get_data("run_logs"))
+    assert "手动刷新完成" in logs
+
+
+def test_live_progress_and_status_api():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True})
+    plugin._update_live(stage="测速中", done=3, total=10, current="104.16.0.1")
+    assert plugin.api_live().data["live"]["stage"] == "测速中"
+    assert plugin.api_status().data["live"]["done"] == 3
+    assert plugin.api_status().data["check_mode"] == "all"
+    assert plugin.api_logs().data["live"]["total"] == 10
+
+
+def test_exclude_domains_filters_auto_sites():
+    plugin = CFRouterOS()
+    plugin.init_plugin({
+        "domains": "a.example.com\nb.example.com",
+        "auto_sites": True, "exclude_domains": "b.example.com\nhdwing.org",
+    })
+    assert plugin._collect_domains() == ["a.example.com"]
+
+
+def test_apply_domain_reports_written_addresses():
+    routes = {
+        ("GET", "/ip/dns/static"): [
+            {"\\.id": "*1", "name": "hdwing.org", "address": "104.16.0.9",
+             "type": "A", "comment": "cfopt:hdwing.org"},
+        ],
+        ("PUT", "/ip/dns/static"): {"\\.id": "*9"},
+    }
+    client = _FakeClient(routes)
+    api = routeros.RouterOSClient("https://192.168.88.1/rest", "admin", "pwd")
+    records = [cfopt.build_record("hdwing.org", "104.16.0.1")]
+    result = asyncio.run(api.apply_domain(client, "hdwing.org", ["104.16.0.1"], records))
+    assert result["written_addresses"] == ["104.16.0.1"]
+    assert result["failed_addresses"] == []
+    assert result["added"] == 1
+
+
+def test_notification_includes_site_details():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True, "notify_mode": "全部"})
+    plugin.messages.clear()
+    result = {
+        "trigger": "定时", "domains_total": 1, "domains_cf": 1, "probed": 4,
+        "alive": 3, "written": 2, "message": "完成", "dry_run": False,
+        "check_mode": "all",
+        "best": [{"ip": "104.16.0.1", "latency_ms": 12.3}],
+        "domains": [{
+            "domain": "hdwing.org", "state": "已写入", "resolved": ["104.16.0.9"],
+            "addresses": ["104.16.0.1"], "added": 2, "deleted": 2, "reason": "",
+        }],
+    }
+    plugin._notify_result(result, 1.5)
+    text = plugin.messages[-1]["text"]
+    assert "站点明细" in text and "hdwing.org" in text
+    assert "104.16.0.9" in text and "写入=是" in text
+    assert "level" not in plugin.messages[-1]
+
+
+def test_log_masks_url_credentials_and_tokens():
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True, "router_password": "s3cr3t"})
+    plugin._log("INFO", "拉取 https://user:pwd@host/x?token=abcd1234 口令 s3cr3t")
+    content = plugin.get_data("run_logs")[0]["message"]
+    assert "pwd" not in content and "abcd1234" not in content and "s3cr3t" not in content
+    assert "***" in content
+
+
+def test_doh_dead_sources_are_skipped_within_one_run():
+    class _DeadHttp:
+        def __init__(self):
+            self.calls = 0
+
+        async def request(self, *args, **kwargs):
+            self.calls += 1
+            raise OSError("unreachable")
+
+    plugin = CFRouterOS()
+    plugin.init_plugin({"enabled": True, "check_mode": "doh"})
+    http = _DeadHttp()
+    assert asyncio.run(plugin._resolve_domain(http, "hdwing.org")) == []
+    first_calls = http.calls
+    assert first_calls == len(cfopt.DEFAULT_DOH_URLS)
+    # 已确认不可达的源本轮内不再重复请求，避免每个域名都等一轮超时
+    assert asyncio.run(plugin._resolve_domain(http, "pt.example.com")) == []
+    assert http.calls == first_calls
+    assert len(plugin._doh_dead) == len(cfopt.DEFAULT_DOH_URLS)

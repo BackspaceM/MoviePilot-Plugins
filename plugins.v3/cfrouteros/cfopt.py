@@ -1,20 +1,23 @@
 """Cloudflare 优选 IP 的纯逻辑与探测实现。
 
 职责边界：
-- 网段解析与归属判断（内置官方段 + 可刷新）
-- DoH 解析：判断域名是否真的指向 Cloudflare
+- 网段解析与 Cloudflare CDN 归属判断（内置官方段 + 官方刷新 + 自定义池）
+- IP 池解析：兼容纯文本 / JSON / CIDR / IP:端口 / IPv6 等第三方维护格式
+- 域名判定：默认不做任何 DNS 探测，可选系统 DNS 或多源 DoH 判定
 - TCP/TLS 握手延迟探测与排序
 - DNS static 记录的字段构造
 
-除 asyncio 探测外均为纯函数，便于离线单测。
+除 asyncio 探测与系统 DNS 外均为纯函数，便于离线单测。
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import random
 import re
+import socket
 import ssl
 import time
 from dataclasses import dataclass
@@ -50,10 +53,29 @@ DEFAULT_IPV6_CIDRS: Tuple[str, ...] = (
 )
 
 DEFAULT_DOH_URL = "https://cloudflare-dns.com/dns-query"
+# 多源 DoH：仅在「DoH 判定」模式下使用，任一成功即可，失败会自动回退系统 DNS
+DEFAULT_DOH_URLS: Tuple[str, ...] = (
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+    "https://doh.pub/dns-query",
+    "https://dns.alidns.com/dns-query",
+)
 CF_V4_LIST_URL = "https://www.cloudflare.com/ips-v4"
 CF_V6_LIST_URL = "https://www.cloudflare.com/ips-v6"
 
+# 站点判定方式：all 不依赖任何 DNS 服务；system 用容器 DNS；doh 用多源 DoH
+CHECK_MODES: Tuple[str, ...] = ("all", "system", "doh")
+DEFAULT_CHECK_MODE = "all"
+DEFAULT_PROBE_SNI = "cloudflare.com"
+
 _DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_IPV4_PORT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?$")
+_IPV6_PORT_RE = re.compile(r"^\[([0-9a-fA-F:.]+)\](?::\d+)?$")
+_PREFIX_RE = re.compile(r"^(?:ip|addr|address|host|server|value)\s*[:=]\s*", re.I)
+_JSON_IP_KEYS = (
+    "ip", "ips", "address", "addresses", "host", "value", "data", "result",
+    "list", "records", "ipv4", "ipv6", "cloudflare", "cf", "items", "cdn",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +118,20 @@ def build_networks(
     v6 = parse_cidrs(ipv6_text) or parse_cidrs("\n".join(DEFAULT_IPV6_CIDRS))
     nets.extend(v6)
     return nets
+
+
+def merge_networks(*groups: Sequence[ipaddress._BaseNetwork]) -> List[ipaddress._BaseNetwork]:
+    """合并多组网端并按文本去重（内置 + 官方 + 自定义 CIDR 池）。"""
+    result: List[ipaddress._BaseNetwork] = []
+    seen: set[str] = set()
+    for group in groups:
+        for net in group or []:
+            key = str(net)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(net)
+    return result
 
 
 def is_cloudflare_ip(ip: str, networks: Sequence[ipaddress._BaseNetwork]) -> bool:
@@ -159,7 +195,167 @@ def _random_host(net: ipaddress._BaseNetwork, rng: random.Random) -> ipaddress._
 
 
 # ---------------------------------------------------------------------------
-# 域名与 DoH
+# IP 池解析（第三方 / 个人维护的地址列表）
+# ---------------------------------------------------------------------------
+
+def is_public_ip(value: str) -> bool:
+    """过滤私有、回环、链路本地、组播、保留与未指定地址。"""
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return not (
+        addr.is_private or addr.is_loopback or addr.is_link_local
+        or addr.is_multicast or addr.is_reserved or addr.is_unspecified
+    )
+
+
+def clean_ip_token(token: Any) -> str:
+    """清洗单个 IP 片段：去注释、常见前缀、引号与端口。"""
+    text = str(token or "").strip()
+    if not text:
+        return ""
+    text = text.split("#")[0].strip()
+    text = _PREFIX_RE.sub("", text).strip()
+    # [IPv6]:端口必须在剥离方括号之前识别
+    match = _IPV6_PORT_RE.match(text)
+    if match:
+        return match.group(1)
+    text = text.strip("\"'`<>(){}[]")
+    match = _IPV4_PORT_RE.match(text)
+    if match:
+        return match.group(1)
+    return text
+
+
+def _collect_json_tokens(value: Any, out: List[str]) -> None:
+    """从任意 JSON 结构中递归收集可能是 IP 的字符串。"""
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return
+    elif isinstance(value, dict):
+        hit = False
+        for key in _JSON_IP_KEYS:
+            if key in value:
+                hit = True
+                _collect_json_tokens(value[key], out)
+        if not hit:
+            for item in value.values():
+                if isinstance(item, str):
+                    out.append(item)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            _collect_json_tokens(item, out)
+
+
+def parse_ip_pool(text: Optional[str]) -> Dict[str, Any]:
+    """
+    解析第三方 / 个人维护的 IP 池内容，兼容：
+
+    - 每行一个 IP 或 CIDR，支持逗号/分号/空格分隔与 `#` 注释
+    - `IP:端口`、`[IPv6]:端口`、`IP 延迟/ms` 等常见格式
+    - JSON 数组、对象（ips/data/list/ipv4/... 字段）与对象数组
+
+    返回 ``{"ips", "v4", "v6", "cidrs", "tokens"}``；
+    无效、私有与非公网地址自动忽略，结果保序去重。
+    """
+    raw = str(text or "").strip()
+    result: Dict[str, Any] = {"ips": [], "v4": [], "v6": [], "cidrs": [], "tokens": 0}
+    if not raw:
+        return result
+
+    tokens: List[str] = []
+    if raw.startswith(("{", "[")):
+        try:
+            _collect_json_tokens(json.loads(raw), tokens)
+        except (ValueError, TypeError):
+            tokens = []
+    if not tokens:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "//")):
+                continue
+            tokens.extend(re.split(r"[\s,;|]+", line))
+
+    ips: List[str] = []
+    cidrs: List[str] = []
+    seen_ips: set[str] = set()
+    seen_cidrs: set[str] = set()
+    for token in tokens:
+        cleaned = clean_ip_token(token)
+        if not cleaned:
+            continue
+        try:
+            addr = ipaddress.ip_address(cleaned)
+        except ValueError:
+            try:
+                net = ipaddress.ip_network(cleaned, strict=False)
+            except ValueError:
+                continue
+            key = str(net)
+            if key not in seen_cidrs:
+                seen_cidrs.add(key)
+                cidrs.append(key)
+            continue
+        value = str(addr)
+        if value in seen_ips or not is_public_ip(value):
+            continue
+        seen_ips.add(value)
+        ips.append(value)
+
+    result["tokens"] = len(tokens)
+    result["ips"] = ips
+    result["v4"] = [item for item in ips if ipaddress.ip_address(item).version == 4]
+    result["v6"] = [item for item in ips if ipaddress.ip_address(item).version == 6]
+    result["cidrs"] = cidrs
+    return result
+
+
+def build_candidate_pool(
+    pool_ips: Sequence[str],
+    sampled: Sequence[str],
+    previous: Sequence[str],
+    limit: int,
+    *,
+    networks: Optional[Sequence[ipaddress._BaseNetwork]] = None,
+    strict_cf: bool = False,
+) -> List[str]:
+    """
+    组装本轮测速候选：自定义池 IP 优先 > 上轮优选 > 官方段随机采样。
+
+    `strict_cf=True` 时，自定义池单 IP 也必须落在给定 Cloudflare 网段内。
+    """
+    if limit <= 0:
+        return []
+    result: List[str] = []
+    seen: set[str] = set()
+    for index, group in enumerate((pool_ips, previous, sampled)):
+        for raw in group:
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            if index == 0 and strict_cf and networks and not is_cloudflare_ip(value, networks):
+                continue
+            seen.add(value)
+            result.append(value)
+            if len(result) >= limit:
+                return result
+    return result
+
+
+def format_ip_list(ips: Sequence[str], limit: int = 6) -> str:
+    """日志友好的 IP 列表文本。"""
+    values = [str(item) for item in (ips or []) if item]
+    if not values:
+        return "-"
+    if len(values) <= limit:
+        return ", ".join(values)
+    return ", ".join(values[:limit]) + f" …（共 {len(values)} 个）"
+
+
+# ---------------------------------------------------------------------------
+# 域名与解析
 # ---------------------------------------------------------------------------
 
 def normalize_domains(text: Optional[Any]) -> List[str]:
@@ -210,6 +406,79 @@ def parse_doh_answer(payload: Any) -> List[str]:
             continue
         result.append(data)
     return result
+
+
+def parse_doh_urls(text: Optional[str]) -> List[str]:
+    """解析多行 DoH 地址；为空时返回内置多源列表。"""
+    urls: List[str] = []
+    for raw in re.split(r"[\s,;]+", str(text or "")):
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            continue
+        if value.startswith(("http://", "https://")) and value not in urls:
+            urls.append(value)
+    return urls or list(DEFAULT_DOH_URLS)
+
+
+def classify_domain(
+    resolved: Sequence[str],
+    networks: Sequence[ipaddress._BaseNetwork],
+    *,
+    mode: str = DEFAULT_CHECK_MODE,
+    fallback: bool = True,
+) -> Tuple[bool, str, List[str]]:
+    """
+    判定域名是否应纳入优选。
+
+    - ``all``：不做任何 DNS 探测，配置的域名一律视为 Cloudflare 站点（默认，零网络依赖）
+    - ``system`` / ``doh``：解析出的 IP 是否落在 Cloudflare CDN 网段
+    - 判定失败（解析不到 / 不是 CF）时按 ``fallback`` 决定是否仍纳入
+
+    返回 ``(是否纳入, 原因, 命中的 Cloudflare IP)``。
+    """
+    if mode not in CHECK_MODES or mode == "all":
+        return True, "按配置直接纳入（未做 DNS 判定）", []
+    cf = cloudflare_ips(resolved, networks)
+    if cf:
+        return True, f"解析到 Cloudflare CDN IP（{len(cf)} 个）", cf
+    if not resolved:
+        return bool(fallback), (
+            "DNS/DoH 解析失败或无 A 记录" + ("，按配置仍纳入" if fallback else "，已跳过")
+        ), []
+    return bool(fallback), (
+        "解析 IP 不属于 Cloudflare 网段" + ("，按配置仍纳入" if fallback else "，已跳过")
+    ), []
+
+
+async def resolve_system_dns(
+    domain: str,
+    *,
+    timeout: float = 3.0,
+    ipv6: bool = False,
+) -> List[str]:
+    """
+    用容器 / 宿主机的系统 DNS 解析域名，不依赖任何 DoH 服务。
+
+    在线程池里执行 getaddrinfo，避免阻塞事件循环；超时或失败返回空列表。
+    """
+    loop = asyncio.get_running_loop()
+    family = socket.AF_UNSPEC if ipv6 else socket.AF_INET
+
+    def _lookup() -> List[str]:
+        infos = socket.getaddrinfo(domain, None, family=family, type=socket.SOCK_STREAM)
+        found: List[str] = []
+        for info in infos:
+            value = str(info[4][0])
+            if value not in found:
+                found.append(value)
+        return found
+
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _lookup), timeout=max(0.5, float(timeout))
+        )
+    except Exception:  # noqa: BLE001 - DNS 不可用时交由 fallback 处理
+        return []
 
 
 # ---------------------------------------------------------------------------

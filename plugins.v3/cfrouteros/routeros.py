@@ -250,7 +250,14 @@ class RouterOSClient:
         可靠性：先写入新记录，确认至少一条成功后再清理旧记录。旧记录快照在写入前获取，
         避免新写入的同备注记录被一起删掉；写入全部失败时保留原有解析，不让 DNS 被清空。
         """
-        result: Dict[str, Any] = {"domain": domain, "deleted": 0, "added": 0, "errors": []}
+        result: Dict[str, Any] = {
+            "domain": domain,
+            "deleted": 0,
+            "added": 0,
+            "errors": [],
+            "written_addresses": [],
+            "failed_addresses": [],
+        }
         comment = records[0]["comment"] if records else ""
         stale = await self.list_records(client, comment=comment) if comment else []
         if cleanup_names:
@@ -260,13 +267,17 @@ class RouterOSClient:
 
         new_ids: List[str] = []
         for record in records:
+            address = str(record.get("address") or "")
             ok, record_id, err = await self.add_record(client, record)
             if ok:
                 result["added"] += 1
+                result["written_addresses"].append(address)
                 if record_id:
                     new_ids.append(record_id)
-            elif err:
-                result["errors"].append(err)
+            else:
+                result["failed_addresses"].append(address)
+                if err:
+                    result["errors"].append(err)
 
         if result["added"] == 0:
             result["errors"].append("新记录全部写入失败，已保留原有记录不做清理")

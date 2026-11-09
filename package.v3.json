@@ -17,15 +17,16 @@
   },
   "CFRouterOS": {
     "name": "Cloudflare 优选 IP → RouterOS",
-    "description": "识别解析到 Cloudflare 的 PT 站点，实测 Cloudflare 官方网段内 IP 的 TCP 握手延迟，取最优若干写入 RouterOS 的 /ip/dns/static，实现内网 DNS 优选解析；自动收集启用中的站点域名，按备注前缀只清理自己写入的记录。",
+    "description": "默认零 DoH 依赖，把配置的 PT 站点域名直接视为 Cloudflare CDN 站点；自动刷新 Cloudflare 官方 ips-v4/ips-v6，并支持多个第三方/个人维护的 IP 池地址（纯文本/JSON/CIDR/IPv6），池内 IP 优先参与 TCP/TLS 测速；取最优若干写入 RouterOS /ip/dns/static。逐站点原始 IP、优选 IP 与写入结果通过 SSE 实时日志查看，支持 MP 通知、cron、试运行与先写后删保护。",
     "labels": "网络",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "release": true,
     "author": "BackspaceM",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.2.0": "去掉对单一 DoH 的强依赖：新增站点判定方式（默认不检测全部纳入 / 系统 DNS 判定 CDN IP / 多源 DoH 判定）与判定失败仍纳入开关，彻底解决所有域名显示「DoH 解析失败或无 A 记录」被跳过；支持多个第三方或个人维护的 Cloudflare IP 池 URL（纯文本/JSON/CIDR/IP:端口/IPv6）、手动 IP 池、IP 来源模式、刷新周期与按源缓存回退，官方网段来源在界面可见；逐站点原始 IP、判定来源、优选 IP 与 RouterOS 写入成败写入 INFO 日志，MP「查看日志」经 SSE 实时推送，另增实时进度 /live、站点明细与 IP 池来源面板、/refresh_pool 与 /cfrouteros_pool 命令；通知带站点明细，补排除域名、TLS SNI 固定、池 IP 配额、候选分批可中止、日志脱敏增强与写入地址明细。",
       "v1.1.0": "新增配置页「立即执行一次」与详情页有效按钮；修复插件日志不可见（关键路径 INFO 日志 + 详情页运行日志 + /logs）；通知改用 MoviePilot 通知链并支持全部/仅异常/关闭三种模式，远程命令按来源渠道回复；补 AAAA 解析、先写后删保护、最少可用 IP 表单项、实例级运行锁、事件循环兼容与图标地址修复。",
       "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。"
     }
