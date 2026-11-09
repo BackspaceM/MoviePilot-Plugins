@@ -1,0 +1,14 @@
+# 运行期与本地产物，勿入库
+__pycache__/
+*.py[cod]
+*.pyo
+releases/
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# 本地环境与凭据（插件 Cookie 只应存在于 MoviePilot 本机配置，禁止提交）
+.env
+.env.*
+*.local.json
+config.local.*
