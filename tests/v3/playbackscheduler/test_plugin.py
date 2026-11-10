@@ -247,11 +247,7 @@ def test_get_api_and_command():
     p = _plugin()
     apis = p.get_api()
     assert {a["path"] for a in apis} == {
-        "/plugin/PlaybackScheduler/run",
-        "/plugin/PlaybackScheduler/reset",
-        "/plugin/PlaybackScheduler/status",
-        "/plugin/PlaybackScheduler/stop",
-        "/plugin/PlaybackScheduler/clear_history",
+        "/run", "/reset", "/status", "/stop", "/clear_history",
     }
     cmds = p.get_command()
     assert {c["cmd"] for c in cmds} == {

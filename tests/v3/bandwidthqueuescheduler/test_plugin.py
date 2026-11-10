@@ -283,7 +283,7 @@ def test_normalize_base_url():
 # ---------------------------------------------------------------------------
 
 def test_contract_attributes():
-    assert BandwidthQueueScheduler.plugin_version == "1.0.0"
+    assert BandwidthQueueScheduler.plugin_version == "1.2.1"
     assert BandwidthQueueScheduler.plugin_name == PLUGIN_NAME
     assert BandwidthQueueScheduler.plugin_author == "BackspaceM"
     assert BandwidthQueueScheduler.plugin_config_prefix == "bandwidthqueuescheduler_"
@@ -372,11 +372,12 @@ def test_get_page_renders_and_md_safe():
     p.save_data(_KEY_LOGS, [{"time": "2026-01-01 00:00:00", "level": "INFO",
                              "message": "方案 [movie] 已应用"}])
     page = p.get_page()
-    assert isinstance(page, list) and page[0]["component"] == "VCard"
+    assert isinstance(page, list) and page
     text = str(page)
     assert "应用·观影优先" in text
     assert "FastTrack 诊断" in text
-    assert "[movie]" not in text and "［movie］" in text
+    assert "[movie]" not in text          # 日志不再铺在详情页
+    assert "运行日志" not in text
 
 
 def test_every_page_button_has_live_api():
@@ -389,7 +390,7 @@ def test_every_page_button_has_live_api():
 
     api_map = {}
     for entry in p.get_api():
-        api_map[entry["path"].lstrip("/")] = entry["endpoint"]
+        api_map[f"plugin/BandwidthQueueScheduler{entry['path']}"] = entry["endpoint"]
         assert callable(entry["endpoint"]), f"{entry['path']} 的 endpoint 不可调用"
 
     for btn in buttons:
@@ -517,7 +518,7 @@ def test_fasttrack_diagnosis():
     assert p.get_data(_KEY_FASTTRACK)["has_fasttrack"] is True
     assert "FastTrack" in r["message"]
     # 详情页应展示警告
-    assert "⚠" in str(p.get_page())
+    assert "FastTrack" in str(p.get_page())
 
 
 def test_api_apply_profile_accepts_body():

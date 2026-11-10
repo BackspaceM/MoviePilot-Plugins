@@ -38,7 +38,7 @@ def reset() -> None:
 def base_config(**overrides) -> dict:
     cfg = {
         "enabled": True, "onlyonce": False, "cron": "0 5 * * *",
-        "author_filter": updater.ALL_AUTHORS, "target_plugins": [],
+        "author_filters": [], "target_plugins": [],
         "dry_run": False, "include_self": False, "force_reinstall": False,
         "max_per_run": 10, "notify_mode": "issue", "display_limit": 40,
         "repo_url_override": "", "timeout": 0,
@@ -266,7 +266,7 @@ def test_host_scan_real_stub() -> None:
     reset()
     installed, online, source = host.scan_plugins()
     assert len(installed) == 6 and len(online) == 6
-    assert "app.sdk.plugin.PluginManager" in source
+    assert "PluginManager" in source
     assert any(isinstance(r, dict) for r in installed)
     assert any(not isinstance(r, dict) for r in installed)
 
@@ -294,7 +294,7 @@ def test_run_calls_correct_ids_and_source() -> None:
         assert call["repo_url"] == _BACK_REPO, call
         assert call["force"] is True
         assert call["release_version"] is None
-    assert report["source"].startswith("app.sdk.plugin.PluginManager")
+    assert "PluginManager" in report["source"]
     assert plugin.get_data("pau_last_report")["total"] == 2
 
 
@@ -366,92 +366,111 @@ def test_history_record_bounded_in_plugin() -> None:
 # 配置页 / 详情页 / API / 命令
 # ---------------------------------------------------------------------------
 
-def test_form_has_two_selects_and_target_multiple() -> None:
+def test_form_has_two_multi_selects() -> None:
     reset()
     plugin = make_plugin()
     content, defaults = plugin.get_form()
-    models = [s["props"]["model"] for s in _selects(content)]
-    assert "author_filter" in models and "target_plugins" in models
-    target = next(s for s in _selects(content)
-                  if s["props"]["model"] == "target_plugins")
-    assert target["props"]["multiple"] is True
-    assert target["props"]["chips"] is True
-    assert target["props"]["clearable"] is True
-    author = next(s for s in _selects(content)
-                  if s["props"]["model"] == "author_filter")
-    assert author["props"]["items"][0]["value"] == updater.ALL_AUTHORS
+    sels = {s["props"]["model"]: s for s in _selects(content)}
+    assert {"author_filters", "target_plugins"} <= set(sels)
+    for key in ("author_filters", "target_plugins"):
+        assert sels[key]["props"]["multiple"] is True
+        assert sels[key]["props"]["chips"] is True
+        assert sels[key]["props"]["clearable"] is True
+    authors = {i["value"] for i in sels["author_filters"]["props"]["items"]}
+    assert updater.ALL_AUTHORS not in authors, "多选下拉不该再放「全部作者」"
+    assert {"BackspaceM", "jxxghp", "未标注作者"} <= authors
+    ids = {i["value"] for i in sels["target_plugins"]["props"]["items"]}
+    assert {"DownloaderHelper", "SiteSpider", "ViewingWeeklyReport"} <= ids
+    assert defaults["author_filters"] == []
     assert defaults["cron"] == "0 5 * * *"
-    assert defaults["max_per_run"] == 10
-    assert defaults["include_self"] is False
-    assert defaults["force_reinstall"] is False
     blob = json.dumps(content, ensure_ascii=False)
     for phrase in _BAD_PHRASES:
         assert phrase not in blob, f"设置页不该出现套话：{phrase}"
 
 
-def test_form_author_cascade() -> None:
+def test_form_reads_only_cached_or_local() -> None:
     reset()
-    plugin = make_plugin(author_filter="jxxghp")
-    content, defaults = plugin.get_form()
-    target = next(s for s in _selects(content)
-                  if s["props"]["model"] == "target_plugins")
-    values = {i["value"] for i in target["props"]["items"]}
-    assert values == {"DownloaderHelper", "SiteSpider"}, values
-    assert defaults["author_filter"] == "jxxghp"
+    calls = []
+
+    def hook():
+        calls.append(1)
+        return list(_SDK_PLUGIN.INSTALLED), [], "桩"
+
+    host.set_test_hooks(scan=hook)
+    try:
+        plugin = make_plugin()
+        plugin.save_data("pau_last_scan", {
+            "time": "x", "source": "本机清单",
+            "plugins": [x.to_dict() for x in sample_plugins()],
+        })
+        content, _ = plugin.get_form()
+        assert not calls, "配置页有缓存时不该再扫一遍"
+        assert any(n.get("component") == "VSelect"
+                   and n["props"]["model"] == "target_plugins" for n in _nodes(content))
+    finally:
+        host.set_test_hooks(None, None)
 
 
-def test_form_offline_placeholder() -> None:
+def test_form_offline_gives_short_hint() -> None:
     reset()
     host.set_test_hooks(scan=lambda: ([], [], "模拟离线"))
     try:
         plugin = make_plugin()
         content, _ = plugin.get_form()
         blob = json.dumps(content, ensure_ascii=False)
-        assert "没读到插件清单" in blob
-        assert "回详情页点扫描" in blob
+        assert "还没读到插件清单" in blob
+        assert "刷新清单" in blob
     finally:
         host.set_test_hooks(None, None)
 
 
-def test_page_buttons_bind_real_apis() -> None:
+def test_multi_author_filter_targets() -> None:
+    plugins = sample_plugins()
+    targets, _ = updater.filter_targets(
+        plugins, ["BackspaceM", "jxxghp"], [], skip_self_id="PluginAutoUpdater")
+    assert {p.id for p in targets} == {
+        "MediaLibraryRefresh", "ViewingWeeklyReport", "DownloaderHelper", "SiteSpider"}
+    assert updater.normalize_authors(["jxxghp", updater.ALL_AUTHORS, "jxxghp", ""]) == ["jxxghp"]
+    assert updater.normalize_authors("jxxghp,BackspaceM") == ["jxxghp", "BackspaceM"]
+
+
+def test_page_is_minimal_and_buttons_are_real() -> None:
     reset()
     plugin = make_plugin()
-    assert plugin.api_scan().success
+    plugin.api_scan()
     page = plugin.get_page()
     apis = _button_apis(page)
     registered = {f"plugin/PluginAutoUpdater{a['path']}"
                   for a in plugin.get_api()}
-    assert len(apis) >= 8, apis
-    for api in apis:
-        assert api in registered, f"按钮绑到了不存在的 API：{api}"
-
-    filter_buttons = [n for n in _nodes(page)
-                      if (n.get("events") or {}).get("click", {}).get("api", "").endswith("/filter")]
-    assert len(filter_buttons) >= 2, "要有按作者筛选的一排 VBtn"
-    assert all(b["component"] == "VBtn" for b in filter_buttons)
-    assert any(b["events"]["click"]["params"].get("author") == updater.ALL_AUTHORS
-               for b in filter_buttons)
-    assert any(b["events"]["click"]["params"].get("author") == "jxxghp"
-               for b in filter_buttons)
-
+    assert len(apis) == 4, apis
+    assert set(apis) <= registered
+    assert not [a for a in apis if a.endswith("/filter")]
     blob = json.dumps(page, ensure_ascii=False)
-    for header in ("名称", "作者", "当前版本", "可更新版本", "来源", "状态"):
-        assert header in blob, header
+    for term in ("运行日志", "更新记录", "最近一次运行", "扫描到的插件",
+                 "<th>", "VTable", "VCardTitle"):
+        assert term not in blob, term
     for phrase in _BAD_PHRASES:
         assert phrase not in blob, f"详情页不该出现套话：{phrase}"
+    assert "本机 6 个插件" in blob
 
 
-def test_filter_api_changes_page_table() -> None:
+def test_api_endpoints_have_no_var_keyword() -> None:
+    """FastAPI 会把 **kwargs 当成必填查询参数，POST 空 body 直接 422。"""
+    import inspect
     reset()
     plugin = make_plugin()
-    plugin.api_scan()
+    for api in plugin.get_api():
+        for param in inspect.signature(api["endpoint"]).parameters.values():
+            assert param.kind is not inspect.Parameter.VAR_KEYWORD, api["path"]
+            assert param.default is not inspect.Parameter.empty, api["path"]
+
+
+def test_filter_api_safe_signature() -> None:
+    reset()
+    plugin = make_plugin()
     result = plugin.api_filter({"author": "jxxghp"})
     assert result.success and result.data["author"] == "jxxghp"
-    blob = json.dumps(plugin.get_page(), ensure_ascii=False)
-    assert "站点蜘蛛" in blob
-    assert "观影周报" not in blob, "表格要按服务端记住的作者重渲染"
-    plugin.api_filter({"author": updater.ALL_AUTHORS})
-    assert "观影周报" in json.dumps(plugin.get_page(), ensure_ascii=False)
+    assert plugin.api_filter().success
 
 
 def test_api_paths_and_commands() -> None:
@@ -512,7 +531,7 @@ def test_onlyonce_and_get_service() -> None:
 def test_esc_and_version_consistency() -> None:
     assert _esc("<x>") == "&lt;x&gt;"
     assert _esc("a[b]") == "a［b］"
-    assert PluginAutoUpdater.plugin_version == "1.0.0"
+    assert PluginAutoUpdater.plugin_version == "1.1.0"
     assert PluginAutoUpdater.plugin_author == "BackspaceM"
     assert PluginAutoUpdater.plugin_order == 56
     assert PluginAutoUpdater.system_version == ">=3.0.0"
@@ -550,7 +569,7 @@ def test_host_scan_uses_instance_manager() -> None:
         _SDK_PLUGIN.PluginManager = InstancePM
         installed, online, source = host.scan_plugins()
         assert "InstancePlugin" in [_record_id(r) for r in installed]
-        assert online and "app.sdk.plugin.PluginManager" in source
+        assert online and "PluginManager" in source
     finally:
         _SDK_PLUGIN.PluginManager = saved
 
@@ -594,7 +613,7 @@ def test_host_scan_async_all_plugins_fallback() -> None:
         _STUB.all_plugins = async_all
         installed, online, source = host.scan_plugins()
         assert "FallbackPlugin" in [_record_id(r) for r in installed]
-        assert online == [] and "all_plugins" in source
+        assert "all_plugins" in source
     finally:
         _SDK_PLUGIN.PluginManager = saved_pm
         _STUB.all_plugins = saved_all

@@ -228,7 +228,7 @@ def test_prune_routeros_files_keeps_recent_pairs():
 
 def test_contract_attributes():
     assert RouterOSConfigGuard.plugin_name == "RouterOSConfigGuard"
-    assert RouterOSConfigGuard.plugin_version == "1.1.0"
+    assert RouterOSConfigGuard.plugin_version == "1.3.1"
     assert RouterOSConfigGuard.plugin_author == "BackspaceM"
     assert RouterOSConfigGuard.plugin_desc
     assert RouterOSConfigGuard.plugin_icon.startswith("https://")
@@ -300,10 +300,7 @@ def test_get_service_disabled_and_enabled():
 def test_get_api_and_command():
     p = _fresh_plugin()
     apis = {a["path"] for a in p.get_api()}
-    assert f"/plugin/RouterOSConfigGuard/run" in apis
-    assert f"/plugin/RouterOSConfigGuard/baseline" in apis
-    assert f"/plugin/RouterOSConfigGuard/status" in apis
-    assert f"/plugin/RouterOSConfigGuard/rosbackups" in apis
+    assert {"/run", "/baseline", "/status", "/rosbackups"} <= apis
     cmds = {c["cmd"] for c in p.get_command()}
     assert "/rosguard_run" in cmds and "/rosguard_status" in cmds
 
@@ -318,12 +315,12 @@ def test_get_page_renders_without_markdown_artifacts():
     page = p.get_page()
     assert isinstance(page, list) and page[0]["component"] == "VCard"
     text = str(page)
-    for label in ("立即备份并检测", "测试连接", "最近设为基线", "清空快照", "刷新ROS备份"):
+    for label in ("立即备份并检测", "测试连接", "最近设为基线", "清空快照", "刷新 ROS 备份"):
         assert label in text
     assert "备份位置" in text
-    # 关键：详情页里不应残留成对半角方括号（会被前端当 Markdown 参考式链接）
+    # 日志和清单不铺在详情页，动态文本也不该残留半角方括号
     assert "[完成]" not in text and "[防火墙]" not in text
-    assert "［完成］" in text
+    assert "运行日志" not in text and "快照清单" not in text
     # 不应再出现关联服务区块
     assert "关联服务在线状态" not in text
 

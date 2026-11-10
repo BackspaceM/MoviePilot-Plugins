@@ -266,7 +266,7 @@ def test_check_reports_identity():
 def test_plugin_metadata():
     assert CFRouterOS.plugin_author == "BackspaceM"
     assert CFRouterOS.plugin_config_prefix == "cfrouteros_"
-    assert CFRouterOS.plugin_version == "1.2.0"
+    assert CFRouterOS.plugin_version == "1.3.1"
     assert "GITHUB_USER" not in CFRouterOS.plugin_icon
     commands = {item["cmd"] for item in CFRouterOS.get_command()}
     assert commands == {"/cfrouteros_run", "/cfrouteros_check",
@@ -383,7 +383,7 @@ def test_detail_page_has_buttons_even_when_disabled():
     plugin.init_plugin({"enabled": False})
     page = plugin.get_page()
     assert _find_buttons(page)
-    assert "运行日志" in str(page)
+    assert "运行日志" not in str(page)
 
 
 def test_run_now_triggers_once_and_resets_switch():

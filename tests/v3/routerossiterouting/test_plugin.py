@@ -553,7 +553,7 @@ def test_cleanup_only_deletes_tagged_rows() -> None:
     assert len(FAKE.manual_rows()) == manual_before, "手工规则绝不能删"
     assert not any("MP-B3[old-site:dns-old.example]" in str(r.get("comment") or "")
                    for r in FAKE.all_rows())
-    assert "最近一次清理报告" in json.dumps(plugin.get_page(), ensure_ascii=False)
+    assert "最近一次清理报告" not in json.dumps(plugin.get_page(), ensure_ascii=False)
 
 
 def test_cleanup_aborts_when_backup_fails() -> None:
@@ -711,10 +711,9 @@ def test_status_and_report_after_deploy() -> None:
     # 部署成功后计划会清空，重新刷新预览才有动作表与等价命令
     assert plugin.api_preview().success
     blob = json.dumps(plugin.get_page(), ensure_ascii=False)
-    assert "当前站点" in blob
     assert "待确认的计划" in blob
-    assert "最近一次部署报告" in blob
-    assert "等价命令" in blob
+    assert "当前站点" not in blob
+    assert "最近一次部署报告" not in blob
 
 
 def test_version_literal_and_metadata() -> None:

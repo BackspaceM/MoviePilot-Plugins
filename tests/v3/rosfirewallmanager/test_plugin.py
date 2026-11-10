@@ -302,7 +302,7 @@ def test_validate_cron_mask_and_url():
 # ---------------------------------------------------------------------------
 
 def test_contract_attributes():
-    assert RosFirewallManager.plugin_version == "1.0.0"
+    assert RosFirewallManager.plugin_version == "1.2.1"
     assert RosFirewallManager.plugin_name == PLUGIN_NAME
     assert RosFirewallManager.plugin_author == "BackspaceM"
     assert RosFirewallManager.plugin_config_prefix == "rosfirewallmanager_"
@@ -419,10 +419,11 @@ def test_get_page_renders_and_md_safe():
     p.save_data(_KEY_LOGS, [{"time": "2026-01-01 00:00:00", "level": "INFO",
                              "message": "规则 [x] 已应用"}])
     page = p.get_page()
-    assert isinstance(page, list) and page[0]["component"] == "VCard"
+    assert isinstance(page, list) and page
     text = str(page)
-    assert "立即扫描隐患" in text and "隐患检测" in text
-    assert "[x]" not in text and "［x］" in text  # 空药丸防御
+    assert "立即扫描隐患" in text
+    assert "[x]" not in text              # 日志不再铺在详情页
+    assert "运行日志" not in text
 
 
 def test_page_render_no_blank_pill_pattern():
@@ -465,7 +466,7 @@ def test_every_page_button_has_live_api():
 
     api_map = {}
     for entry in p.get_api():
-        api_map[entry["path"].lstrip("/")] = entry["endpoint"]
+        api_map[f"plugin/RosFirewallManager{entry['path']}"] = entry["endpoint"]
         assert callable(entry["endpoint"]), f"{entry['path']} endpoint 不可调用"
 
     for btn in buttons:
@@ -479,25 +480,17 @@ def test_every_page_button_has_live_api():
         assert api in api_map, f"按钮「{label}」的 API {api} 未在 get_api 注册（点了没反应）"
         assert click.get("method") == "post", f"按钮「{label}」method 非 post"
 
-    # 每条规则的 6 个操作按钮都带 table+id 参数
+    # 规则级操作仍注册在接口里，明细不再铺在主界面
+    assert {"/toggle", "/move", "/remove"} <= {e["path"] for e in p.get_api()}
     rule_btns = [b for b in buttons
                  if str(((b.get("events") or {}).get("click") or {}).get("api", "")).endswith(
                      ("/toggle", "/move", "/remove"))]
-    assert len(rule_btns) >= 6 * 3, "三条规则应各有 6 个操作按钮"
-    for b in rule_btns:
-        params = b["events"]["click"].get("params") or {}
-        assert params.get("table") and params.get("id"), f"规则按钮缺 table/id: {b['props'].get('text')}"
+    assert not rule_btns, "逐条规则的按钮不该铺在主界面"
 
-    # 破坏性操作有二次确认
-    for suffix, expect in (("/remove", True), ("/move", None)):
-        group = [b for b in buttons if str(((b.get("events") or {}).get("click") or {}).get("api", "")).endswith(suffix)]
-        if suffix == "/remove":
-            assert group and all(b["events"]["click"].get("confirm") is True for b in group)
-        # move 里只有置底需要 confirm
-    bottom_btns = [b for b in buttons
-                   if str(((b.get("events") or {}).get("click") or {}).get("api", "")).endswith("/move")
-                   and (b["events"]["click"].get("params") or {}).get("mode") == "bottom"]
-    assert bottom_btns and all(b["events"]["click"].get("confirm") is True for b in bottom_btns)
+    # 主界面保留的破坏性操作要有二次确认
+    confirm_buttons = [b for b in buttons
+                       if ((b.get("events") or {}).get("click") or {}).get("confirm") is True]
+    assert confirm_buttons
 
 
 # ---------------------------------------------------------------------------

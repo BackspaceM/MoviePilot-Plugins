@@ -255,7 +255,7 @@ def test_server_result_serialization():
 # ---------------------------------------------------------------------------
 
 def test_plugin_metadata():
-    assert MediaLibraryRefresh.plugin_version == "1.0.0"
+    assert MediaLibraryRefresh.plugin_version == "1.1.1"
     assert MediaLibraryRefresh.plugin_author == "BackspaceM"
     assert MediaLibraryRefresh.author_url == "https://github.com/BackspaceM"
     assert MediaLibraryRefresh.plugin_icon.endswith("medialibraryrefresh.png")
@@ -501,8 +501,8 @@ def test_stop_signal_and_page_sections():
     plugin = _plugin()
     assert plugin.api_stop().success and plugin._stop_event.is_set()
     page_text = str(plugin.get_page())
-    assert "媒体服务器" in page_text and "运行日志" in page_text and "待刷新队列" in page_text
     assert "立即刷新" in page_text and "检测服务器" in page_text
+    assert "运行日志" not in page_text and "待刷新队列" not in page_text
 
 
 def test_html_block_escapes_user_input():

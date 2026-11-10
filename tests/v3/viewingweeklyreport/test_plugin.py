@@ -294,7 +294,7 @@ def test_log_empty_placeholder_in_page():
     _init(p)
     page = p.get_page()
     blob = json.dumps(page, ensure_ascii=False)
-    assert "暂无运行日志" in blob          # 空日志给出占位
+    assert "暂无运行日志" not in blob      # 日志交给宿主日志，不铺在详情页
     assert "｜" in format_log_line("t", "INFO", "m")
 
 
@@ -348,7 +348,7 @@ def test_validate_cron():
 
 def test_v3_class_attributes():
     assert ViewingWeeklyReport.plugin_name == PLUGIN_NAME
-    assert ViewingWeeklyReport.plugin_version == "1.0.0"
+    assert ViewingWeeklyReport.plugin_version == "1.1.1"
     assert ViewingWeeklyReport.plugin_icon == PLUGIN_ICON
     assert ViewingWeeklyReport.plugin_author == "BackspaceM"
     assert ViewingWeeklyReport.plugin_config_prefix == "viewingweeklyreport_"
@@ -626,6 +626,7 @@ def test_get_page_status_and_sections():
     p = _fresh_plugin()
     _init(p)
     page = json.dumps(p.get_page(), ensure_ascii=False)
-    for section in ("观影周报", "转码诊断", "实时在播会话", "运行日志"):
-        assert section in page
+    assert "观影周报" in page and "生成周报" in page
+    for section in ("实时在播会话", "运行日志", "周报与诊断", "数据与通知"):
+        assert section not in page
     assert "已连接媒体服务器" in p.get_form()[1] or True  # 表单已在其它用例校验

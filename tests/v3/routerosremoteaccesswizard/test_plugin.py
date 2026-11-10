@@ -478,5 +478,6 @@ def test_status_and_report_after_deploy() -> None:
     assert status["dry_run"] is False
     assert len(status["services"]) == 2
     blob = json.dumps(plugin.get_page(), ensure_ascii=False)
-    assert "外网端口 → 内网服务" in blob
-    assert "最近一次部署报告" in blob
+    assert "待确认的计划" in blob
+    assert "最近一次部署报告" not in blob
+    assert "外网端口 → 内网服务" not in blob
