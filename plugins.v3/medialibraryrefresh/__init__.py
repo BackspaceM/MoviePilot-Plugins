@@ -81,6 +81,18 @@ _CMD_ALL = "mlr_all"
 _CMD_STOP = "mlr_stop"
 _LOG_PREFIX = "媒体库精准刷新"
 
+_MEDIA_TYPES = ("emby", "jellyfin", "plex")
+
+
+def _cfg_attr(cfg: Any, *names: str) -> Any:
+    """兼容 dict / 对象两种媒体服务器配置载体读取字段。"""
+    for name in names:
+        value = cfg.get(name) if isinstance(cfg, dict) else getattr(cfg, name, None)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 _TRANSFER_EVENTS = ("transfer.complete",)
 _SUBTITLE_EVENTS = ("transfer.subtitle.complete",)
 _DELETE_EVENTS = ("downloadfile.deleted", "download.deleted", "history.deleted")
@@ -111,7 +123,7 @@ class MediaLibraryRefresh(_PluginBase):
     plugin_name = "媒体库精准刷新"
     plugin_desc = "监听整理入库事件，按文件级增量刷新 Emby/Jellyfin/Plex，支持多服务器、路径映射、合并去重与分级回退"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/medialibraryrefresh.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_label = "媒体库,Emby,Plex,Jellyfin,刷新"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -190,7 +202,9 @@ class MediaLibraryRefresh(_PluginBase):
         valid, normalized = validate_cron(cron)
         self._cron = normalized if valid else "0 5 * * *"
         self._servers_text = str(config.get("servers") or "")
-        self._servers, self._server_errors = parse_servers(self._servers_text)
+        combined, auto_errors = self._merge_server_config(config)
+        self._servers, self._server_errors = parse_servers(combined)
+        self._server_errors = auto_errors + self._server_errors
         self._media_exts = parse_extensions(config.get("media_exts"), DEFAULT_MEDIA_EXTS)
         self._exclude_keywords = [
             normalize_path(part) for part in str(config.get("exclude_keywords") or "").replace(",", "\n").splitlines()
@@ -370,6 +384,71 @@ class MediaLibraryRefresh(_PluginBase):
     def _col(cols: int, md: int, content: List[dict]) -> dict:
         return {"component": "VCol", "props": {"cols": cols, "md": md}, "content": content}
 
+    # ------------------------------------------------------------------
+    # 已连接媒体服务器（MoviePilot 服务门面）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _connected_media_configs() -> Dict[str, Any]:
+        """读取 MoviePilot 中已连接的媒体服务器配置。"""
+        try:
+            from app.sdk.services import MediaServerHelper
+            configs = MediaServerHelper().get_configs() or {}
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"{_LOG_PREFIX}：读取已连接媒体服务器失败：{err}")
+            return {}
+        out: Dict[str, Any] = {}
+        for key, cfg in (configs.items() if isinstance(configs, dict) else []):
+            stype = str(_cfg_attr(cfg, "type", "server_type") or "").lower()
+            if stype in _MEDIA_TYPES:
+                out[str(key)] = cfg
+        return out
+
+    def _connected_items(self) -> List[Dict[str, str]]:
+        """生成配置页「已连接媒体服务器」下拉项。"""
+        items: List[Dict[str, str]] = []
+        for name, cfg in self._connected_media_configs().items():
+            stype = str(_cfg_attr(cfg, "type", "server_type") or "").lower()
+            items.append({"title": f"{name}（{stype}）", "value": name})
+        return items
+
+    def _selected_server_lines(self, selected: Any) -> Tuple[List[str], List[str]]:
+        """把下拉勾选的已连接实例转换成 parse_servers 可识别的配置行。"""
+        lines: List[str] = []
+        errors: List[str] = []
+        configs = self._connected_media_configs()
+        raw = selected if isinstance(selected, (list, tuple, set)) else (
+            [selected] if isinstance(selected, str) and selected.strip() else [])
+        for name in [str(n) for n in raw if str(n).strip()]:
+            cfg = configs.get(name)
+            if cfg is None:
+                errors.append(f"已连接实例「{name}」当前不存在，请重新勾选或改到手动补充框")
+                continue
+            stype = str(_cfg_attr(cfg, "type", "server_type") or "").lower()
+            url = _cfg_attr(cfg, "url", "address", "host", "base_url")
+            token = _cfg_attr(cfg, "apikey", "api_key", "token", "access_token")
+            if not url or not token:
+                errors.append(f"已连接实例「{name}」未暴露地址或密钥，请在手动补充框按格式补全")
+                continue
+            lines.append(f"{stype}|{name}|{url}|{token}||1")
+        return lines, errors
+
+    def _merge_server_config(self, config: Dict[str, Any]) -> Tuple[str, List[str]]:
+        """合并下拉选择与手动配置；手动同名配置优先（用于指定路径映射）。"""
+        manual_text = str(config.get("servers") or "")
+        auto_lines, errors = self._selected_server_lines(config.get("connected_servers"))
+        manual_names = set()
+        for raw in manual_text.splitlines():
+            line = raw.strip()
+            if line.startswith("#") or line.count("|") < 3:
+                continue
+            parts = line.split("|")
+            if len(parts) > 1 and parts[1].strip():
+                manual_names.add(parts[1].strip())
+        auto_lines = [line for line in auto_lines
+                      if line.split("|")[1].strip() not in manual_names]
+        return "\n".join([manual_text] + auto_lines).strip(), errors
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         content: List[dict] = [
             {"component": "VRow", "content": [
@@ -390,12 +469,26 @@ class MediaLibraryRefresh(_PluginBase):
                     "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
+                self._col(12, 12, [{"component": "VAlert", "props": {
+                    "type": "info", "variant": "tonal",
+                    "text": "媒体服务器直接在下方下拉勾选 MoviePilot 已连接的实例即可，无需手填地址与密钥；"
+                            "只有当需要「路径映射」或实例不在 MP 内时，才在文本框按同名补充一行。"}}]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(12, 12, [{"component": "VSelect", "props": {
+                    "model": "connected_servers", "label": "已连接媒体服务器（可多选）",
+                    "items": self._connected_items(), "multiple": True, "chips": True,
+                    "clearable": True, "persistentHint": True,
+                    "hint": "从 MoviePilot 已连接的 Emby / Jellyfin / Plex 中勾选；地址与密钥自动带入"}}]),
+            ]},
+            {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VTextarea", "props": {
-                    "model": "servers", "label": "媒体服务器清单", "rows": 6,
+                    "model": "servers", "label": "路径映射 / 手动补充媒体服务器（可选）", "rows": 4,
                     "placeholder": "emby|客厅Emby|http://192.168.1.10:8096|API_KEY|/media::/volume1/media|1\n"
                                    "plex|客厅Plex|http://192.168.1.11:32400|PLEX_TOKEN|/media::/mnt/media|1",
                     "hint": "每行一台：类型(emby/jellyfin/plex)|名称|地址|密钥|路径映射|启用(1/0)。"
-                            "路径映射为 MP 容器路径::媒体服务器路径，多个用分号分隔；# 开头为注释",
+                            "与上方下拉同名的行会覆盖自动配置，用于指定 MP 容器路径::媒体服务器路径；"
+                            "多个映射用分号分隔，# 开头为注释",
                     "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
@@ -471,7 +564,7 @@ class MediaLibraryRefresh(_PluginBase):
         ]
         defaults: Dict[str, Any] = {
             "enabled": False, "run_now": False, "notify_mode": "全部",
-            "servers": "", "cron": "0 5 * * *", "fallback_level": "parent",
+            "connected_servers": [], "servers": "", "cron": "0 5 * * *", "fallback_level": "parent",
             "scheduled_full_refresh": False, "merge_window": 20, "max_wait": 120,
             "batch_size": 200, "max_retries": 3, "retry_base": 30,
             "request_timeout": 8, "verify_ssl": False, "dry_run": False,

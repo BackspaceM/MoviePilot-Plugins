@@ -39,7 +39,8 @@ from .rank import rank_candidates, size_diff_ratio
 _CACHE_KEY = "cache"
 _HISTORY_KEY = "history"
 _STATS_KEY = "stats"
-_MAX_HISTORY = 80
+_MAX_HISTORY = 40
+_PAGE_HISTORY = 8
 _CMD_ACTION = "hdwing_crossseed_run"
 _ONCE_JOB_ID = "HDWinGCrossSeed.RunOnce"
 _STALE_RUN_SECONDS = 3 * 3600
@@ -55,6 +56,21 @@ _STATE_TEXT = {
     "skipped": "跳过",
     "error": "异常",
 }
+
+_STATE_COLORS = {
+    "added": "success",
+    "exists": "primary",
+    "nomatch": "grey",
+    "failed": "error",
+    "skipped": "grey",
+    "error": "error",
+}
+
+
+def _clip(value: Any, limit: int) -> str:
+    """截断长文本，详情页只展示摘要，避免单条记录把表格撑得很长。"""
+    text = str(value or "").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +191,7 @@ class HDWinGCrossSeed(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
     )
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_label = "站点,辅种,HDWinG"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -533,8 +549,8 @@ class HDWinGCrossSeed(_PluginBase):
             ]
         stats = self.get_data(_STATS_KEY) or {}
         history = self.get_data(_HISTORY_KEY) or []
-        cache = self.get_data(_CACHE_KEY) or {}
-        pending = len([item for item in cache.values() if item.get("r") in ("nomatch", "failed")])
+        # 待重试数在运行结束时写入统计，详情页不再遍历整份辅种缓存（缓存可能上万条）
+        pending = _to_int(stats.get("pending_retry"), 0)
         content: List[dict] = [
             {
                 "component": "VRow",
@@ -590,25 +606,42 @@ class HDWinGCrossSeed(_PluginBase):
                 "type": "info", "variant": "tonal", "class": "mt-2",
                 "text": "暂无运行记录，点击「立即辅种」或等待定时任务执行。"}})
             return content
-        headers = ("时间", "下载器", "本地任务", "站点种子", "结果", "说明")
+        shown = history[:_PAGE_HISTORY]
+        headers = ("时间", "下载器", "任务 / 站点", "结果", "说明")
         rows = []
-        for item in history[:_MAX_HISTORY]:
+        for item in shown:
+            state = item.get("state", "")
             rows.append({
                 "component": "tr",
                 "content": [
-                    {"component": "td", "props": {"class": "text-caption"}, "text": item.get("time", "")},
-                    {"component": "td", "props": {"class": "text-caption"}, "text": item.get("downloader", "")},
-                    {"component": "td", "props": {"class": "text-caption"}, "text": item.get("local", "")},
-                    {"component": "td", "props": {"class": "text-caption"}, "text": item.get("site", "-")},
-                    {"component": "td", "text": _STATE_TEXT.get(item.get("state", ""), item.get("state", ""))},
-                    {"component": "td", "props": {"class": "text-caption"}, "text": item.get("message", "")},
+                    {"component": "td", "props": {"class": "text-caption text-no-wrap"},
+                     "text": _clip(item.get("time", ""), 16)},
+                    {"component": "td", "props": {"class": "text-caption"},
+                     "text": _clip(item.get("downloader", ""), 12)},
+                    {"component": "td", "props": {"class": "text-caption", "style": "max-width:260px"},
+                     "content": [
+                         {"component": "div", "props": {"class": "text-truncate"},
+                          "text": _clip(item.get("local", ""), 42)},
+                         {"component": "div", "props": {"class": "text-truncate text-medium-emphasis"},
+                          "text": "→ " + _clip(item.get("site", "-"), 32)},
+                     ]},
+                    {"component": "td", "content": [
+                        {"component": "VChip", "props": {
+                            "size": "x-small", "variant": "tonal",
+                            "color": _STATE_COLORS.get(state, "grey")},
+                         "text": _STATE_TEXT.get(state, state or "-")}]},
+                    {"component": "td", "props": {"class": "text-caption", "style": "max-width:220px"},
+                     "content": [
+                         {"component": "div", "props": {"class": "text-truncate"},
+                          "text": _clip(item.get("message", ""), 48)}]},
                 ],
             })
         content.append({
             "component": "VCard",
             "props": {"variant": "tonal", "class": "mt-3"},
             "content": [
-                {"component": "VCardTitle", "text": "最近记录"},
+                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
+                 "text": f"最近记录（共 {len(history)} 条，仅显示最近 {len(shown)} 条）"},
                 {"component": "VTable", "props": {"density": "compact", "hover": True},
                  "content": [
                      {"component": "thead", "content": [
@@ -616,6 +649,8 @@ class HDWinGCrossSeed(_PluginBase):
                              {"component": "th", "text": text} for text in headers]}]},
                      {"component": "tbody", "content": rows},
                  ]},
+                {"component": "VCardText", "props": {"class": "text-caption text-medium-emphasis"},
+                 "text": "完整记录保存在插件数据中；长名称与说明在此仅显示摘要。"},
             ],
         })
         return content
@@ -681,6 +716,9 @@ class HDWinGCrossSeed(_PluginBase):
     def api_clear_cache(self) -> schemas.Response:
         """清空重试缓存，便于下次重新扫描。"""
         self.save_data(_CACHE_KEY, {})
+        stats = dict(self.get_data(_STATS_KEY) or {})
+        stats["pending_retry"] = 0
+        self.save_data(_STATS_KEY, stats)
         return schemas.Response(success=True, message="缓存已清空")
 
     def api_status(self) -> schemas.Response:
@@ -841,6 +879,11 @@ class HDWinGCrossSeed(_PluginBase):
                     "message": message[:160],
                 })
         self.save_data(_CACHE_KEY, cache)
+        # 待重试条目数一次算好写入统计，详情页无需再遍历整份缓存
+        result["pending_retry"] = sum(
+            1 for entry in cache.values()
+            if isinstance(entry, dict) and entry.get("r") in ("nomatch", "failed")
+        )
         self._save_result(result, started)
         self._notify_result(result)
 
@@ -1107,6 +1150,8 @@ class HDWinGCrossSeed(_PluginBase):
             "total_added": _to_int(stats.get("total_added")) + result.get("added", 0),
             "total_failed": _to_int(stats.get("total_failed")) + result.get("failed", 0),
             "total_scanned": _to_int(stats.get("total_scanned")) + result.get("scanned", 0),
+            "pending_retry": _to_int(result.get("pending_retry"),
+                                     _to_int(stats.get("pending_retry"), 0)),
         })
         self.save_data(_STATS_KEY, stats)
         records = result.get("records") or []
