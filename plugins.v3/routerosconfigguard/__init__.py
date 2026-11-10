@@ -293,31 +293,26 @@ class RouterOSConfigGuard(_PluginBase):
         content: List[dict] = [
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心 · 选择已保存的路由器"},
+                 "text": "连接中心"},
                 {"component": "VCardText", "content": [
                     {"component": "VSelect", "props": {
                         "model": "ros_connection",
                         "label": "已保存的路由器",
                         "items": roslink.connection_items(),
                         "clearable": True,
-                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
                         "persistentHint": True}},
                     {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                     "text": "下拉是空的就直接手填，不影响使用。"},
                 ]},
             ]},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3",
-                                              "title": "备份位置怎么选"},
-             "content": {"text": "仅存 MP：生成结构化快照，可直接对比与回滚；仅存 RouterOS 本机：调用系统 "
-                                 "/system/backup/save 生成 .backup，并导出 .rsc 配置；两处都存则各保留一份。"
-                                 "漂移检测用的「基线」是保存在 MP 内的轻量检测状态，与备份文件放在哪里无关。"}},
-            {"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3",
-                                              "title": "使用前的四点说明"},
-             "content": {"text": "① 权限：RouterOS 账号需要 read / write / api 权限，否则读取分区或创建备份会失败；"
-                                 "② 加密：.backup 是含账号与证书的系统级备份，选择存到 RouterOS 本机时务必开启加密并保存好密码；"
-                                 "③ 基线：更换设备、重装系统或首次启用后，请在详情页点「最近设为基线」，否则每次都会被判为漂移；"
-                                 "④ 试运行：首次配置建议先开启「试运行」，确认分区能正常读取后再关闭。"
-                                 "保留份数会同时轮转 MP 快照与 RouterOS 本机备份，超出的最旧一份会被删除。"}},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3"},
+             "content": {"text": "只存 MP 会生成结构化快照，方便对比和回滚；存 RouterOS 本机则是 .backup + .rsc。"
+                                 "两处都存就各留一份。漂移基线始终留在 MP 里。"}},
+            {"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3"},
+             "content": {"text": "账号要有 read/write/api 权限。.backup 含账号和证书，记得开加密、存好密码。"
+                                 "换设备或首次启用后去详情页点「最近设为基线」，不然每次都会报漂移。"
+                                 "第一次建议先开「试运行」。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时备份"}}]},
@@ -327,7 +322,7 @@ class RouterOSConfigGuard(_PluginBase):
                     {"component": "VSwitch", "props": {"model": "auto_baseline", "label": "首次自动设基线", "hint": "无基线时把首份快照设为基线"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "① RouterOS 连接"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "RouterOS 连接"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址",
@@ -342,12 +337,12 @@ class RouterOSConfigGuard(_PluginBase):
                     fld("router_password", "密码", {"type": "password"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "② 备份分区"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "备份分区"},
             {"component": "VRow", "content": [
                 sel("sections", "备份分区（可多选）", section_items(), "默认勾选常用分区；敏感分区漂移将高亮告警"),
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "③ 备份位置与加密"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "备份位置与加密"},
             {"component": "VLabel", "text": "备份位置"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -364,13 +359,13 @@ class RouterOSConfigGuard(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VSwitch", "props": {
                         "model": "backup_encrypt", "label": "加密 RouterOS 备份",
-                        "hint": "仅 routeros/both；强烈建议开启（.backup 未加密含敏感信息）"}}]},
+                        "hint": "仅 routeros/both；.backup 不加密会带上账号和密码"}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     fld("backup_password", "备份加密密码", {"type": "password",
                         "placeholder": "加密 .backup 用；留空则不加密"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "④ 调度与高级"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "调度与高级"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "备份周期(cron)", {"placeholder": "0 3 * * *  每天 03:00"})]},

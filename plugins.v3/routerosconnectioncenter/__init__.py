@@ -155,17 +155,15 @@ class RouterOSConnectionCenter(_PluginBase):
                   f"广播未生效：{_esc(self._broadcast_error or '尚未保存配置')}")
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                              "class": "mb-4", "title": "这个插件解决什么"},
-             "content": {"text": "① 以前每个 RouterOS 插件都要单独填一遍地址、账号、密码，改一次密码要改 4 处；"
-                                 "② 连不上时只报超时，不知道要去开启 www-ssl、建 API 账号、放行 input 链。"
-                                 "在这里填一次，其他插件设置页顶部会出现「已保存的路由器」下拉，选中即可自动带入；"
-                                 "「一键体检」逐项排查并给出可直接复制执行的修复命令。"}},
+                                              "class": "mb-4"},
+             "content": {"text": "路由器的地址、账号、密码在这里填一次，其他 RouterOS 插件就能直接选。"
+                                 "连不上时点详情页的「一键体检」，会告诉你要开哪个服务、该执行哪条命令。"}},
             {"component": "VAlert", "props": {"type": "success" if self._broadcast_ok else "warning",
                                               "variant": "tonal", "class": "mb-4", "title": "广播状态"},
              "content": {"text": status}},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
-             "text": "① 路由器清单"},
+             "text": "路由器清单"},
             {"component": "VRow", "content": [
                 self._col(12, [{"component": "VTextarea", "props": {
                     "model": "routers_text", "label": "已保存的 RouterOS 路由器", "rows": 8,
@@ -175,11 +173,10 @@ class RouterOSConnectionCenter(_PluginBase):
                     "persistentHint": True}}]),
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "text", "class": "mb-2"},
-             "content": {"text": "安全提示：密码以明文保存在本插件配置中，并会写入共享文件（权限 0600，仅容器内可见）。"
-                                 "建议为 MP 单独建最小权限账号，不要用 admin 主账号；不要把本插件配置外发。"}},
+             "content": {"text": "密码是明文存的，别用 admin 主账号，单独建个最小权限的 API 账号。"}},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
-             "text": "② 体检与广播"},
+             "text": "体检与广播"},
             {"component": "VRow", "content": [
                 self._col(3, [{"component": "VTextField", "props": {
                     "model": "timeout", "label": "体检超时（秒）", "type": "number",
@@ -196,10 +193,8 @@ class RouterOSConnectionCenter(_PluginBase):
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "VAlert", "props": {"type": "secondary", "variant": "tonal",
-                                              "class": "mb-2", "title": "三步用起来"},
-             "content": {"text": "1) 填好清单并保存 → 2) 到详情页点「一键体检」，按修复命令把路由器准备好 → "
-                                 "3) 打开配置备份 / 带宽调度 / 防火墙管理 / CF 优选 IP 的设置页，"
-                                 "在「已保存的路由器」下拉里选中这台，其余连接字段留空即可（旧配置不受影响）。"}},
+                                              "class": "mb-2"},
+             "content": {"text": "保存后去详情页点「一键体检」，再在其他插件里选中这台就行。"}},
         ]
         defaults: Dict[str, Any] = {
             "routers_text": "",
@@ -276,7 +271,7 @@ class RouterOSConnectionCenter(_PluginBase):
 
         if self._errors:
             content.append({"component": "VAlert", "props": {
-                "type": "warning", "variant": "tonal", "class": "mt-3", "title": "配置有问题的行"},
+                "type": "warning", "variant": "tonal", "class": "mt-3", "title": "这几行填错了"},
                 "content": {"text": "；".join(_esc(e) for e in self._errors[:8])}})
 
         if not self._routers:
@@ -338,20 +333,18 @@ class RouterOSConnectionCenter(_PluginBase):
         if fixes:
             content.append({"component": "VCard", "props": {
                 "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "修复命令（复制到 RouterOS 终端执行）"},
+                {"component": "VCardTitle", "text": "修复命令，复制到 RouterOS 终端执行"},
                 {"component": "VCardText", "content": [
                     {"component": "div", "props": {"class": "text-caption mb-2"},
-                     "text": "以下命令按检查项汇总去重，请结合实际网络环境调整后执行；# 开头是说明，不必输入。"},
+                     "text": "按检查项汇总去重，执行前按自己的网络改一下；# 开头是注释。"},
                 ] + [{"component": "div", "props": {"class": "text-caption font-monospace"},
                       "text": _esc(cmd)} for cmd in fixes]},
             ]})
 
         content.append({"component": "VAlert", "props": {
-            "type": "secondary", "variant": "tonal", "class": "mt-3", "title": "其他插件怎么选"},
-            "content": {"text": "打开「RouterOS 配置备份与漂移检测」「带宽/Queue 智能调度」"
-                                "「RouterOS 防火墙可视化管理器」「Cloudflare 优选 IP → RouterOS」的设置页，"
-                                "在顶部「已保存的路由器」下拉里选中一台并保存即可；不选下拉时，"
-                                "这些插件仍使用各自原有的手填参数，旧配置完全不受影响。"}})
+            "type": "secondary", "variant": "tonal", "class": "mt-3"},
+            "content": {"text": "配置备份、带宽调度、防火墙管理、CF 优选 IP 的设置页顶部都能选这里保存的路由器；"
+                                "不选就继续用各自手填的参数。"}})
         return content
 
     # ------------------------------------------------------------------

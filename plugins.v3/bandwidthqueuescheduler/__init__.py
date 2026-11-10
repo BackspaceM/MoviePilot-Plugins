@@ -320,26 +320,27 @@ class BandwidthQueueScheduler(_PluginBase):
         content: List[dict] = [
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心 · 选择已保存的路由器"},
+                 "text": "连接中心"},
                 {"component": "VCardText", "content": [
                     {"component": "VSelect", "props": {
                         "model": "ros_connection",
                         "label": "已保存的路由器",
                         "items": roslink.connection_items(),
                         "clearable": True,
-                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
                         "persistentHint": True}},
                     {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                     "text": "下拉是空的就直接手填，不影响使用。"},
                 ]},
             ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                              "class": "mb-4", "title": "插件用途"},
-             "content": {"text": "按带宽方案在 RouterOS 上编排简单队列：可按时段自动切换，也可在详情页一键切换。"
-                                 "插件只管理以队列前缀开头的队列，不会动你手工建的队列。"}},
+                                              "class": "mb-4"},
+             "content": {"text": "按时段在 RouterOS 上切换简单队列，也能在详情页手动切。"
+                                 "只管前缀开头的队列，你手工建的不动。"}},
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
-                                              "class": "mb-3", "title": "两点重要说明"},
-             "content": {"text": "① FastTrack：若 RouterOS 启用了 FastTrack，被其匹配的流量会绕过 Queue，限速看似不生效；请在详情页跑一次「FastTrack 诊断」确认。② 权限与备份：账号需要 read / write / api 权限；首次使用建议先开启「试运行」，确认队列改动符合预期后再关闭。"}},
+                                              "class": "mb-3"},
+             "content": {"text": "开了 FastTrack 的流量不走 Queue，限速会看着像没生效，详情页有「FastTrack 诊断」。"
+                                 "账号要有 read/write/api 权限，第一次用先开「试运行」看看。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时调度"}}]},
@@ -349,7 +350,7 @@ class BandwidthQueueScheduler(_PluginBase):
                     {"component": "VSwitch", "props": {"model": "dry_run", "label": "试运行", "hint": "只评估差异，不实际改动队列"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "① RouterOS 连接"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "RouterOS 连接"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址",
@@ -364,7 +365,7 @@ class BandwidthQueueScheduler(_PluginBase):
                     fld("router_password", "密码", {"type": "password"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "② 队列与默认方案"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "队列与默认方案"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("queue_prefix", "队列名前缀",
@@ -378,7 +379,7 @@ class BandwidthQueueScheduler(_PluginBase):
                         "model": "auto_apply", "label": "按规则自动切换", "hint": "关闭则保持当前方案"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "③ 设备与时段规则"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "设备与时段规则"},
             {"component": "VRow", "content": [
                 area("targets", "设备定义（每行一个）",
                      "格式：名称=IP/CIDR|角色；角色可选 download/nas/media/other，省略为 other。",
@@ -395,7 +396,7 @@ class BandwidthQueueScheduler(_PluginBase):
                      '{"movie":{"label":"观影优先·自定义","rules":{"download":{"max":"1M/3M","priority":8}}}}', 4),
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "④ 调度与通知"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "调度与通知"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "调度周期(cron)", {"placeholder": "*/5 * * * *  每 5 分钟"})]},
@@ -406,8 +407,9 @@ class BandwidthQueueScheduler(_PluginBase):
                      "items": [{"title": v, "value": k} for k, v in _NOTIFY_LABELS.items()]}}]},
             ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "text",
-                                              "class": "mt-2", "title": "填写格式说明"},
-             "content": {"text": "角色：download=下载设备（观影时压制）、nas=NAS/服务器、media=观影设备（不限速）、other=其它。速率写成 RouterOS 「上/下行」 格式（如 1M/3M），0/0 表示不限速；时段规则为 HH:MM-HH:MM=方案，多条重叠时后写的优先，留空则始终使用默认方案。"}},
+                                              "class": "mt-2"},
+             "content": {"text": "角色：download 是下载机、nas 是服务器、media 是观影设备（不限速）。"
+                                 "速率写「上/下行」，如 1M/3M，0/0 不限速；时段 HH:MM-HH:MM=方案，重叠时后写的优先。"}},
         ]
         return content, defaults
 
@@ -729,7 +731,7 @@ class BandwidthQueueScheduler(_PluginBase):
         return [
             {"component": "VAlert", "props": {
                 "type": "warning" if (fasttrack or {}).get("has_fasttrack") else "info",
-                "variant": "tonal", "class": "mb-3", "title": "FastTrack 提示"},
+                "variant": "tonal", "class": "mb-3", "title": "FastTrack"},
              "content": {"text": md_safe(fast_text)}},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},

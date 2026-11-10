@@ -359,23 +359,23 @@ class RosFirewallManager(_PluginBase):
         content: List[dict] = [
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心 · 选择已保存的路由器"},
+                 "text": "连接中心"},
                 {"component": "VCardText", "content": [
                     {"component": "VSelect", "props": {
                         "model": "ros_connection",
                         "label": "已保存的路由器",
                         "items": roslink.connection_items(),
                         "clearable": True,
-                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
                         "persistentHint": True}},
                     {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                     "text": "下拉是空的就直接手填，不影响使用。"},
                 ]},
             ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "在 MP 里可视化管理 RouterOS 防火墙：按执行顺序查看规则、自动揪出被遮挡的死规则与重复规则，"
-                                 "逐条启停/排序/删除，或填写表单新增。本插件是「管理器」不是「自动对齐器」，"
-                                 "绝不批量删除你的规则；删除、置底等破坏性操作都需二次确认。RouterOS 用户需具备 read/write/api 权限。"}},
+             "content": {"text": "按执行顺序看 RouterOS 防火墙规则，揪出被挡住的死规则和重复规则，"
+                                 "也能逐条启停、排序、删除。只改你点名的那条，不会批量删。"
+                                 "账号要有 read/write/api 权限。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sw("enabled", "启用插件", "关闭后不再定时扫描，但详情页仍可手动操作")]},
@@ -423,11 +423,10 @@ class RosFirewallManager(_PluginBase):
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mb-1"},
-             "text": "批量导入规则（推荐）"},
+             "text": "批量导入规则"},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3"},
-             "content": {"text": "把 RouterOS 导出的 .rsc 或防火墙规则粘贴到文本框、选择文件上传，或填写容器内文件路径。"
-                                 "保存配置后到详情页查看逐条中文含义与风险提示，确认无误再点「确认批量写入」，"
-                                 "一次性写入 RouterOS（不再一条一条添加）。解析阶段不会改动设备，也不会删除已有规则。"}},
+             "content": {"text": "把 .rsc 粘进文本框或上传文件，保存后到详情页逐条核对中文含义，"
+                                 "确认了再点「确认批量写入」。解析阶段不动设备，也不删已有规则。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sel("import_table", "默认表",
@@ -469,10 +468,9 @@ class RosFirewallManager(_PluginBase):
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mb-1"},
-             "text": "高级：单条新增规则"},
+             "text": "单条新增"},
             {"component": "VAlert", "props": {"type": "info", "variant": "text", "class": "mb-2"},
-             "content": {"text": "仅需要补一条规则时使用；填好后打开下方开关并保存，即刻写入 RouterOS。"
-                                 "多条规则请改用上方「批量导入」。"}},
+             "content": {"text": "只加一条时用这个，填好打开下方开关、保存就写入。多条请用上面的批量导入。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sel("new_rule_table", "表", table_items)]},
@@ -508,8 +506,8 @@ class RosFirewallManager(_PluginBase):
                     sw("add_once", "立即添加这条规则", "保存后按上面的字段写入 RouterOS，并自动复位本开关")]},
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "text", "class": "mt-2"},
-             "content": {"text": "安全提示：新增放行规则默认插到兜底 drop 之前（否则会变成永不匹配的死规则）。"
-                                 "改动防火墙可能导致远程中断，建议开启「改动前自动留备份」，并确认有一条放行你管理 IP/SSH 的规则。"}},
+             "content": {"text": "放行规则默认插在兜底 drop 前面，不然不会生效。改防火墙可能把自己锁在外面，"
+                                 "先留个备份，确认有一条放行你管理 IP 的规则。"}},
         ]
         return content, defaults
 

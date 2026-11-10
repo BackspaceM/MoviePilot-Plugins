@@ -471,8 +471,8 @@ class MediaLibraryRefresh(_PluginBase):
             {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VAlert", "props": {
                     "type": "info", "variant": "tonal",
-                    "text": "媒体服务器直接在下方下拉勾选 MoviePilot 已连接的实例即可，无需手填地址与密钥；"
-                            "只有当需要「路径映射」或实例不在 MP 内时，才在文本框按同名补充一行。"}}]),
+                    "text": "下方下拉直接选 MoviePilot 已连接的实例，地址密钥自动带入。"
+                            "要配路径映射或实例不在 MP 里，再在文本框补一行。"}}]),
             ]},
             {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VSelect", "props": {
@@ -623,11 +623,11 @@ class MediaLibraryRefresh(_PluginBase):
         if not self._enabled:
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal", "class": "mb-2",
-                "text": "插件未启用：请先在配置中启用并填写媒体服务器清单。下方按钮仍可用于检测与手动刷新。"}})
+                "text": "插件没开，下面的按钮照样能用。"}})
         if self._server_errors:
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal", "class": "mb-2",
-                "text": "服务器配置有问题：" + "；".join(self._server_errors[:3])}})
+                "text": "服务器配置不对：" + "；".join(self._server_errors[:3])}})
         content.append({"component": "VRow", "content": [
             self._stat_card("累计刷新文件", str(stats.get("total_files", 0)), "mdi-file-check-outline"),
             self._stat_card("成功 / 失败轮次", f"{stats.get('ok_runs', 0)} / {stats.get('fail_runs', 0)}",

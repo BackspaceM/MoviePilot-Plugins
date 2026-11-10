@@ -1,4 +1,36 @@
 {
+  "RouterOSRemoteAccessWizard": {
+    "name": "RouterOS 外网访问向导",
+    "description": "从 MoviePilot 已连接的媒体服务器、下载器 WebUI 和 MP 本体里挑服务，一次生成 dst-nat 映射 + forward 放行（可选 Hairpin NAT）。预览表里直接看「外网端口 → 内网服务」的中文含义、风险与等价命令，确认后批量写入 RouterOS；备注带域名，方便以后在路由器上认出每条规则。部署前自动留系统备份，中途失败逆序回滚，同标签已存在则跳过。还带内网/外网连通性测试、一键回滚、试运行、MP 通知与远程命令。只新增带 MP-B1 标签的条目，不动用户手工规则；公网映射需显式勾选放行。",
+    "labels": "RouterOS,端口映射,外网访问,dst-nat,防火墙,连通性测试,自动回滚,MikroTik,远程观影",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：自动列出 MP 已连接的媒体服务器、下载器与 MP 本体的内网地址端口，支持下拉多选 + 手动补充；按「外网端口 → 内网服务」生成 dst-nat、forward 放行与可选 Hairpin NAT，外网端口自动分配并避开已占用端口，备注里写入域名；预览展示中文含义、风险、等价命令与插入位置（放行规则插到兜底 drop 之前）；确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚、手动回滚只删本次新建条目；统一 MP-B1 标签实现幂等跳过，公网映射需显式放行，参数校验与试运行；内网/外网两级连通性测试；接入 RouterOS 连接中心、11 个插件 API 与 5 个远程命令。"
+    }
+  },
+  "RouterOSScenarioTemplates": {
+    "name": "RouterOS 场景模板一键部署",
+    "description": "把 PT 友好 QoS、远程观影放行、访客网络隔离、IPv6 基础开通、WireGuard 回家做成场景模板：勾选 → 预览每条写入的分区、中文含义、风险与等价命令 → 确认 → 批量下发到 RouterOS 10 个配置分区。部署前自动创建 RouterOS 系统备份并把现状快照存到 MP，中途失败按逆序删除本次新建条目自动回滚，同标签已存在则跳过（幂等）；只新增带 MP-A2 标签的条目，绝不改动用户手工规则。连接参数可直接从 RouterOS 连接中心下拉带入，并支持试运行、一键回滚、MP 通知与远程命令。",
+    "labels": "RouterOS,场景模板,一键部署,自动回滚,配置备份,MikroTik,QoS,IPv6,WireGuard,降门槛",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：5 套场景模板（PT 友好 QoS / 远程观影放行 / 访客网络隔离 / IPv6 基础开通 / WireGuard 回家）共 21 条动作覆盖 10 个 RouterOS 分区；预览展示中文含义、风险等级、等价命令与插入位置；确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚，手动回滚只删本次新建条目；统一 MP-A2 备注标签实现幂等跳过，高危模板需显式放行，参数校验与试运行；接入 RouterOS 连接中心下拉、9 个插件 API 与 4 个远程命令。"
+    }
+  },
   "RouterOSConnectionCenter": {
     "name": "RouterOS 连接中心",
     "description": "一处保存多台 RouterOS 连接，自动广播给同库的 RouterOS 插件（设置页下拉即可选择，不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查配置、端口连通、REST 可用性、认证权限、RouterOS 版本与业务分区读权限，失败时给出可直接复制到 RouterOS 终端执行的修复命令。不选下拉时其他插件行为完全不变。",

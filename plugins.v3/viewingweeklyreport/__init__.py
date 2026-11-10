@@ -367,13 +367,14 @@ class ViewingWeeklyReport(_PluginBase):
 
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                              "class": "mb-4", "title": "① 基础开关与数据源说明"},
-             "content": {"text": "从媒体服务器读取近期播放历史，生成观影周报并扫描转码问题。"
-                                "数据源从下方「已连接媒体服务器」下拉勾选（MoviePilot 里已配好的 Emby/Plex/Jellyfin），"
-                                "地址与密钥自动带入；不在 MP 内、需要路径映射或多套实例，请在「手动补充」框按格式追加。"}},
+                                              "class": "mb-4"},
+             "content": {"text": "读媒体服务器的播放历史，生成周报，顺带查转码。"
+                                "下面的下拉直接选 MoviePilot 里配好的实例，地址密钥自动带入；"
+                                "不在 MP 里的在「手动补充」按格式加一行。"}},
             {"component": "VAlert", "props": {"type": "warning", "variant": "text",
-                                              "class": "mb-3", "title": "使用说明"},
-             "content": {"text": "① 首次启用建议勾选「立即生成一次周报」验证数据源；② 转码诊断需要媒体服务器 API 能提供在播会话的转码信息，Emby / Jellyfin / Plex 支持程度不同；③ 本地记录仅保存在插件数据目录，清空后不可恢复；④ 高码率阈值用于判断哪些片源建议预转码。"}},
+                                              "class": "mb-3"},
+             "content": {"text": "第一次可以勾「立即生成一次周报」看数据对不对。转码诊断依赖服务器 API，"
+                                "Emby / Jellyfin / Plex 支持程度不一样。本地记录清空后就没了。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时推送"}}]},
@@ -382,7 +383,7 @@ class ViewingWeeklyReport(_PluginBase):
                                                        "hint": "保存后按当前配置采集并分析，随后自动复位"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "② 数据源"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "数据源"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": [
                     {"component": "VSelect", "props": {
@@ -405,7 +406,7 @@ class ViewingWeeklyReport(_PluginBase):
                                        "plex|书房Plex|http://192.168.1.11:32400|PTOKEN||1"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "③ 统计口径"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "统计口径"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSelect", "props": {
@@ -424,7 +425,7 @@ class ViewingWeeklyReport(_PluginBase):
                         "hint": "运行时读取当前在播会话的转码现场"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "④ 推送与通知"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "推送与通知"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "推送周期(cron)", {"placeholder": "0 9 * * 1  每周一 09:00"})]},

@@ -485,17 +485,17 @@ class CFRouterOS(_PluginBase):
         content: List[dict] = [
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心 · 选择已保存的路由器"},
+                 "text": "连接中心"},
                 {"component": "VCardText", "content": [
                     {"component": "VSelect", "props": {
                         "model": "ros_connection",
                         "label": "已保存的路由器",
                         "items": roslink.connection_items(),
                         "clearable": True,
-                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
                         "persistentHint": True}},
                     {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                     "text": "下拉是空的就直接手填，不影响使用。"},
                 ]},
             ]},
             {
@@ -730,7 +730,7 @@ class CFRouterOS(_PluginBase):
                         "persistentHint": True}}]),
                     self._col(12, 3, [{"component": "VSwitch", "props": {
                         "model": "cleanup_names", "label": "接管全部同名记录",
-                        "hint": "开启后会删除同域名下非本插件写入的 A 记录，谨慎使用",
+                        "hint": "会删掉同域名下不是插件写的 A 记录",
                         "persistentHint": True}}]),
                     self._col(12, 3, [{"component": "VTextField", "props": {
                         "model": "probe_sni", "label": "TLS 测速 SNI",
@@ -749,12 +749,8 @@ class CFRouterOS(_PluginBase):
                         "persistentHint": True}}]),
                     self._col(12, 6, [{"component": "VAlert", "props": {
                         "type": "info", "variant": "tonal",
-                        "text": "工作方式：默认不依赖 DoH，直接把配置的域名当作 Cloudflare CDN 站点；"
-                                "官方网段 + 第三方/个人 IP 池合并后并发测速，取延迟最低的 N 个写入 "
-                                "/ip/dns/static（同名多条由 RouterOS 轮询返回）。"
-                                "先写新记录、成功后再清理旧记录，不会动你手写的其他记录。"
-                                "逐站点原始 IP / 优选 IP / 写入结果可在「查看日志」窗口实时查看（SSE）。"
-                                "内网客户端需把 DNS 指向这台 RouterOS 才会生效。"}}]),
+                        "text": "把配置的域名当 CDN 站点测速，挑最快的几个写进 /ip/dns/static。"
+                                "先写新的再删旧的，你手写的记录不动。客户端 DNS 要指向这台 RouterOS 才生效。"}}]),
                 ],
             },
         ]

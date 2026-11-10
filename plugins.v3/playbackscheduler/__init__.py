@@ -435,16 +435,16 @@ class PlaybackScheduler(_PluginBase):
 
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "读取媒体服务器的在播会话，按「空闲 / 原画 / 转码 / 远程转码」自动给下载器限速。"
-                                 "媒体服务器与下载器直接从 MoviePilot 已连接实例里勾选；限速只需填数字（Mbps，0 表示不限速）。"}},
-            section("① 基础开关"),
+             "content": {"text": "看媒体服务器有没有人在看片，自动给下载器限速。"
+                                 "媒体服务器和下载器从 MoviePilot 已连接的实例里选，限速填 Mbps 数字就行，0 是不限。"}},
+            section("开关"),
             {"component": "VRow", "content": [
                 col(4, [switch("enabled", "启用插件", "关闭后不再轮询与限速")]),
                 col(4, [switch("onlyonce", "立即执行一次", "保存后触发一轮检查并自动复位")]),
                 col(4, [{"component": "VSelect", "props": {
                     "model": "notify_mode", "label": "通知方式", "items": notify_items}}]),
             ]},
-            section("② 数据源", "从 MoviePilot 已连接实例中勾选"),
+            section("数据源", "从 MoviePilot 已连接实例中勾选"),
             {"component": "VRow", "content": [
                 col(6, [{"component": "VSelect", "props": {
                     "model": "media_servers", "label": "媒体服务器（可多选）",
@@ -469,7 +469,7 @@ class PlaybackScheduler(_PluginBase):
                     "hint": "每行：类型|名称|地址|用户名|密码|启用；同名行会覆盖上面的下拉项",
                     "placeholder": "qbittorrent|QB|http://192.168.1.20:8080|admin|pass|1"}}]),
             ]},
-            section("③ 各状态限速", "单位 Mbps，0 = 不限速；一般只需压上传"),
+            section("各状态限速", "单位 Mbps，0 = 不限速；一般只需压上传"),
             {"component": "VRow", "content": limit_cards},
             {"component": "VRow", "content": [
                 col(12, [{"component": "VTextarea", "props": {
@@ -478,7 +478,7 @@ class PlaybackScheduler(_PluginBase):
                     "hint": "留空则以上方数字输入为准；需要批量定义时按「状态:下载,上传」每行一条填写",
                     "placeholder": "idle:0,0\ndirectplay:0,50\ntranscode:0,30\nremote_transcode:0,15"}}]),
             ]},
-            section("④ RouterOS 联动（可选）"),
+            section("RouterOS 联动（可选）"),
             {"component": "VRow", "content": [
                 col(4, [switch("router_enabled", "联动 RouterOS 队列")]),
                 col(4, [field("router_queue_max", "RouterOS 队列上限",
@@ -489,7 +489,7 @@ class PlaybackScheduler(_PluginBase):
                 col(4, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
                          "text": "不启用联动时以上信息可留空"}]),
             ]},
-            section("⑤ 在播保护与观影后清理"),
+            section("在播保护与清理"),
             {"component": "VRow", "content": [
                 col(4, [switch("protect_playing", "保护在播文件（打标签）")]),
                 col(4, [field("protect_tag", "保护标签名")]),
@@ -498,7 +498,7 @@ class PlaybackScheduler(_PluginBase):
                 col(4, [field("cleanup_ratio", "最小做种率", {"type": "number"})]),
                 col(4, [field("cleanup_tag", "删种候选标签")]),
             ]},
-            section("⑥ 调度与调试"),
+            section("调度与调试"),
             {"component": "VRow", "content": [
                 col(6, [field("cron", "轮询周期(cron)", {"placeholder": _DEFAULT_CRON})]),
                 col(6, [switch("dry_run", "试运行（不实际修改）")]),
