@@ -94,5 +94,21 @@
     "history": {
       "v1.0.0": "首个版本：TransferComplete/字幕/删除事件提取文件路径；Emby/Jellyfin 用 /Library/Media/Updated 做单文件级 Created/Modified/Deleted 增量刷新，Plex 按媒体库 + 父目录局部扫描；按服务器路径映射、合并窗口 debounce、批量上限与最大等待、三级回退（父目录/库级/全库）、指数退避重试与丢弃告警；多服务器连通性检测、定时对账、试运行、MP 通知分级、INFO 级 SSE 实时日志与详情页逐服务器明细/队列/日志；5 个远程命令与 9 个插件 API。"
     }
+  },
+    "BandwidthQueueScheduler": {
+    "name": "带宽/Queue 智能调度",
+    "description": "在 RouterOS 上按带宽方案智能编排简单队列：内置均衡/观影优先/下载优先/夜间全速四套方案，支持时段规则自动切换、详情页一键手动切换、队列实时速率监控与 FastTrack 绕过诊断；统一管理前缀，绝不误伤手工队列。",
+    "labels": "RouterOS,带宽管理,Queue,智能调度,MikroTik,限速,时段调度",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/bandwidthqueuescheduler.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：在 RouterOS 上按带宽方案智能编排简单队列。用户以 名称=IP/CIDR|角色 定义设备，内置均衡/观影优先/下载优先/夜间全速四套方案并支持自定义 JSON 覆盖；可按 HH:MM-HH:MM=方案 的时段规则自动切换（含跨午夜），也可在详情页一键切换（每个按钮均绑定真实 API，杜绝无效按钮）。每轮按差异新建/更新/删除队列（仅管理统一前缀，不碰手工队列），读取实时速率并诊断 FastTrack 绕过风险；cron 定时+立即执行+试运行、MP 分级通知、INFO 级 SSE 实时日志、7 个 API 与远程命令。详情页动态文本统一全角转义，避免被当 Markdown 渲染成空药丸。"
+    }
   }
 }
