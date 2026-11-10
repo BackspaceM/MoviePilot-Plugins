@@ -1,0 +1,826 @@
+"""RouterOS 配置备份与漂移检测 —— MoviePilot V3 插件主类。
+
+定期（或手动）通过 RouterOS REST API 读取关键配置分区并持久化快照，
+与基线快照做指纹对比，检测新增/删除并高亮敏感分区；同时巡检 MP 已连接的
+下载器（qB/TR）与媒体服务器（Emby/Plex/Jellyfin）在线状态（配置页下拉框勾选，
+并预留手动补充框以兼容多下载器 / MP 外实例）；漂移或异常时发 MP 通知，
+关键路径 INFO 级日志供 SSE 实时查看。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import json
+import threading
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from apscheduler.triggers.cron import CronTrigger
+from app.schemas.types import EventType, MessageType
+from app.sdk import scheduler as scheduler_sdk
+from app.sdk.events import Event, eventmanager
+from app.sdk.logging import logger
+from app.sdk.plugin import _PluginBase
+
+try:
+    from app.sdk.network import AsyncRequestUtils
+except Exception:  # noqa: BLE001
+    AsyncRequestUtils = None  # type: ignore
+
+try:
+    from schemas import Response
+except Exception:  # noqa: BLE001
+    class Response:  # type: ignore
+        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
+            self.success = success
+            self.message = message
+            self.data = data
+
+try:
+    _PLUGIN_MTYPE = MessageType.Plugin
+except Exception:  # noqa: BLE001
+    _PLUGIN_MTYPE = None
+
+from .clients import (
+    RouterOSGuardClient,
+    ServiceMonitorHelper,
+    build_routeros_client,
+)
+from .core import (
+    DEFAULT_SECTIONS,
+    SECTIONS,
+    basename_from_types,
+    diff_snapshots,
+    format_diff,
+    format_health,
+    make_snapshot,
+    mask_secrets,
+    merge_names,
+    parse_extra_names,
+    prune_snapshots,
+    section_items,
+    snapshot_id,
+    summary_text,
+    validate_cron,
+)
+
+# ---------------------------------------------------------------------------
+# 常量
+# ---------------------------------------------------------------------------
+
+PLUGIN_NAME = "RouterOSConfigGuard"
+PLUGIN_ICON = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png"
+PLUGIN_DESCRIPTION = "定时备份 RouterOS 配置并检测漂移（新增/删除高亮敏感分区），巡检 MP 已连接的下载器与媒体服务器在线状态，漂移即时通知。"
+PLUGIN_AUTHORS = "BackspaceM"
+AUTHOR_URL = "https://github.com/BackspaceM"
+PLUGIN_COLOR = "#E67E22"
+SYSTEM_VERSION = ">=3.0.0"
+
+_LOG_PREFIX = "RouterOS配置备份"
+_ONCE_JOB_ID = "rosguard_once"
+_MAX_LOGS = 200
+_MAX_SNAPSHOTS = 60
+_DEFAULT_CRON = "0 3 * * *"          # 每天 03:00
+_DEFAULT_KEEP = 20
+_SNAPSHOT_DIR = "snapshots"
+
+# plugindata keys
+_KEY_BASELINE = "rosguard_baseline"      # 基线快照 dict
+_KEY_INDEX = "rosguard_index"            # 快照索引列表（倒序）
+_KEY_LIVE = "rosguard_live"
+_KEY_LAST = "rosguard_last"
+_KEY_LOGS = "rosguard_logs"
+_KEY_HEALTH = "rosguard_health"
+
+_NOTIFY_LABELS = {
+    "all": "全部（含无变化）",
+    "drift": "仅漂移/异常",
+    "none": "关闭",
+}
+
+
+def now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def _ts_text(ts: Optional[float]) -> str:
+    if not ts:
+        return "—"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+    except Exception:  # noqa: BLE001
+        return str(ts)
+
+
+class RouterOSConfigGuard(_PluginBase):
+    plugin_name = PLUGIN_NAME
+    plugin_desc = PLUGIN_DESCRIPTION
+    plugin_icon = PLUGIN_ICON
+    plugin_version = "1.0.0"
+    plugin_author = PLUGIN_AUTHORS
+    author_url = AUTHOR_URL
+    plugin_config_prefix = "routerosconfigguard_"
+    plugin_color = PLUGIN_COLOR
+    system_version = SYSTEM_VERSION
+    plugin_order = 60
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+
+    def __init__(self):
+        super().__init__()
+        self._enabled = False
+        self._state_lock = threading.Lock()
+        self._running = False
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def init_plugin(self, config: dict) -> None:
+        config = dict(config or {})
+        self.stop_service()
+        self._enabled = bool(config.get("enabled"))
+
+        self._address = str(config.get("router_address") or "").strip()
+        self._port = int(config.get("router_port") or 443)
+        self._use_ssl = bool(config.get("router_ssl", True))
+        self._username = str(config.get("router_username") or "").strip()
+        self._password = str(config.get("router_password") or "")
+
+        selected_sections = config.get("sections")
+        if isinstance(selected_sections, str):
+            selected_sections = [x.strip() for x in selected_sections.split(",") if x.strip()]
+        self._sections = [k for k in (selected_sections or DEFAULT_SECTIONS) if k in {s.key for s in SECTIONS}] or list(DEFAULT_SECTIONS)
+
+        # 下拉勾选 + 预留手动补充
+        dl_sel = config.get("downloaders")
+        if isinstance(dl_sel, str):
+            dl_sel = parse_extra_names(dl_sel)
+        ms_sel = config.get("mediaservers")
+        if isinstance(ms_sel, str):
+            ms_sel = parse_extra_names(ms_sel)
+        self._downloaders = merge_names(dl_sel or [], parse_extra_names(config.get("downloaders_extra")))
+        self._mediaservers = merge_names(ms_sel or [], parse_extra_names(config.get("mediaservers_extra")))
+        self._check_services = bool(config.get("check_services", True))
+
+        self._cron = str(config.get("cron") or _DEFAULT_CRON).strip() or _DEFAULT_CRON
+        if not validate_cron(self._cron)[0]:
+            self._cron = _DEFAULT_CRON
+        self._keep = max(1, min(_MAX_SNAPSHOTS, int(config.get("keep") or _DEFAULT_KEEP)))
+        self._auto_baseline = bool(config.get("auto_baseline", True))
+        self._notify_mode = str(config.get("notify_mode") or "drift").strip() or "drift"
+        self._timeout = max(3, min(60, int(config.get("timeout") or 10)))
+        self._max_rows = max(50, min(20000, int(config.get("max_rows") or 2000)))
+        self._dry_run = bool(config.get("dry_run"))
+
+        self._update_live(enabled=self._enabled, running=False, stage="待命")
+
+        if config.get("onlyonce"):
+            config["onlyonce"] = False
+            try:
+                self.update_config(config)
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"{_LOG_PREFIX}：复位立即执行开关失败 {err}")
+            if not self._enabled:
+                self._log("WARN", "插件未启用，已忽略「立即执行一次」")
+            elif self.start_run(trigger="立即执行一次", prefer_thread=True):
+                self._log("INFO", "配置页触发「立即执行一次」（独立线程）")
+            else:
+                self._log("WARN", "配置页触发被跳过：已有任务在运行")
+
+    def _secrets(self) -> List[str]:
+        return [self._password] if self._password else []
+
+    def get_state(self) -> bool:
+        return self._enabled
+
+    def stop_service(self) -> None:
+        self._stop_event.set()
+        remove_once = getattr(scheduler_sdk, "remove_plugin_once_job", None)
+        if callable(remove_once):
+            try:
+                remove_once(self.__class__.__name__, _ONCE_JOB_ID)
+            except Exception:  # noqa: BLE001
+                pass
+        thread = getattr(self, "_thread", None)
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=3)
+        with self._state_lock:
+            self._running = False
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        if not self.get_state():
+            return []
+        try:
+            trigger = CronTrigger.from_crontab(self._cron)
+        except (ValueError, TypeError):
+            trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
+        return [{
+            "id": PLUGIN_NAME,
+            "name": "RouterOS 配置备份与漂移检测",
+            "trigger": trigger,
+            "func": self.start_run,
+            "kwargs": {"trigger": "定时轮询", "prefer_thread": True},
+        }]
+
+    # ------------------------------------------------------------------
+    # 配置页（含 MP 已连接实例下拉框 + 预留手动补充）
+    # ------------------------------------------------------------------
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        dl_items = ServiceMonitorHelper.downloader_options()
+        ms_items = ServiceMonitorHelper.media_options()
+
+        defaults: Dict[str, Any] = {
+            "enabled": False,
+            "onlyonce": False,
+            "router_address": "",
+            "router_port": 443,
+            "router_ssl": True,
+            "router_username": "",
+            "router_password": "",
+            "sections": list(DEFAULT_SECTIONS),
+            "downloaders": [],
+            "downloaders_extra": "",
+            "mediaservers": [],
+            "mediaservers_extra": "",
+            "check_services": True,
+            "cron": _DEFAULT_CRON,
+            "keep": _DEFAULT_KEEP,
+            "auto_baseline": True,
+            "notify_mode": "drift",
+            "timeout": 10,
+            "max_rows": 2000,
+            "dry_run": False,
+        }
+
+        def sel(model: str, label: str, items: List[Dict[str, str]], hint: str) -> dict:
+            return {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                {"component": "VSelect", "props": {
+                    "model": model, "label": label, "items": items,
+                    "multiple": True, "chips": True, "clearable": True,
+                    "hint": hint, "persistent-hint": True,
+                }},
+            ]}
+
+        def fld(model: str, label: str, props: Optional[dict] = None) -> dict:
+            p = {"model": model, "label": label}
+            if props:
+                p.update(props)
+            return {"component": "VTextField", "props": p}
+
+        content: List[dict] = [
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
+             "content": {"text": "从 MP 已连接实例中直接勾选下载器/媒体服务器，插件会巡检其在线状态；"
+                                 "如需监控 MP 之外或多套实例，可在下方「手动补充」框填写名称。"}},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时备份"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "onlyonce", "label": "立即执行一次", "hint": "保存后触发一轮备份+检测"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "auto_baseline", "label": "首次自动设基线", "hint": "无基线时把首份快照设为基线"}}]},
+            ]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址",
+                     "placeholder": "192.168.1.1 或 https://ros.local"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                    fld("router_port", "端口", {"type": "number"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "router_ssl", "label": "使用 HTTPS", "hint": "关闭则用 HTTP"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    fld("router_username", "用户名", {"placeholder": "需具备 read / api 权限"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    fld("router_password", "密码", {"type": "password"})]},
+            ]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VRow", "content": [
+                sel("sections", "备份分区（可多选）", section_items(), "默认勾选常用分区；敏感分区漂移将高亮告警"),
+            ]},
+            {"component": "VRow", "content": [
+                sel("downloaders", "下载器（MP 已连接）", dl_items, "来源：MoviePilot 已配置的 qBittorrent / Transmission"),
+                sel("mediaservers", "媒体服务器（MP 已连接）", ms_items, "来源：MoviePilot 已配置的 Emby / Plex / Jellyfin"),
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    fld("downloaders_extra", "下载器 · 手动补充", {"placeholder": "MP 外实例名称，逗号分隔；也可补充多下载器"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    fld("mediaservers_extra", "媒体服务器 · 手动补充", {"placeholder": "MP 外实例名称，逗号分隔"})]},
+            ]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    fld("cron", "备份周期(cron)", {"placeholder": "0 3 * * *  每天 03:00"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                    fld("keep", "保留快照份数", {"type": "number"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                    fld("timeout", "请求超时(秒)", {"type": "number"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                    {"component": "VSwitch", "props": {"model": "check_services", "label": "巡检关联服务"}}]},
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSelect", "props": {"model": "notify_mode", "label": "通知方式",
+                     "items": [{"title": v, "value": k} for k, v in _NOTIFY_LABELS.items()]}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    fld("max_rows", "单分区最大行数", {"type": "number"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "dry_run", "label": "试运行", "hint": "只读取不写基线/快照文件"}}]},
+            ]},
+        ]
+        return content, defaults
+
+    # ------------------------------------------------------------------
+    # 执行控制
+    # ------------------------------------------------------------------
+
+    def start_run(self, trigger: str = "手动", prefer_thread: bool = False) -> bool:
+        with self._state_lock:
+            if self._running:
+                return False
+            self._running = True
+            self._stop_event.clear()
+        self._update_live(running=True, stage=f"{trigger}：读取配置", trigger=trigger)
+
+        def _task() -> None:
+            try:
+                result = self._run_coroutine(self._async_run(trigger))
+                self.save_data(_KEY_LAST, result)
+                self._notify_result(result, trigger)
+            except Exception as err:  # noqa: BLE001
+                self._log("ERROR", f"备份任务异常：{err}\n{traceback.format_exc()[-800:]}")
+                self._send_message("RouterOS 备份异常", f"触发：{trigger}\n错误：{err}")
+            finally:
+                with self._state_lock:
+                    self._running = False
+                self._update_live(running=False, stage="待命")
+
+        if prefer_thread:
+            self._thread = threading.Thread(target=_task, daemon=True, name="ROSGuard-Run")
+            self._thread.start()
+        else:
+            _task()
+        return True
+
+    @staticmethod
+    def _run_coroutine(coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        # 已在事件循环中（如 API 在异步上下文调用）：丢到独立线程跑，避免嵌套 loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=180)
+
+    async def _async_run(self, trigger: str) -> Dict[str, Any]:
+        started = time.time()
+        result: Dict[str, Any] = {
+            "trigger": trigger, "ok": False, "snapshot_id": "", "identity": {},
+            "sections": self._sections, "fetch": {}, "diff": None, "health": [],
+            "baseline_ts": None, "baseline_set": False, "duration": 0.0, "message": "",
+        }
+        if AsyncRequestUtils is None:
+            result["message"] = "网络模块不可用"
+            self._log("ERROR", "网络模块 AsyncRequestUtils 不可用")
+            return result
+        if not self._address:
+            result["message"] = "未配置 RouterOS 地址"
+            self._log("WARN", "未配置 RouterOS 地址，跳过")
+            return result
+
+        http = AsyncRequestUtils(verify=self._use_ssl is False)
+        client: RouterOSGuardClient = build_routeros_client(
+            self._address, self._username, self._password, http,
+            port=self._port, use_ssl=self._use_ssl, timeout=self._timeout)
+
+        # 1) 连通性
+        ok, msg = await client.check(client=http)
+        self._log("INFO" if ok else "WARN", f"[{trigger}] RouterOS 连通性：{msg}")
+        if not ok:
+            result["message"] = msg
+            return result
+
+        # 2) 拉取分区
+        self._update_live(running=True, stage=f"{trigger}：拉取 {len(self._sections)} 个分区")
+        fetched = await client.fetch(self._sections, client=http, max_rows=self._max_rows)
+        result["identity"] = fetched.identity
+        result["fetch"] = {"ok": fetched.ok_count, "fail": fetched.fail_count, "errors": fetched.errors}
+        for key, err in fetched.errors.items():
+            self._log("WARN", f"分区 {key}：{err}")
+        if fetched.fail_count == len(self._sections):
+            result["message"] = "全部分区读取失败"
+            self._log("ERROR", "全部分区读取失败，未生成快照")
+            return result
+
+        # 3) 组装快照
+        snap = make_snapshot(fetched.rows, self._sections)
+        result["fetch"]["total_rows"] = sum(s["count"] for s in snap["sections"].values())
+
+        # 4) 与基线对比
+        baseline = self.get_data(_KEY_BASELINE)
+        result["baseline_ts"] = (baseline or {}).get("ts") if isinstance(baseline, dict) else None
+        diff = diff_snapshots(baseline, snap, self._sections)
+        result["diff"] = diff
+        self._log("INFO", f"[{trigger}] 快照完成：{len(self._sections)} 分区 / "
+                          f"{result['fetch']['total_rows']} 行；漂移={summary_text(diff)}")
+
+        # 5) 关联服务巡检
+        if self._check_services and (self._downloaders or self._mediaservers):
+            health = ServiceMonitorHelper.check(self._downloaders, self._mediaservers)
+            result["health"] = [h.to_dict() for h in health]
+            self.save_data(_KEY_HEALTH, result["health"])
+            offline = [h for h in health if not h.online]
+            self._log("INFO" if not offline else "WARN",
+                      f"关联服务巡检：{format_health(result['health'])}")
+
+        # 6) 持久化（试运行不落盘、不改基线）
+        if self._dry_run:
+            self._log("INFO", "试运行：跳过快照落盘与基线更新")
+        else:
+            sid = snapshot_id(snap["ts"])
+            if self._persist_snapshot(sid, snap, diff, fetched.identity):
+                result["snapshot_id"] = sid
+            if baseline is None and self._auto_baseline:
+                self.save_data(_KEY_BASELINE, snap)
+                result["baseline_set"] = True
+                result["baseline_ts"] = snap["ts"]
+                self._log("INFO", "已自动将首份快照设为基线")
+
+        result["ok"] = True
+        result["message"] = (f"快照 {result.get('snapshot_id') or '(试运行)'} 完成；" + summary_text(diff))
+        self._update_live(
+            state_last=summary_text(diff),
+            baseline_ts=result["baseline_ts"],
+            last_run=snap["ts"],
+            last_snapshot=result.get("snapshot_id", ""),
+            drift=diff.get("has_drift", False),
+            sensitive_hits=diff.get("sensitive_hits", []),
+            identity=fetched.identity,
+            health=result.get("health", []),
+        )
+        result["duration"] = round(time.time() - started, 2)
+        return result
+
+    # ------------------------------------------------------------------
+    # 快照持久化
+    # ------------------------------------------------------------------
+
+    def _snapshot_dir(self) -> Path:
+        path = Path(str(self.get_data_path())) / _SNAPSHOT_DIR
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _persist_snapshot(self, sid: str, snap: Dict[str, Any], diff: Dict[str, Any],
+                          identity: Dict[str, str]) -> bool:
+        """写快照文件并维护索引（倒序，保留最近 keep 份）。"""
+        try:
+            directory = self._snapshot_dir()
+            payload = {
+                "id": sid,
+                "device": identity,
+                "sections": self._sections,
+                "drift": summary_text(diff),
+                "has_drift": diff.get("has_drift", False),
+                "snapshot": snap,
+            }
+            (directory / f"{sid}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as err:  # noqa: BLE001
+            self._log("WARN", f"快照文件写入失败：{err}")
+            return False
+
+        index = list(self.get_data(_KEY_INDEX) or [])
+        index.insert(0, {
+            "id": sid, "ts": snap.get("ts"), "device": identity,
+            "rows": sum(s["count"] for s in snap["sections"].values()),
+            "has_drift": diff.get("has_drift", False), "drift": summary_text(diff),
+            "file": f"{sid}.json",
+        })
+        kept, removed = prune_snapshots(index, self._keep)
+        for old in removed:
+            try:
+                (directory / str(old.get("file") or "")).unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+        self.save_data(_KEY_INDEX, kept)
+        return True
+
+    def _read_snapshot_file(self, sid: str) -> Optional[Dict[str, Any]]:
+        safe = "".join(c for c in str(sid) if c.isalnum() or c in "_-.")
+        path = self._snapshot_dir() / f"{safe}.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+
+    # ------------------------------------------------------------------
+    # 管理动作
+    # ------------------------------------------------------------------
+
+    def set_baseline(self, sid: Optional[str] = None) -> Dict[str, Any]:
+        """把某份快照（默认最近一份）设为基线。"""
+        index = list(self.get_data(_KEY_INDEX) or [])
+        target = sid or (index[0].get("id") if index else None)
+        if not target:
+            return {"ok": False, "message": "暂无快照，请先执行一次备份"}
+        payload = self._read_snapshot_file(str(target))
+        if not payload or not isinstance(payload.get("snapshot"), dict):
+            return {"ok": False, "message": f"快照 {target} 不存在或已损坏"}
+        snap = payload["snapshot"]
+        self.save_data(_KEY_BASELINE, snap)
+        self._log("INFO", f"已将快照 {target} 设为基线")
+        self._update_live(baseline_ts=snap.get("ts"), last_snapshot=str(target))
+        return {"ok": True, "message": f"已将快照 {target} 设为基线", "ts": snap.get("ts")}
+
+    def clear_snapshots(self) -> Dict[str, Any]:
+        """清空快照索引、文件与健康缓存（保留基线指针可选：一并清除更彻底）。"""
+        removed = 0
+        try:
+            directory = self._snapshot_dir()
+            index = list(self.get_data(_KEY_INDEX) or [])
+            for item in index:
+                try:
+                    (directory / str(item.get("file") or "")).unlink(missing_ok=True)
+                    removed += 1
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+        self.save_data(_KEY_INDEX, [])
+        self.save_data(_KEY_BASELINE, None)
+        self.save_data(_KEY_HEALTH, [])
+        self._log("INFO", f"已清空快照（{removed} 份）与基线")
+        return {"ok": True, "message": f"已清空 {removed} 份快照与基线"}
+
+    def snapshot_list(self) -> List[Dict[str, Any]]:
+        return list(self.get_data(_KEY_INDEX) or [])
+
+    def current_status(self) -> Dict[str, Any]:
+        live = dict(self.get_data(_KEY_LIVE) or {})
+        baseline = self.get_data(_KEY_BASELINE)
+        index = self.snapshot_list()
+        last = dict(self.get_data(_KEY_LAST) or {})
+        return {
+            "enabled": self.get_state(),
+            "running": bool(getattr(self, "_running", False)),
+            "router": self._address,
+            "sections": self._sections,
+            "baseline_ts": (baseline or {}).get("ts") if isinstance(baseline, dict) else None,
+            "baseline_set": isinstance(baseline, dict) and bool(baseline.get("sections")),
+            "snapshots": len(index),
+            "latest": index[0] if index else None,
+            "last": last,
+            "health": list(self.get_data(_KEY_HEALTH) or []),
+            "live": live,
+        }
+
+    # ------------------------------------------------------------------
+    # 数据 / 日志 / 通知
+    # ------------------------------------------------------------------
+
+    def _update_live(self, **kwargs: Any) -> None:
+        live = dict(self.get_data(_KEY_LIVE) or {})
+        live.update(kwargs)
+        self.save_data(_KEY_LIVE, live)
+
+    def _log(self, level: str, message: str) -> None:
+        content = mask_secrets(str(message), self._secrets())
+        try:
+            logs = list(self.get_data(_KEY_LOGS) or [])
+            logs.insert(0, {"time": now_text(), "level": level, "message": content})
+            self.save_data(_KEY_LOGS, logs[:_MAX_LOGS])
+        except Exception:  # noqa: BLE001
+            pass
+        line = f"{_LOG_PREFIX}：{content}"
+        if level == "ERROR":
+            logger.error(line)  # type: ignore[name-defined]
+        elif level == "WARN":
+            logger.warning(line)  # type: ignore[name-defined]
+        elif level == "DEBUG":
+            logger.debug(line)  # type: ignore[name-defined]
+        else:
+            logger.info(line)  # type: ignore[name-defined]
+
+    def _send_message(self, title: str, text: str, *,
+                      channel: Any = None, userid: Any = None) -> None:
+        payload: Dict[str, Any] = {"title": title, "text": mask_secrets(text, self._secrets())}
+        if _PLUGIN_MTYPE is not None:
+            payload["mtype"] = _PLUGIN_MTYPE
+        if channel:
+            payload["channel"] = channel
+        if userid:
+            payload["userid"] = userid
+        try:
+            self.post_message(**payload)
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"{_LOG_PREFIX}：通知发送失败 {err}")  # type: ignore[name-defined]
+
+    def _notify_result(self, result: Dict[str, Any], trigger: str) -> None:
+        mode = self._notify_mode
+        if mode == "none":
+            return
+        diff = result.get("diff") or {}
+        drifted = bool(diff.get("has_drift"))
+        has_issue = (not result.get("ok")) or result.get("fetch", {}).get("fail", 0) > 0
+        offline = [h for h in result.get("health", []) if not h.get("online")]
+        if mode == "drift" and not (drifted or has_issue or offline):
+            return
+
+        lines = [f"触发：{trigger}"]
+        if not result.get("ok"):
+            lines.append(f"执行失败：{result.get('message', '')}")
+        else:
+            ident = result.get("identity") or {}
+            lines.append(f"设备：{ident.get('name', 'RouterOS')}（{ident.get('version', '')}）")
+            lines.append(f"快照：{result.get('snapshot_id') or '试运行'}｜{result.get('message', '')}")
+            if drifted:
+                lines.append(format_diff(diff, max_rows=6))
+            else:
+                lines.append("配置无漂移")
+            if offline:
+                lines.append("⚠ 关联服务离线：" + "、".join(f"{h.get('name')}" for h in offline))
+        lines.append(f"耗时 {result.get('duration', 0)}s")
+        title = "RouterOS 配置漂移告警" if (drifted or has_issue or offline) else "RouterOS 配置备份完成"
+        self._send_message(title, "\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # 详情页
+    # ------------------------------------------------------------------
+
+    def get_page(self) -> List[dict]:
+        status = self.current_status()
+        index = self.snapshot_list()
+        logs = list(self.get_data(_KEY_LOGS) or [])
+        last = status.get("last") or {}
+        diff = last.get("diff") or {}
+        health = status.get("health") or []
+
+        # 快照清单
+        snap_lines = [f"{it.get('id')}｜{_ts_text(it.get('ts'))}｜{it.get('rows', 0)} 行｜"
+                      f"{'⚠ ' + it.get('drift', '') if it.get('has_drift') else '无漂移'}"
+                      for it in index[:12]] or ["暂无快照，请点击「立即备份并检测」"]
+
+        # 漂移明细
+        if diff.get("has_drift"):
+            drift_text = format_diff(diff, max_rows=8)
+        else:
+            drift_text = "无漂移" if last else "尚未执行检测"
+
+        health_lines = [f"{h.get('category')}:{h.get('name')}｜{'在线' if h.get('online') else '离线'}｜{h.get('detail', '')}"
+                        for h in health] or ["未选择关联服务"]
+
+        buttons = []
+        for label, api in (("立即备份并检测", "run"), ("测试连接", "test"),
+                           ("最近设为基线", "baseline"), ("重载快照列表", "snapshots"),
+                           ("清空快照", "clear"), ("停止", "stop")):
+            buttons.append({
+                "component": "VBtn", "props": {"variant": "tonal", "size": "small", "text": label},
+                "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
+                                     "params": {}, "confirm": label in ("清空快照", "停止")}},
+            })
+
+        def kv(label: str, value: str, md: int = 4) -> dict:
+            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
+                {"component": "VLabel", "text": label},
+                {"component": "div", "text": value, "props": {"style": "white-space:pre-wrap"}},
+            ]}
+
+        return [{
+            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
+                "component": "VCardText", "content": [
+                    {"component": "VRow", "content": [
+                        kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
+                        kv("当前任务", "运行中" if status.get("running") else "待命"),
+                        kv("备份周期", self._cron),
+                        kv("监控分区", f"{len(self._sections)} 个：{basename_from_types(self._sections)}"),
+                        kv("基线时间", _ts_text(status.get("baseline_ts"))),
+                        kv("快照份数", str(status.get("snapshots", 0))),
+                    ]},
+                    {"component": "VDivider", "props": {"class": "my-3"}},
+                    {"component": "VLabel", "text": "最近检测结果"},
+                    {"component": "div", "text": drift_text, "props": {"style": "white-space:pre-wrap;font-size:13px"}},
+                    {"component": "VDivider", "props": {"class": "my-3"}},
+                    {"component": "VLabel", "text": "关联服务在线状态"},
+                    *[{"component": "div", "text": line, "props": {"style": "white-space:pre-wrap;font-size:13px"}}
+                      for line in health_lines],
+                    {"component": "VDivider", "props": {"class": "my-3"}},
+                    {"component": "VLabel", "text": "快照清单（最近 12 份，文件位于插件数据目录）"},
+                    *[{"component": "div", "text": line, "props": {"style": "white-space:pre-wrap;font-size:12px"}}
+                      for line in snap_lines],
+                    {"component": "VDivider", "props": {"class": "my-3"}},
+                    {"component": "VLabel", "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"},
+                    *[{"component": "div", "text": f"[{l['time']}][{l['level']}] {l['message']}",
+                       "props": {"style": "white-space:pre-wrap;font-size:12px"}} for l in logs[:20]],
+                    {"component": "VRow", "props": {"class": "mt-4"}, "content": [
+                        {"component": "VCol", "content": buttons}]},
+                ]},
+            ]},
+        ]
+
+    # ------------------------------------------------------------------
+    # API
+    # ------------------------------------------------------------------
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        base = f"/plugin/{PLUGIN_NAME}"
+        return [
+            {"path": f"{base}/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
+            {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": f"{base}/baseline", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
+            {"path": f"{base}/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取快照索引列表"},
+            {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": f"{base}/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空快照与基线"},
+            {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+        ]
+
+    def api_run(self, _=None) -> Response:
+        started = self.start_run(trigger="API 立即检查", prefer_thread=True)
+        return Response(success=True, message="已触发备份检测" if started else "已有任务在运行", data={"started": started})
+
+    def api_test(self, _=None) -> Response:
+        if AsyncRequestUtils is None or not self._address:
+            return Response(success=False, message="网络模块不可用或未配置地址")
+        http = AsyncRequestUtils(verify=self._use_ssl is False)
+        client = build_routeros_client(self._address, self._username, self._password, http,
+                                       port=self._port, use_ssl=self._use_ssl, timeout=self._timeout)
+        ok, msg = self._run_coroutine(client.check(client=http))
+        return Response(success=bool(ok), message=mask_secrets(msg, self._secrets()))
+
+    def api_baseline(self, _=None) -> Response:
+        data = self.set_baseline()
+        return Response(success=bool(data.get("ok")), message=data.get("message", ""), data=data)
+
+    def api_snapshots(self, _=None) -> Response:
+        return Response(success=True, data=self.snapshot_list())
+
+    def api_status(self, _=None) -> Response:
+        return Response(success=True, data=self.current_status())
+
+    def api_clear(self, _=None) -> Response:
+        data = self.clear_snapshots()
+        return Response(success=bool(data.get("ok")), message=data.get("message", ""), data=data)
+
+    def api_stop(self, _=None) -> Response:
+        self.stop_service()
+        self._update_live(running=False, stage="已停止")
+        return Response(success=True, message="已停止")
+
+    # ------------------------------------------------------------------
+    # 远程命令
+    # ------------------------------------------------------------------
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        return [
+            {"cmd": "/rosguard_status", "event": EventType.PluginAction, "desc": "查看 RouterOS 备份状态与最近漂移", "category": "MoviePilot"},
+            {"cmd": "/rosguard_run", "event": EventType.PluginAction, "desc": "立即执行 RouterOS 备份与漂移检测", "category": "MoviePilot"},
+            {"cmd": "/rosguard_baseline", "event": EventType.PluginAction, "desc": "将最近快照设为基线", "category": "MoviePilot"},
+            {"cmd": "/rosguard_clear", "event": EventType.PluginAction, "desc": "清空 RouterOS 快照与基线", "category": "MoviePilot"},
+        ]
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_command(self, event: Any) -> None:
+        if not event or not getattr(event, "event_data", None):
+            return
+        data = event.event_data
+        cmd = str(data.get("cmd") or "").lower()
+        channel = data.get("channel")
+        userid = data.get("user_id")
+        handlers = {
+            "/rosguard_status": self._cmd_status,
+            "/rosguard_run": self._cmd_run,
+            "/rosguard_baseline": self._cmd_baseline,
+            "/rosguard_clear": self._cmd_clear,
+        }
+        handler = handlers.get(cmd)
+        if handler:
+            handler(channel, userid)
+
+    def _cmd_status(self, channel, userid) -> None:
+        status = self.current_status()
+        last = status.get("last") or {}
+        diff = last.get("diff") or {}
+        text = (f"基线：{_ts_text(status.get('baseline_ts'))}\n"
+                f"快照：{status.get('snapshots', 0)} 份\n"
+                f"最近：{summary_text(diff) if diff else '尚未检测'}\n"
+                f"关联服务：{format_health(status.get('health') or [])}")
+        if diff.get("has_drift"):
+            text += "\n" + format_diff(diff, max_rows=5)
+        self._send_message("RouterOS 备份 · 状态", text, channel=channel, userid=userid)
+
+    def _cmd_run(self, channel, userid) -> None:
+        started = self.start_run(trigger="远程命令", prefer_thread=True)
+        self._send_message("RouterOS 备份", "已触发备份与漂移检测" if started else "已有任务在运行",
+                           channel=channel, userid=userid)
+
+    def _cmd_baseline(self, channel, userid) -> None:
+        res = self.set_baseline()
+        self._send_message("RouterOS 备份 · 基线", res.get("message", ""), channel=channel, userid=userid)
+
+    def _cmd_clear(self, channel, userid) -> None:
+        res = self.clear_snapshots()
+        self._send_message("RouterOS 备份", res.get("message", ""), channel=channel, userid=userid)
