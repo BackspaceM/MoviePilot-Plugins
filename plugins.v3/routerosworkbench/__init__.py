@@ -45,6 +45,15 @@ try:
 except Exception:  # noqa: BLE001
     _PLUGIN_MTYPE = None
 
+# 详情页带参按钮：前端 PageRender 的 POST 用 api.post(api_path, params) 发 JSON body，
+# 必须用 Body(default=None) 声明才能被 FastAPI 注入；裸 =None 会被当 query 参数，
+# 导致 payload 恒为 None，页签切换永远返回「页签不对」。
+try:
+    from fastapi import Body
+    _BODY_DEFAULT = Body(default=None)
+except Exception:  # noqa: BLE001
+    _BODY_DEFAULT = None
+
 from . import aggregator, plugininfo, roslink, sections
 from .clients import RouterOSConfigClient, build_config_client
 
@@ -202,12 +211,18 @@ class RouterOSWorkbench(_PluginBase):
         except Exception as err:  # noqa: BLE001
             self._log("WARN", f"定时刷新没注册上，本机缺 apscheduler｜{err}")
             return []
+        # 注意：MP scheduler.py 用 add_job(self.start, service["trigger"], ...,
+        # **service["kwargs"], kwargs={"job_id": ...}) 注册服务：
+        # service["kwargs"] 是展开给 APScheduler.add_job() 的「调度参数」，不是传给插件
+        # func 的业务参数。曾写成 {"trigger": "定时刷新"}，展开后与第 2 个位置参数
+        # trigger 撞名 → BaseScheduler.add_job() got multiple values for argument 'trigger'。
+        # 插件 func 由 MP 的 start() 无参调用，触发来源请放在 func 的默认值里。
         return [{
             "id": f"{PLUGIN_ID}_refresh",
             "name": "RouterOS 统一工作台定时刷新",
             "trigger": trigger,
             "func": self.refresh_once,
-            "kwargs": {"trigger": "定时刷新"},
+            "kwargs": {},
         }]
 
     # ------------------------------------------------------------------
@@ -307,7 +322,7 @@ class RouterOSWorkbench(_PluginBase):
         tab = saved or self._active_tab or "overview"
         return tab if tab in sections.TAB_KEYS else "overview"
 
-    def refresh_once(self, trigger: str = "手动刷新") -> Any:
+    def refresh_once(self, trigger: str = "定时刷新") -> Any:
         """只读刷新：并发 GET 全部分区，失败分区记 warning 不中断，生成快照存盘。"""
         try:
             client, http = self._make_client()
@@ -637,14 +652,20 @@ class RouterOSWorkbench(_PluginBase):
         return Response(success=True, message=f"已刷新（{snapshot.get('created')}）",
                         data=snapshot)
 
-    def api_tab(self, payload: Any = None) -> Any:
+    def api_tab(self, payload: Optional[dict] = _BODY_DEFAULT) -> Any:
+        """切换页签。前端 POST 的 params 是 JSON body，必须用 Body 声明才能注入。"""
         name = ""
         if isinstance(payload, dict):
-            name = str(payload.get("name") or "")
+            name = str(payload.get("name") or payload.get("tab")
+                       or payload.get("active_tab") or "")
+        elif isinstance(payload, str):
+            name = payload
         elif payload is not None:
             name = str(getattr(payload, "name", "") or "")
+        name = name.strip().lower()
         if name not in sections.TAB_KEYS:
-            return Response(success=False, message="页签不对")
+            return Response(success=False,
+                            message=f"页签不对：{_esc(name) or '未收到 name 参数'}")
         self._active_tab = name
         self.save_data(_KEY_TAB, name)
         self._log("INFO", f"切到页签｜{sections.tab_label(name)}")
