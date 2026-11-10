@@ -64,9 +64,9 @@
   },
   "RouterOSConfigGuard": {
     "name": "RouterOS 配置备份与漂移检测",
-    "description": "定时备份 RouterOS 关键配置分区（路由/DNS/防火墙/NAT/队列/用户/脚本等）为快照，与基线做指纹对比检测新增/删除并高亮敏感分区；配置页可直接勾选 MoviePilot 已连接的下载器与媒体服务器做在线巡检（支持手动补充多实例），漂移或异常时即时通知。",
-    "labels": "RouterOS,备份,漂移检测,配置审计,MikroTik,下载器,媒体服务器",
-    "version": "1.0.0",
+    "description": "定时备份 RouterOS 关键配置分区并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录（结构化快照、可对比回滚）、RouterOS 本机（.backup 系统备份 + .rsc 配置导出）或双份，含文件轮转与漂移即时通知。",
+    "labels": "RouterOS,备份,漂移检测,配置审计,MikroTik,备份位置",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -75,7 +75,8 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：RouterOS REST 只读抓取 20 个可配置分区（默认 12 个），剔除 .id 与易变统计字段后生成稳定指纹快照；与基线做多重集对比输出新增/删除，防火墙/NAT/路由/DNS/用户/脚本等敏感分区漂移高亮告警；配置页从 MoviePilot 已连接实例下拉勾选下载器(qB/TR)与媒体服务器(Emby/Plex/Jellyfin)做在线巡检，并预留手动补充框兼容多实例；cron 定时备份+立即执行、快照文件落盘与自动轮转、一键设基线、详情页漂移明细/服务健康/快照清单/SSE 实时日志、MP 分级通知、测试连接与 4 个远程命令。"
+      "v1.1.0": "新增备份位置选项：可选仅存 MP 插件目录（结构化快照、可对比/回滚）、仅存 RouterOS 本机（/system/backup/save 生成 .backup + /export 生成 .rsc，按前缀自动轮转删除旧组）、或两处都存；漂移基线作为轻量检测状态始终留 MP，RouterOS 单机模式也能手动设基线。移除与备份无关的下载器/媒体服务器关联巡检（该选型约定适用于后续其它插件）。修复详情页运行日志/差异明细因方括号被前端当 Markdown 参考式链接而渲染成空药丸的问题（动态文本统一全角转义 + 日志改用全角 ｜ 分隔）；新增 /rosbackups 刷新 ROS 备份清单 API 与详情页双清单视图。",
+      "v1.0.0": "首个版本：RouterOS REST 只读抓取 20 个可配置分区（默认 12 个），剔除 .id 与易变统计字段后生成稳定指纹快照；与基线做多重集对比输出新增/删除，防火墙/NAT/路由/DNS/用户/脚本等敏感分区漂移高亮告警；cron 定时备份+立即执行、快照落盘与自动轮转、一键设基线、详情页漂移明细/快照清单/SSE 实时日志、MP 分级通知、测试连接与远程命令。"
     }
   },
   "MediaLibraryRefresh": {
