@@ -1,4 +1,52 @@
 {
+  "RouterOSSiteRouting": {
+    "name": "RouterOS 站点智能分流 / DNS",
+    "description": "从 MoviePilot 站点管理读出已配置站点和 Tracker 域名，自动在 RouterOS 上生成 static DNS、地址列表、mangle 标记与策略路由，配合 CF 优选 IP 一起用。站点增删时增量更新，不用手工维护地址列表。预览每条动作的中文含义、风险与等价命令，确认后批量下发；只新增带 MP-B3 标签的条目，同标签幂等跳过，部署前留系统备份，中途失败逆序自动回滚。",
+    "labels": "RouterOS,PT站点,智能分流,static DNS,address-list,mangle,策略路由,MikroTik,增量更新,自动回滚",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerossiterouting.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：读取 MP 站点管理与 Tracker 域名（下拉多选 + 手动补充），生成 static DNS 正向记录、站点地址列表、mangle 连接/包标记与可选策略路由；站点增删按标签增量同步，只新增带 MP-B3 标签的条目，同标签幂等跳过；预览展示中文含义、风险与等价命令，确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚、手动回滚只删本次新建条目；支持定时增量同步、试运行、通知与远程命令。"
+    }
+  },
+  "RouterOSWorkbench": {
+    "name": "RouterOS 统一工作台",
+    "description": "把分散在多个 RouterOS 插件里的内容收进一个工具箱：一次配置连接，页签切换「概览 / 防火墙 / Queue / 备份 / 分流」，共用实时流量与拓扑卡片。不改动其它插件结构，直接读 RouterOS REST 现状与本地插件状态，附带各插件的启用情况与快捷入口。",
+    "labels": "RouterOS,统一工作台,页签,概览,防火墙,Queue,备份,分流,MikroTik,工具箱",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosworkbench.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：一次配置连接（支持 RouterOS 连接中心下拉），五个页签「概览 / 防火墙 / Queue / 备份 / 分流」聚合 RouterOS 系统资源、接口实时流量、防火墙规则、简单队列、静态 DNS、地址列表与备份状态；同时列出本地 RouterOS 插件的启用状态、版本与快捷入口。只读聚合，不改其它插件结构，支持一键刷新、定时刷新、远程命令与通知。"
+    }
+  },
+  "PluginAutoUpdater": {
+    "name": "插件自动更新",
+    "description": "扫描已安装的插件，按作者筛选，再用另一个下拉框多选要更新的插件。可以点「立即运行」，也支持 cron 定时执行。运行时对比市场索引里的新版本，只更新被选中的插件；带试运行、更新记录、日志与通知，默认跳过自己避免重载中断。",
+    "labels": "插件管理,自动更新,作者筛选,多选,cron,立即运行,试运行,MoviePilot",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pluginautoupdater.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：扫描已安装插件（ID / 名称 / 作者 / 当前版本 / 可更新版本 / 来源仓库），配置页按作者单选筛选、另一个下拉框多选目标插件；支持立即运行按钮、cron 定时执行、试运行、单次最多更新数量、跳过自身、失败继续、更新记录与日志、通知与远程命令。更新走宿主插件安装入口，离线环境自动降级为只读扫描。"
+    }
+  },
   "RouterOSRemoteAccessWizard": {
     "name": "RouterOS 外网访问向导",
     "description": "从 MoviePilot 已连接的媒体服务器、下载器 WebUI 和 MP 本体里挑服务，一次生成 dst-nat 映射 + forward 放行（可选 Hairpin NAT）。预览表里直接看「外网端口 → 内网服务」的中文含义、风险与等价命令，确认后批量写入 RouterOS；备注带域名，方便以后在路由器上认出每条规则。部署前自动留系统备份，中途失败逆序回滚，同标签已存在则跳过。还带内网/外网连通性测试、一键回滚、试运行、MP 通知与远程命令。只新增带 MP-B1 标签的条目，不动用户手工规则；公网映射需显式勾选放行。",
