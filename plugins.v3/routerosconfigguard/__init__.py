@@ -277,10 +277,6 @@ class RouterOSConfigGuard(_PluginBase):
             return {"component": "VTextField", "props": p}
 
         content: List[dict] = [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "备份位置可选：仅存 MP 插件目录（结构化快照，可对比/回滚）、仅存 RouterOS 本机"
-                                 "（系统备份 .backup + 配置导出 .rsc），或两处都存。漂移检测所需的基线是轻量"
-                                 "「检测状态」，无论哪种落点都会留在 MP。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时备份"}}]},
@@ -308,7 +304,6 @@ class RouterOSConfigGuard(_PluginBase):
                 sel("sections", "备份分区（可多选）", section_items(), "默认勾选常用分区；敏感分区漂移将高亮告警"),
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "备份位置"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VSelect", "props": {
@@ -337,9 +332,6 @@ class RouterOSConfigGuard(_PluginBase):
                     fld("keep", "保留份数(MP快照/RouterOS备份组)", {"type": "number"})]},
                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                     fld("timeout", "请求超时(秒)", {"type": "number"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
-                    {"component": "VAlert", "props": {"type": "warning", "variant": "text"},
-                     "content": {"text": "keep 同时控制两端轮转"}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
@@ -740,28 +732,18 @@ class RouterOSConfigGuard(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[dict]:
+        """精简主界面：状态行 + 一行检测结果 + 操作按钮。
+        运行日志由 MP 插件卡片右上角三圆点的实时日志查看，不在此重复渲染。"""
         status = self.current_status()
-        index = self.snapshot_list()
-        ros_files = self.ros_file_list()
-        logs = list(self.get_data(_KEY_LOGS) or [])
         last = status.get("last") or {}
         diff = last.get("diff") or {}
-        target_label = BACKUP_TARGET_LABELS.get(self._backup_target, self._backup_target)
+        ros_files = status.get("ros_files") or []
 
-        # 快照清单（MP 插件目录）
-        snap_lines = [f"{it.get('id')}｜{_ts_text(it.get('ts'))}｜{it.get('rows', 0)} 行｜"
-                      f"{'⚠ ' + it.get('drift', '') if it.get('has_drift') else '无漂移'}"
-                      for it in index[:12]] or ["暂无 MP 快照（当前备份位置可能不含 MP）"]
-
-        # RouterOS 本机备份清单
-        ros_lines = [f"{f.get('name')}｜{f.get('size', '')}｜{f.get('created', '')}"
-                     for f in ros_files[:12]] or ["暂无 RouterOS 本机备份文件"]
-
-        # 漂移明细
-        if diff.get("has_drift"):
-            drift_text = format_diff(diff, max_rows=8)
-        else:
-            drift_text = "无漂移" if last else "尚未执行检测"
+        def kv(label: str, value: Any) -> dict:
+            return {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
+                {"component": "div", "text": md_safe(f"{label}：{value}"),
+                 "props": {"style": "font-size:13px"}},
+            ]}
 
         buttons = []
         for label, api in (("立即备份并检测", "run"), ("测试连接", "test"),
@@ -774,67 +756,44 @@ class RouterOSConfigGuard(_PluginBase):
                                      "params": {}, "confirm": label in ("清空快照", "停止")}},
             })
 
-        def kv(label: str, value: str, md: int = 4) -> dict:
-            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
-                {"component": "VLabel", "text": label},
-                {"component": "div", "text": md_safe(value), "props": {"style": "white-space:pre-wrap"}},
-            ]}
+        if not last:
+            drift = "尚未执行检测"
+        elif diff.get("has_drift"):
+            drift = f"检测到漂移（{diff.get('changed', len(diff.get('rows') or []))} 项）"
+        else:
+            drift = "无漂移"
 
-        # 所有动态文本统一经 md_safe 转义，避免 [x][y] 被当 Markdown 参考式链接
-        # 渲染成空药丸（截图红框问题的根因）。
-        def text_row(value: str, size: int = 12) -> dict:
-            return {"component": "div", "text": md_safe(value),
-                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
-
-        content_nodes: List[dict] = [
+        nodes: List[dict] = [
             {"component": "VRow", "content": [
                 kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
-                kv("当前任务", "运行中" if status.get("running") else "待命"),
-                kv("备份位置", target_label),
-                kv("备份周期", self._cron),
-                kv("监控分区", f"{len(self._sections)} 个：{basename_from_types(self._sections)}"),
-                kv("基线时间", _ts_text(status.get("baseline_ts"))),
-                kv("MP 快照份数", str(status.get("snapshots", 0))),
-                kv("ROS 备份文件", str(len(ros_files))),
+                kv("备份位置", status.get("backup_target_label", "—")),
+                kv("MP 快照", f"{status.get('snapshots', 0)} 份"),
+                kv("ROS 备份", f"{len(ros_files)} 个"),
             ]},
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "最近检测结果"},
-            text_row(drift_text, 13),
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "快照清单 · MP 插件目录（最近 12 份）"},
-            *[text_row(line) for line in snap_lines],
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "备份清单 · RouterOS 本机（.backup 系统备份 + .rsc 配置导出）"},
-            *[text_row(line) for line in ros_lines],
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"},
-            *[text_row(format_log_line(l.get("time", ""), l.get("level", ""), l.get("message", "")))
-              for l in logs[:20]],
-            {"component": "VRow", "props": {"class": "mt-4"}, "content": [
+            {"component": "div", "text": md_safe(f"最近检测：{drift}"),
+             "props": {"style": "white-space:pre-wrap;font-size:12px;opacity:.8"}},
+            {"component": "VRow", "props": {"class": "mt-3"}, "content": [
                 {"component": "VCol", "content": buttons}]},
         ]
-
-        return [{
-            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
-                "component": "VCardText", "content": content_nodes,
-            }],
-        }]
+        return [{"component": "VCard", "props": {"variant": "tonal"}, "content": [
+            {"component": "VCardText", "content": nodes}]}]
 
     # ------------------------------------------------------------------
     # API
     # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
-        base = f"/plugin/{PLUGIN_NAME}"
+        # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
+        # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": f"{base}/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
-            {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": f"{base}/baseline", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
-            {"path": f"{base}/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
-            {"path": f"{base}/rosbackups", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
-            {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": f"{base}/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
-            {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
+            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": "/baseline", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
+            {"path": "/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
+            {"path": "/rosbackups", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
+            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
+            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
         ]
 
     def api_run(self, _=None) -> Response:
