@@ -12,3 +12,6 @@ Thumbs.db
 .env.*
 *.local.json
 config.local.*
+
+# RouterOS 连接中心广播文件（含明文凭据，禁止提交）
+plugins.v3/routeros_connections.json

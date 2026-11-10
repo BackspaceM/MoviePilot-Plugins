@@ -140,11 +140,13 @@ def _ts_text(ts: Optional[float]) -> str:
         return str(ts)
 
 
+
+from . import roslink
 class BandwidthQueueScheduler(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "bandwidthqueuescheduler_"
@@ -184,13 +186,20 @@ class BandwidthQueueScheduler(_PluginBase):
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
+
+        # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持原配置不变
+        _ccfg = dict(config or {})
+        _rcc, _rcc_note = roslink.connection_overrides(_ccfg.get("ros_connection"), "std")
+        _ccfg.update(_rcc)
+        if _rcc_note:
+            (logger.info if _rcc else logger.warning)(f"RouterOS 连接中心：{_rcc_note}")
         self._enabled = bool(config.get("enabled"))
 
-        self._address = str(config.get("router_address") or "").strip()
-        self._port = int(config.get("router_port") or 443)
-        self._use_ssl = bool(config.get("router_ssl", True))
-        self._username = str(config.get("router_username") or "").strip()
-        self._password = str(config.get("router_password") or "")
+        self._address = str(_ccfg.get("router_address") or "").strip()
+        self._port = int(_ccfg.get("router_port") or 443)
+        self._use_ssl = bool(_ccfg.get("router_ssl", True))
+        self._username = str(_ccfg.get("router_username") or "").strip()
+        self._password = str(_ccfg.get("router_password") or "")
 
         self._prefix = "".join(
             c for c in str(config.get("queue_prefix") or _DEFAULT_PREFIX).strip()
@@ -272,6 +281,7 @@ class BandwidthQueueScheduler(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "router_address": "",
+            "ros_connection": "",
             "router_port": 443,
             "router_ssl": True,
             "router_username": "",
@@ -308,6 +318,21 @@ class BandwidthQueueScheduler(_PluginBase):
         ]
 
         content: List[dict] = [
+            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
+                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
+                 "text": "连接中心 · 选择已保存的路由器"},
+                {"component": "VCardText", "content": [
+                    {"component": "VSelect", "props": {
+                        "model": "ros_connection",
+                        "label": "已保存的路由器",
+                        "items": roslink.connection_items(),
+                        "clearable": True,
+                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "persistentHint": True}},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                ]},
+            ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4", "title": "插件用途"},
              "content": {"text": "按带宽方案在 RouterOS 上编排简单队列：可按时段自动切换，也可在详情页一键切换。"

@@ -137,6 +137,8 @@ def _mask_secrets(text: str, password: str = "") -> str:
     return content
 
 
+
+from . import roslink
 class CFRouterOS(_PluginBase):
     """Cloudflare 优选 IP 写入 RouterOS DNS static。"""
 
@@ -148,7 +150,7 @@ class CFRouterOS(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png"
     )
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -231,7 +233,7 @@ class CFRouterOS(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         """载入配置并复位运行态。"""
         self.stop_service()
-        self._log("INFO", "初始化 Cloudflare 优选插件 v1.2.0")
+        self._log("INFO", f"初始化 Cloudflare 优选插件 v{self.plugin_version}")
         self._enabled = False
         self._notify = True
         self._notify_mode = "全部"
@@ -279,19 +281,26 @@ class CFRouterOS(_PluginBase):
         if not config:
             self._log("INFO", "未载入配置，插件保持停用")
             return
+
+        # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持原配置不变
+        _ccfg = dict(config or {})
+        _rcc, _rcc_note = roslink.connection_overrides(_ccfg.get("ros_connection"), "cf")
+        _ccfg.update(_rcc)
+        if _rcc_note:
+            self._log("INFO" if _rcc else "WARN", f"连接中心：{_rcc_note}")
         self._enabled = bool(config.get("enabled"))
         self._notify = bool(config.get("notify", True))
         mode = str(config.get("notify_mode") or "").strip()
         self._notify_mode = mode if mode in _NOTIFY_MODES else ("全部" if self._notify else "关闭")
         self._cron = str(config.get("cron") or "0 5 * * *").strip()
         self._dry_run = bool(config.get("dry_run"))
-        self._router_host = str(config.get("router_host") or "").strip()
-        self._router_port = max(_to_int(config.get("router_port"), 443), 1)
-        self._router_ssl = bool(config.get("router_ssl", True))
-        self._router_verify = bool(config.get("router_verify"))
-        self._router_user = str(config.get("router_user") or "admin").strip()
-        self._router_password = str(config.get("router_password") or "")
-        self._router_timeout = max(_to_float(config.get("router_timeout"), 10.0), 1.0)
+        self._router_host = str(_ccfg.get("router_host") or "").strip()
+        self._router_port = max(_to_int(_ccfg.get("router_port"), 443), 1)
+        self._router_ssl = bool(_ccfg.get("router_ssl", True))
+        self._router_verify = bool(_ccfg.get("router_verify"))
+        self._router_user = str(_ccfg.get("router_user") or "admin").strip()
+        self._router_password = str(_ccfg.get("router_password") or "")
+        self._router_timeout = max(_to_float(_ccfg.get("router_timeout"), 10.0), 1.0)
         self._domains = str(config.get("domains") or "")
         self._exclude_domains = str(config.get("exclude_domains") or "")
         self._auto_sites = bool(config.get("auto_sites", True))
@@ -474,6 +483,21 @@ class CFRouterOS(_PluginBase):
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回配置表单与默认值。"""
         content: List[dict] = [
+            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
+                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
+                 "text": "连接中心 · 选择已保存的路由器"},
+                {"component": "VCardText", "content": [
+                    {"component": "VSelect", "props": {
+                        "model": "ros_connection",
+                        "label": "已保存的路由器",
+                        "items": roslink.connection_items(),
+                        "clearable": True,
+                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "persistentHint": True}},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                ]},
+            ]},
             {
                 "component": "VRow",
                 "content": [
@@ -742,6 +766,7 @@ class CFRouterOS(_PluginBase):
             "dry_run": False,
             "cron": "0 5 * * *",
             "router_host": "",
+            "ros_connection": "",
             "router_port": 443,
             "router_ssl": True,
             "router_verify": False,

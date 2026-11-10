@@ -1,4 +1,20 @@
 {
+  "RouterOSConnectionCenter": {
+    "name": "RouterOS 连接中心",
+    "description": "一处保存多台 RouterOS 连接，自动广播给同库的 RouterOS 插件（设置页下拉即可选择，不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查配置、端口连通、REST 可用性、认证权限、RouterOS 版本与业务分区读权限，失败时给出可直接复制到 RouterOS 终端执行的修复命令。不选下拉时其他插件行为完全不变。",
+    "labels": "RouterOS,连接管理,一键体检,配置同步,降门槛,MikroTik",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：统一维护多台 RouterOS 连接并广播共享文件，其余 4 个 RouterOS 插件设置页新增「已保存的路由器」下拉；一键体检覆盖配置完整性、TCP 连通、REST 与认证、版本、业务分区读权限，失败项给出 RouterOS 修复命令；广播文件权限 0600，关闭广播或读取失败时自动回退各插件原有手填配置。"
+    }
+  },
   "PiecesHashReseed": {
     "name": "Pieces Hash 辅种",
     "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验。",
@@ -19,13 +35,14 @@
     "name": "Cloudflare 优选 IP → RouterOS",
     "description": "默认零 DoH 依赖，把配置的 PT 站点域名直接视为 Cloudflare CDN 站点；自动刷新 Cloudflare 官方 ips-v4/ips-v6，并支持多个第三方/个人维护的 IP 池地址（纯文本/JSON/CIDR/IPv6），池内 IP 优先参与 TCP/TLS 测速；取最优若干写入 RouterOS /ip/dns/static。逐站点原始 IP、优选 IP 与写入结果通过 SSE 实时日志查看，支持 MP 通知、cron、试运行与先写后删保护。",
     "labels": "网络",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "release": true,
     "author": "BackspaceM",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.3.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.2.0": "去掉对单一 DoH 的强依赖：新增站点判定方式（默认不检测全部纳入 / 系统 DNS 判定 CDN IP / 多源 DoH 判定）与判定失败仍纳入开关，彻底解决所有域名显示「DoH 解析失败或无 A 记录」被跳过；支持多个第三方或个人维护的 Cloudflare IP 池 URL（纯文本/JSON/CIDR/IP:端口/IPv6）、手动 IP 池、IP 来源模式、刷新周期与按源缓存回退，官方网段来源在界面可见；逐站点原始 IP、判定来源、优选 IP 与 RouterOS 写入成败写入 INFO 日志，MP「查看日志」经 SSE 实时推送，另增实时进度 /live、站点明细与 IP 池来源面板、/refresh_pool 与 /cfrouteros_pool 命令；通知带站点明细，补排除域名、TLS SNI 固定、池 IP 配额、候选分批可中止、日志脱敏增强与写入地址明细。",
       "v1.1.0": "新增配置页「立即执行一次」与详情页有效按钮；修复插件日志不可见（关键路径 INFO 日志 + 详情页运行日志 + /logs）；通知改用 MoviePilot 通知链并支持全部/仅异常/关闭三种模式，远程命令按来源渠道回复；补 AAAA 解析、先写后删保护、最少可用 IP 表单项、实例级运行锁、事件循环兼容与图标地址修复。",
       "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。"
@@ -68,7 +85,7 @@
     "name": "RouterOS 配置备份与漂移检测",
     "description": "定时备份 RouterOS 关键配置分区并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录（结构化快照、可对比回滚）、RouterOS 本机（.backup 系统备份 + .rsc 配置导出）或双份，含文件轮转与漂移即时通知。",
     "labels": "RouterOS,备份,漂移检测,配置审计,MikroTik,备份位置",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -77,6 +94,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.3.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.2.0": "详情页卡片分区与按钮分组美化，修正按钮 API 路径与 GET/POST 方法；设置页补齐权限、加密、基线与轮转的文字说明，替换原来只有图标的小提示，并增加分区标题。",
       "v1.1.0": "新增备份位置选项：可选仅存 MP 插件目录（结构化快照、可对比/回滚）、仅存 RouterOS 本机（/system/backup/save 生成 .backup + /export 生成 .rsc，按前缀自动轮转删除旧组）、或两处都存；漂移基线作为轻量检测状态始终留 MP，RouterOS 单机模式也能手动设基线。移除与备份无关的下载器/媒体服务器关联巡检（该选型约定适用于后续其它插件）。修复详情页运行日志/差异明细因方括号被前端当 Markdown 参考式链接而渲染成空药丸的问题（动态文本统一全角转义 + 日志改用全角 ｜ 分隔）；新增 /rosbackups 刷新 ROS 备份清单 API 与详情页双清单视图。",
       "v1.0.0": "首个版本：RouterOS REST 只读抓取 20 个可配置分区（默认 12 个），剔除 .id 与易变统计字段后生成稳定指纹快照；与基线做多重集对比输出新增/删除，防火墙/NAT/路由/DNS/用户/脚本等敏感分区漂移高亮告警；cron 定时备份+立即执行、快照落盘与自动轮转、一键设基线、详情页漂移明细/快照清单/SSE 实时日志、MP 分级通知、测试连接与远程命令。"
@@ -103,7 +121,7 @@
     "name": "带宽/Queue 智能调度",
     "description": "在 RouterOS 上按带宽方案智能编排简单队列：内置均衡/观影优先/下载优先/夜间全速四套方案，支持时段规则自动切换、详情页一键手动切换、队列实时速率监控与 FastTrack 绕过诊断；统一管理前缀，绝不误伤手工队列。",
     "labels": "RouterOS,带宽管理,Queue,智能调度,MikroTik,限速,时段调度",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/bandwidthqueuescheduler.png",
     "author": "BackspaceM",
     "level": 1,
@@ -112,6 +130,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.2.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.1.0": "详情页卡片分区、方案按钮高亮当前项、操作按钮按主次分组；设置页增加分区标题与 FastTrack/权限/填写格式说明；修复按钮 API 路径导致的 404。",
       "v1.0.0": "首个版本：在 RouterOS 上按带宽方案智能编排简单队列。用户以 名称=IP/CIDR|角色 定义设备，内置均衡/观影优先/下载优先/夜间全速四套方案并支持自定义 JSON 覆盖；可按 HH:MM-HH:MM=方案 的时段规则自动切换（含跨午夜），也可在详情页一键切换（每个按钮均绑定真实 API，杜绝无效按钮）。每轮按差异新建/更新/删除队列（仅管理统一前缀，不碰手工队列），读取实时速率并诊断 FastTrack 绕过风险；cron 定时+立即执行+试运行、MP 分级通知、INFO 级 SSE 实时日志、7 个 API 与远程命令。详情页动态文本统一全角转义，避免被当 Markdown 渲染成空药丸。"
     }
@@ -137,7 +156,7 @@
     "name": "RouterOS 防火墙可视化管理器",
     "description": "在 MoviePilot 里表格化管理 RouterOS 防火墙：按执行顺序查看 filter/nat/mangle/raw 全部规则，自动检测影子规则·重复规则·缺失兜底；逐条启停/上下移/置顶置底/删除，或按表单新增（自动插到兜底 drop 前避免死规则），改动前可留 RouterOS 备份、快照存 MP；定时扫描隐患并推送通知。是管理器而非自动对齐器，绝不批量删除用户规则。",
     "labels": "RouterOS,防火墙,Firewall,MikroTik,规则管理,影子规则,安全巡检",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png",
     "author": "BackspaceM",
     "level": 1,
@@ -146,6 +165,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.2.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.1.0": "新增批量导入：可上传 .rsc 文件、粘贴规则文本或填容器内路径，解析后逐条展示中文含义与风险提示，确认后一次性批量写入 RouterOS；详情页卡片分区与按钮分组美化；修复按钮 API 路径导致的 404。",
       "v1.0.0": "首个版本：RouterOS 防火墙可视化管理器。(1) 读取 filter/nat/mangle/raw 四表全部规则并按执行顺序展示；(2) 自动检测影子规则(放行被兜底 drop 遮挡)、被架空的拒绝规则、重复规则、缺失兜底 drop 四类隐患；(3) 逐条启用/禁用/上移/下移/置顶/置底/删除，破坏性操作二次确认；(4) 配置页表单新增规则，默认插到兜底 drop 之前避免变成死规则，可置顶/置底/指定位置；(5) 改动前自动在 RouterOS 执行 /system/backup/save 留后路，规则快照存 MP；(6) cron 定时扫描 + MP 分级通知 + 远程命令；(7) 详情页每个按钮绑定真实 API、无禁用按钮，所有动态文本全角转义杜绝 Markdown 空药丸。定位为管理器，绝不批量删除用户真实规则。"
     }

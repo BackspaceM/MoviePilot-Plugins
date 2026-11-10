@@ -129,11 +129,13 @@ def _ts_text(ts: Optional[float]) -> str:
         return str(ts)
 
 
+
+from . import roslink
 class RouterOSConfigGuard(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "routerosconfigguard_"
@@ -156,13 +158,20 @@ class RouterOSConfigGuard(_PluginBase):
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
+
+        # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持原配置不变
+        _ccfg = dict(config or {})
+        _rcc, _rcc_note = roslink.connection_overrides(_ccfg.get("ros_connection"), "std")
+        _ccfg.update(_rcc)
+        if _rcc_note:
+            (logger.info if _rcc else logger.warning)(f"RouterOS 连接中心：{_rcc_note}")
         self._enabled = bool(config.get("enabled"))
 
-        self._address = str(config.get("router_address") or "").strip()
-        self._port = int(config.get("router_port") or 443)
-        self._use_ssl = bool(config.get("router_ssl", True))
-        self._username = str(config.get("router_username") or "").strip()
-        self._password = str(config.get("router_password") or "")
+        self._address = str(_ccfg.get("router_address") or "").strip()
+        self._port = int(_ccfg.get("router_port") or 443)
+        self._use_ssl = bool(_ccfg.get("router_ssl", True))
+        self._username = str(_ccfg.get("router_username") or "").strip()
+        self._password = str(_ccfg.get("router_password") or "")
 
         selected_sections = config.get("sections")
         if isinstance(selected_sections, str):
@@ -247,6 +256,7 @@ class RouterOSConfigGuard(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "router_address": "",
+            "ros_connection": "",
             "router_port": 443,
             "router_ssl": True,
             "router_username": "",
@@ -281,6 +291,21 @@ class RouterOSConfigGuard(_PluginBase):
             return {"component": "VTextField", "props": p}
 
         content: List[dict] = [
+            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
+                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
+                 "text": "连接中心 · 选择已保存的路由器"},
+                {"component": "VCardText", "content": [
+                    {"component": "VSelect", "props": {
+                        "model": "ros_connection",
+                        "label": "已保存的路由器",
+                        "items": roslink.connection_items(),
+                        "clearable": True,
+                        "hint": "在「RouterOS 连接中心」统一维护；选中后自动带入地址/端口/账号/密码/HTTPS，下面的手填字段可留空。不选下拉则继续使用手填参数（旧配置不受影响）。",
+                        "persistentHint": True}},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+                     "text": "下拉为空说明尚未安装或保存连接中心，属正常现象，直接按原方式手填即可。"},
+                ]},
+            ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3",
                                               "title": "备份位置怎么选"},
              "content": {"text": "仅存 MP：生成结构化快照，可直接对比与回滚；仅存 RouterOS 本机：调用系统 "
@@ -302,7 +327,7 @@ class RouterOSConfigGuard(_PluginBase):
                     {"component": "VSwitch", "props": {"model": "auto_baseline", "label": "首次自动设基线", "hint": "无基线时把首份快照设为基线"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "① 基础开关"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "① RouterOS 连接"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址",
@@ -317,12 +342,12 @@ class RouterOSConfigGuard(_PluginBase):
                     fld("router_password", "密码", {"type": "password"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "② RouterOS 连接"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "② 备份分区"},
             {"component": "VRow", "content": [
                 sel("sections", "备份分区（可多选）", section_items(), "默认勾选常用分区；敏感分区漂移将高亮告警"),
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "③ 备份分区"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "③ 备份位置与加密"},
             {"component": "VLabel", "text": "备份位置"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -345,7 +370,7 @@ class RouterOSConfigGuard(_PluginBase):
                         "placeholder": "加密 .backup 用；留空则不加密"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "④ 备份位置与保留策略"},
+            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "④ 调度与高级"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "备份周期(cron)", {"placeholder": "0 3 * * *  每天 03:00"})]},
