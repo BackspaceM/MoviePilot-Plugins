@@ -290,7 +290,9 @@ def format_diff(diff: Dict[str, Any], max_rows: int = 8) -> str:
         lines.append("⚠ 敏感分区变更：" + "、".join(diff["sensitive_hits"]))
     for key, sec in (diff.get("sections") or {}).items():
         flag = "⚠" if sec.get("sensitive") else "•"
-        lines.append(f"{flag} [{sec.get('label', key)}] +{sec.get('added_count', 0)} / -{sec.get('removed_count', 0)}")
+        # 用全角【】而非半角[]：MP 详情页会把 text 当 Markdown 渲染，
+        # 连续/成对的半角方括号会被解析成链接引用，导致内容渲染为空白占位（药丸）。
+        lines.append(f"{flag} 【{sec.get('label', key)}】 +{sec.get('added_count', 0)} / -{sec.get('removed_count', 0)}")
         for row in sec.get("added", [])[:max_rows]:
             lines.append(f"    ＋ {describe_row(row)}")
         for row in sec.get("removed", [])[:max_rows]:
@@ -309,60 +311,84 @@ def summary_text(diff: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 关联服务（下载器 / 媒体服务器）健康
+# 详情页文本安全
 # ---------------------------------------------------------------------------
 
-@dataclass
-class ServiceHealth:
-    category: str       # 下载器 / 媒体服务器
-    name: str
-    stype: str = ""
-    online: bool = False
-    detail: str = ""
+def md_safe(text: Any) -> str:
+    """把动态文本转义为可在详情页 text 中原样展示的纯文本。
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "category": self.category, "name": self.name, "type": self.stype,
-            "online": self.online, "detail": self.detail,
-        }
-
-
-def parse_extra_names(text: str) -> List[str]:
-    """解析"预留手动输入"框：支持逗号、分号、中文逗号、换行、空格分隔。"""
-    if not text:
-        return []
-    parts = re.split(r"[,，;；\n\r\s]+", str(text))
-    seen: set = set()
-    out: List[str] = []
-    for p in parts:
-        name = p.strip()
-        if name and name not in seen:
-            seen.add(name)
-            out.append(name)
-    return out
+    MoviePilot 前端会把详情页组件里的 text 当 Markdown 渲染：成对的半角
+    方括号 `[x][y]` 会被解析成"参考式链接"而只剩空白占位（截图里的药丸），
+    反引号/星号等也会触发行内代码或加粗。这里统一替换为视觉等价的全角字符，
+    保证日志、差异明细、快照清单等动态内容"所见即所得"。
+    """
+    s = str(text if text is not None else "")
+    table = str.maketrans({
+        "[": "［", "]": "］",       # 方括号 → 全角（核心：杜绝参考式链接）
+        "`": "ˋ", "*": "＊",        # 反引号 / 星号 → 全角，避免行内代码/加粗
+        "<": "‹", ">": "›",        # 尖括号 → 单书名号，避免被当 HTML 标签
+        "_": "＿",                 # 下划线 → 全角，避免斜体
+    })
+    return s.translate(table)
 
 
-def merge_names(selected: Optional[Sequence[str]], extra: Optional[Sequence[str]] = None) -> List[str]:
-    """合并下拉勾选与手动补充，去重保序。"""
-    out: List[str] = []
-    seen: set = set()
-    for name in list(selected or []) + list(extra or []):
-        n = str(name).strip()
-        if n and n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
+def format_log_line(time_text: str, level: str, message: str) -> str:
+    """详情页单行日志：用全角 ｜ 分隔，杜绝 [time][level] 被当 Markdown 链接。"""
+    return md_safe(f"{time_text} ｜ {level:<5} ｜ {message}")
 
 
-def format_health(health: Sequence[Dict[str, Any]]) -> str:
-    """把服务健康列表格式化为文本。"""
-    if not health:
-        return "未选择关联服务"
-    parts = []
-    for h in health:
-        mark = "在线" if h.get("online") else "离线"
-        parts.append(f"{h.get('category', '')}:{h.get('name', '')}({mark})")
-    return "；".join(parts)
+# ---------------------------------------------------------------------------
+# RouterOS 本机备份文件轮转
+# ---------------------------------------------------------------------------
+
+# 备份目标：mp=仅插件数据目录（结构化快照，可对比/回滚）；
+# routeros=仅路由器本机（.backup 二进制 + .rsc 文本）；both=两处都存。
+BACKUP_TARGETS = (
+    {"value": "mp", "title": "仅 MP 插件目录（结构化快照，可对比/回滚）"},
+    {"value": "routeros", "title": "仅 RouterOS 本机（系统备份 + 配置导出）"},
+    {"value": "both", "title": "两处都存（MP 快照 + RouterOS 本机）"},
+)
+BACKUP_TARGET_LABELS = {
+    "mp": "MP 插件目录",
+    "routeros": "RouterOS 本机",
+    "both": "MP + RouterOS 双份",
+}
+
+
+def backup_basename(prefix: str, sid: str) -> str:
+    """RouterOS 本机备份文件基名（不含 .backup/.rsc 后缀）。"""
+    return f"{prefix}_{sid}"
+
+
+def is_our_backup(name: str, prefix: str) -> bool:
+    """判断是否为插件生成的备份文件（.backup / .rsc）。"""
+    n = str(name or "")
+    return (n.startswith(f"{prefix}_")
+            and (n.endswith(".backup") or n.endswith(".rsc")))
+
+
+def prune_routeros_files(files: Sequence[Dict[str, Any]], prefix: str,
+                         keep_pairs: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """对 RouterOS /file 列表按备份基名分组，仅保留最近 keep_pairs 组。
+
+    每个备份基名对应 .backup + .rsc 两个文件，按基名（含 yyyyMMdd_HHMMSS_fff，
+    字典序即时间序）倒序保留。返回 (保留, 待删除)。
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    others: List[Dict[str, Any]] = []
+    for f in files or []:
+        name = str(f.get("name") or "")
+        if not is_our_backup(name, prefix):
+            others.append(f)
+            continue
+        base = name[:-len(".backup")] if name.endswith(".backup") else name[:-len(".rsc")]
+        groups.setdefault(base, []).append(f)
+    ordered = sorted(groups.items(), key=lambda kv: kv[0], reverse=True)
+    kept: List[Dict[str, Any]] = []
+    removed: List[Dict[str, Any]] = []
+    for idx, (_base, members) in enumerate(ordered):
+        (kept if idx < max(1, int(keep_pairs or 1)) else removed).extend(members)
+    return kept + others, removed
 
 
 # ---------------------------------------------------------------------------

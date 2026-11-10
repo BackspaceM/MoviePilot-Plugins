@@ -1,11 +1,12 @@
 """RouterOS 配置备份与漂移检测 —— 外部系统客户端。
 
-包含：
-- RouterOSGuardClient：通过注入的 AsyncRequestUtils 读取各配置分区 + 连通性校验。
-- ServiceMonitorHelper：封装 MoviePilot 宿主的服务发现门面（DownloaderHelper /
-  MediaServerHelper），为配置页下拉框提供"已连接实例"选项，并对勾选实例做在线巡检。
+RouterOSGuardClient：通过注入的 AsyncRequestUtils
+- 读取各配置分区 + 连通性校验（漂移检测数据源，只读）；
+- 在 RouterOS 本机生成系统备份（/system/backup/save → .backup）与配置导出
+  （/export → .rsc），并支持列举 / 删除文件以做轮转。
 
-宿主相关导入全部做 try/except 降级并延迟到方法内，便于脱离 MP 环境离线测试。
+HTTP 传输由调用方注入（宿主 AsyncRequestUtils），本类只负责 URL/鉴权/解析，
+便于离线单测注入假响应。
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import base64
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from .core import Section, SECTION_MAP, ServiceHealth
+from .core import SECTION_MAP
 
 
 def normalize_base_url(host: str, port: int = 443, use_ssl: bool = True) -> str:
@@ -96,7 +97,8 @@ class RouterOSGuardClient:
         headers.update(basic_auth_header(self.username, self.password))
         return headers
 
-    async def request(self, method: str, path: str, client: Any = None) -> Tuple[int, Any]:
+    async def request(self, method: str, path: str, client: Any = None,
+                      json_body: Optional[Dict[str, Any]] = None) -> Tuple[int, Any]:
         """发一次 REST 请求，返回 (状态码, 响应体)。"""
         transport = client or self.client
         if transport is None or not self.base_url:
@@ -105,7 +107,7 @@ class RouterOSGuardClient:
         try:
             response = await transport.request(
                 method, self._url(path),
-                headers=self._headers(), timeout=self.timeout,
+                headers=self._headers(), json=json_body, timeout=self.timeout,
             )
         except Exception as err:  # noqa: BLE001
             self.last_error = f"连接异常：{type(err).__name__} {err}"
@@ -174,116 +176,47 @@ class RouterOSGuardClient:
                 result.ok_count += 1
         return result
 
+    # ---- RouterOS 本机备份（可选，受 backup_target 控制）----
 
-# ---------------------------------------------------------------------------
-# MoviePilot 宿主服务发现（下拉框数据源 + 在线巡检）
-# ---------------------------------------------------------------------------
+    async def backup_save(self, name: str, password: str = "",
+                          client: Any = None) -> Tuple[bool, str]:
+        """在 RouterOS 本机生成二进制系统备份 .backup（POST /system/backup/save）。
 
-DOWNLOADER_TYPES = ("qbittorrent", "transmission")
-MEDIA_TYPES = ("emby", "plex", "jellyfin")
+        密码为空时 RouterOS 会生成未加密备份（有安全风险），因此调用方应配置
+        backup_password；此处仅在有密码时下发 password 字段。
+        """
+        body: Dict[str, Any] = {"name": name}
+        if password:
+            body["password"] = password
+        status, resp = await self.request("POST", "/system/backup/save",
+                                           client=client, json_body=body)
+        if status in (200, 201):
+            return True, f"{name}.backup"
+        return False, self.last_error or f"系统备份失败（HTTP {status}）"
 
+    async def export_config(self, name: str, client: Any = None) -> Tuple[bool, str]:
+        """导出可读配置脚本 .rsc（POST /export，文件写入 RouterOS 本机）。"""
+        status, _ = await self.request("POST", "/export", client=client,
+                                        json_body={"file": name})
+        if status in (200, 201):
+            return True, f"{name}.rsc"
+        return False, self.last_error or f"配置导出失败（HTTP {status}）"
 
-class ServiceMonitorHelper:
-    """封装宿主 app.sdk.services 的门面，提供：
+    async def list_files(self, client: Any = None) -> List[Dict[str, Any]]:
+        """列举 RouterOS 文件（GET /file），用于备份文件轮转。失败返回空列表。"""
+        status, body = await self.request("GET", "/file", client=client)
+        if status == 200 and isinstance(body, list):
+            return [f for f in body if isinstance(f, dict)]
+        return []
 
-    - downloader_options() / media_options()：给配置页 VSelect 的 {title,value} 列表；
-    - check(names, ...)：对勾选实例做在线巡检，返回 ServiceHealth 列表。
-
-    所有宿主导入延迟且容错，宿主不可用或版本差异时降级为空，不影响插件主流程。
-    """
-
-    # ---- 下拉框数据源：已连接的下载器 ----
-    @staticmethod
-    def downloader_options() -> List[Dict[str, str]]:
-        items: List[Dict[str, str]] = []
-        # 优先 ServiceConfigHelper（能按 enabled + type 精确过滤）
-        try:
-            from app.sdk.services import ServiceConfigHelper  # type: ignore
-            for conf in (ServiceConfigHelper.get_downloader_configs() or []):
-                if not getattr(conf, "enabled", False):
-                    continue
-                name = getattr(conf, "name", "") or ""
-                stype = str(getattr(conf, "type", "") or "").lower()
-                if name and stype in DOWNLOADER_TYPES:
-                    items.append({"title": f"{name}（{stype}）", "value": name})
-        except Exception:  # noqa: BLE001
-            items = []
-        if not items:
-            # 回退：DownloaderHelper().get_configs()
-            try:
-                from app.sdk.services import DownloaderHelper  # type: ignore
-                for name, conf in (DownloaderHelper().get_configs() or {}).items():
-                    stype = str(getattr(conf, "type", "") or "").lower()
-                    if name and (not stype or stype in DOWNLOADER_TYPES):
-                        items.append({"title": f"{name}（{stype or '下载器'}）", "value": str(name)})
-            except Exception:  # noqa: BLE001
-                pass
-        return items
-
-    # ---- 下拉框数据源：已连接的媒体服务器 ----
-    @staticmethod
-    def media_options() -> List[Dict[str, str]]:
-        items: List[Dict[str, str]] = []
-        try:
-            from app.sdk.services import MediaServerHelper  # type: ignore
-            for name, conf in (MediaServerHelper().get_configs() or {}).items():
-                stype = str(getattr(conf, "type", "") or "").lower()
-                if name and (not stype or stype in MEDIA_TYPES):
-                    items.append({"title": f"{name}（{stype or '媒体'}）", "value": str(name)})
-        except Exception:  # noqa: BLE001
-            pass
-        return items
-
-    # ---- 在线巡检 ----
-    @staticmethod
-    def check(downloader_names: Optional[List[str]] = None,
-              media_names: Optional[List[str]] = None) -> List[ServiceHealth]:
-        health: List[ServiceHealth] = []
-        health.extend(ServiceMonitorHelper._check_group("下载器", downloader_names, "downloader"))
-        health.extend(ServiceMonitorHelper._check_group("媒体服务器", media_names, "media"))
-        return health
-
-    @staticmethod
-    def _check_group(category: str, names: Optional[List[str]], kind: str) -> List[ServiceHealth]:
-        out: List[ServiceHealth] = []
-        names = [str(n).strip() for n in (names or []) if str(n).strip()]
-        if not names:
-            return out
-        try:
-            from app.sdk.services import DownloaderHelper, MediaServerHelper  # type: ignore
-            if kind == "downloader":
-                services = DownloaderHelper().get_services(name_filters=names) or {}
-            else:
-                services = MediaServerHelper().get_services(name_filters=names) or {}
-        except Exception as err:  # noqa: BLE001
-            return [ServiceHealth(category=category, name=n, online=False,
-                                  detail=f"服务发现不可用：{type(err).__name__}") for n in names]
-
-        by_name = {str(k): v for k, v in services.items()}
-        for name in names:
-            service = by_name.get(name)
-            if service is None:
-                out.append(ServiceHealth(category=category, name=name, online=False,
-                                         detail="未在 MP 已连接实例中找到（若为手动补充项属正常）"))
-                continue
-            stype = str(getattr(service, "type", "") or "")
-            if not stype:
-                conf = getattr(service, "config", None)
-                stype = str(getattr(conf, "type", "") or "")
-            instance = getattr(service, "instance", None)
-            if instance is None:
-                out.append(ServiceHealth(category=category, name=name, stype=stype,
-                                         online=False, detail="实例不存在"))
-                continue
-            try:
-                inactive = bool(instance.is_inactive())
-            except Exception:  # noqa: BLE001
-                inactive = False
-            out.append(ServiceHealth(
-                category=category, name=name, stype=stype,
-                online=not inactive, detail="在线" if not inactive else "未连接/离线",
-            ))
-        return out
+    async def delete_file(self, file_id: str, client: Any = None) -> Tuple[bool, str]:
+        """按 .id 删除 RouterOS 文件（DELETE /file/{.id}）。"""
+        if not file_id:
+            return False, "文件 ID 为空"
+        status, _ = await self.request("DELETE", f"/file/{file_id}", client=client)
+        if status in (200, 204):
+            return True, ""
+        return False, self.last_error or f"删除文件失败（HTTP {status}）"
 
 
 def build_routeros_client(address: str, username: str, password: str,

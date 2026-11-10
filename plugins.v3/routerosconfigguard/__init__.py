@@ -1,10 +1,14 @@
 """RouterOS 配置备份与漂移检测 —— MoviePilot V3 插件主类。
 
 定期（或手动）通过 RouterOS REST API 读取关键配置分区并持久化快照，
-与基线快照做指纹对比，检测新增/删除并高亮敏感分区；同时巡检 MP 已连接的
-下载器（qB/TR）与媒体服务器（Emby/Plex/Jellyfin）在线状态（配置页下拉框勾选，
-并预留手动补充框以兼容多下载器 / MP 外实例）；漂移或异常时发 MP 通知，
+与基线快照做指纹对比，检测新增/删除并高亮敏感分区；漂移或异常时发 MP 通知，
 关键路径 INFO 级日志供 SSE 实时查看。
+
+备份落点可选（backup_target）：
+- mp：结构化快照写入 MP 插件数据目录（可对比、可回滚，默认）；
+- routeros：在 RouterOS 本机生成 .backup 系统备份 + .rsc 配置导出；
+- both：两处都存。
+漂移检测所需的基线快照始终是轻量的"检测状态"，固定留在 MP（与备份落点无关）。
 """
 
 from __future__ import annotations
@@ -46,20 +50,23 @@ except Exception:  # noqa: BLE001
 
 from .clients import (
     RouterOSGuardClient,
-    ServiceMonitorHelper,
     build_routeros_client,
 )
 from .core import (
+    BACKUP_TARGET_LABELS,
+    BACKUP_TARGETS,
     DEFAULT_SECTIONS,
     SECTIONS,
+    backup_basename,
     basename_from_types,
     diff_snapshots,
     format_diff,
-    format_health,
+    format_log_line,
+    is_our_backup,
     make_snapshot,
     mask_secrets,
-    merge_names,
-    parse_extra_names,
+    md_safe,
+    prune_routeros_files,
     prune_snapshots,
     section_items,
     snapshot_id,
@@ -73,7 +80,7 @@ from .core import (
 
 PLUGIN_NAME = "RouterOSConfigGuard"
 PLUGIN_ICON = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png"
-PLUGIN_DESCRIPTION = "定时备份 RouterOS 配置并检测漂移（新增/删除高亮敏感分区），巡检 MP 已连接的下载器与媒体服务器在线状态，漂移即时通知。"
+PLUGIN_DESCRIPTION = "定时备份 RouterOS 配置并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录、RouterOS 本机（.backup+.rsc）或双份；漂移即时通知。"
 PLUGIN_AUTHORS = "BackspaceM"
 AUTHOR_URL = "https://github.com/BackspaceM"
 PLUGIN_COLOR = "#E67E22"
@@ -88,12 +95,13 @@ _DEFAULT_KEEP = 20
 _SNAPSHOT_DIR = "snapshots"
 
 # plugindata keys
-_KEY_BASELINE = "rosguard_baseline"      # 基线快照 dict
-_KEY_INDEX = "rosguard_index"            # 快照索引列表（倒序）
+_KEY_BASELINE = "rosguard_baseline"      # 基线快照 dict（检测状态，始终留 MP）
+_KEY_INDEX = "rosguard_index"            # MP 快照索引列表（倒序）
 _KEY_LIVE = "rosguard_live"
 _KEY_LAST = "rosguard_last"
 _KEY_LOGS = "rosguard_logs"
-_KEY_HEALTH = "rosguard_health"
+_KEY_LAST_SNAP = "rosguard_last_snap"    # 最近一轮快照（routeros 模式下供手动设基线）
+_KEY_ROS_FILES = "rosguard_ros_files"    # RouterOS 本机备份文件清单
 
 _NOTIFY_LABELS = {
     "all": "全部（含无变化）",
@@ -119,7 +127,7 @@ class RouterOSConfigGuard(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "routerosconfigguard_"
@@ -155,16 +163,14 @@ class RouterOSConfigGuard(_PluginBase):
             selected_sections = [x.strip() for x in selected_sections.split(",") if x.strip()]
         self._sections = [k for k in (selected_sections or DEFAULT_SECTIONS) if k in {s.key for s in SECTIONS}] or list(DEFAULT_SECTIONS)
 
-        # 下拉勾选 + 预留手动补充
-        dl_sel = config.get("downloaders")
-        if isinstance(dl_sel, str):
-            dl_sel = parse_extra_names(dl_sel)
-        ms_sel = config.get("mediaservers")
-        if isinstance(ms_sel, str):
-            ms_sel = parse_extra_names(ms_sel)
-        self._downloaders = merge_names(dl_sel or [], parse_extra_names(config.get("downloaders_extra")))
-        self._mediaservers = merge_names(ms_sel or [], parse_extra_names(config.get("mediaservers_extra")))
-        self._check_services = bool(config.get("check_services", True))
+        # 备份落点：mp / routeros / both
+        target = str(config.get("backup_target") or "mp").strip().lower()
+        self._backup_target = target if target in {"mp", "routeros", "both"} else "mp"
+        self._backup_prefix = "".join(
+            c for c in str(config.get("backup_prefix") or "rosguard").strip()
+            if c.isalnum() or c in "_-") or "rosguard"
+        self._backup_password = str(config.get("backup_password") or "")
+        self._backup_encrypt = bool(config.get("backup_encrypt", True))
 
         self._cron = str(config.get("cron") or _DEFAULT_CRON).strip() or _DEFAULT_CRON
         if not validate_cron(self._cron)[0]:
@@ -192,7 +198,7 @@ class RouterOSConfigGuard(_PluginBase):
                 self._log("WARN", "配置页触发被跳过：已有任务在运行")
 
     def _secrets(self) -> List[str]:
-        return [self._password] if self._password else []
+        return [s for s in (self._password, getattr(self, "_backup_password", "")) if s]
 
     def get_state(self) -> bool:
         return self._enabled
@@ -227,13 +233,10 @@ class RouterOSConfigGuard(_PluginBase):
         }]
 
     # ------------------------------------------------------------------
-    # 配置页（含 MP 已连接实例下拉框 + 预留手动补充）
+    # 配置页
     # ------------------------------------------------------------------
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        dl_items = ServiceMonitorHelper.downloader_options()
-        ms_items = ServiceMonitorHelper.media_options()
-
         defaults: Dict[str, Any] = {
             "enabled": False,
             "onlyonce": False,
@@ -243,11 +246,10 @@ class RouterOSConfigGuard(_PluginBase):
             "router_username": "",
             "router_password": "",
             "sections": list(DEFAULT_SECTIONS),
-            "downloaders": [],
-            "downloaders_extra": "",
-            "mediaservers": [],
-            "mediaservers_extra": "",
-            "check_services": True,
+            "backup_target": "mp",
+            "backup_prefix": "rosguard",
+            "backup_encrypt": True,
+            "backup_password": "",
             "cron": _DEFAULT_CRON,
             "keep": _DEFAULT_KEEP,
             "auto_baseline": True,
@@ -274,8 +276,9 @@ class RouterOSConfigGuard(_PluginBase):
 
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "从 MP 已连接实例中直接勾选下载器/媒体服务器，插件会巡检其在线状态；"
-                                 "如需监控 MP 之外或多套实例，可在下方「手动补充」框填写名称。"}},
+             "content": {"text": "备份位置可选：仅存 MP 插件目录（结构化快照，可对比/回滚）、仅存 RouterOS 本机"
+                                 "（系统备份 .backup + 配置导出 .rsc），或两处都存。漂移检测所需的基线是轻量"
+                                 "「检测状态」，无论哪种落点都会留在 MP。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时备份"}}]},
@@ -302,26 +305,39 @@ class RouterOSConfigGuard(_PluginBase):
             {"component": "VRow", "content": [
                 sel("sections", "备份分区（可多选）", section_items(), "默认勾选常用分区；敏感分区漂移将高亮告警"),
             ]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "备份位置"},
             {"component": "VRow", "content": [
-                sel("downloaders", "下载器（MP 已连接）", dl_items, "来源：MoviePilot 已配置的 qBittorrent / Transmission"),
-                sel("mediaservers", "媒体服务器（MP 已连接）", ms_items, "来源：MoviePilot 已配置的 Emby / Plex / Jellyfin"),
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VSelect", "props": {
+                        "model": "backup_target", "label": "备份存放位置",
+                        "items": list(BACKUP_TARGETS),
+                        "hint": "决定备份归档文件存哪里；漂移基线始终留 MP", "persistent-hint": True,
+                    }}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    fld("backup_prefix", "RouterOS 备份文件名前缀",
+                        {"hint": "仅 routeros/both 使用；生成 前缀_时间戳.backup/.rsc", "persistent-hint": True})]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    fld("downloaders_extra", "下载器 · 手动补充", {"placeholder": "MP 外实例名称，逗号分隔；也可补充多下载器"})]},
+                    {"component": "VSwitch", "props": {
+                        "model": "backup_encrypt", "label": "加密 RouterOS 备份",
+                        "hint": "仅 routeros/both；强烈建议开启（.backup 未加密含敏感信息）"}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    fld("mediaservers_extra", "媒体服务器 · 手动补充", {"placeholder": "MP 外实例名称，逗号分隔"})]},
+                    fld("backup_password", "备份加密密码", {"type": "password",
+                        "placeholder": "加密 .backup 用；留空则不加密"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "备份周期(cron)", {"placeholder": "0 3 * * *  每天 03:00"})]},
                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                    fld("keep", "保留快照份数", {"type": "number"})]},
+                    fld("keep", "保留份数(MP快照/RouterOS备份组)", {"type": "number"})]},
                 {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                     fld("timeout", "请求超时(秒)", {"type": "number"})]},
                 {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
-                    {"component": "VSwitch", "props": {"model": "check_services", "label": "巡检关联服务"}}]},
+                    {"component": "VAlert", "props": {"type": "warning", "variant": "text"},
+                     "content": {"text": "keep 同时控制两端轮转"}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
@@ -381,7 +397,8 @@ class RouterOSConfigGuard(_PluginBase):
         started = time.time()
         result: Dict[str, Any] = {
             "trigger": trigger, "ok": False, "snapshot_id": "", "identity": {},
-            "sections": self._sections, "fetch": {}, "diff": None, "health": [],
+            "sections": self._sections, "fetch": {}, "diff": None,
+            "backup_target": self._backup_target, "ros_backup": {"done": False, "files": []},
             "baseline_ts": None, "baseline_set": False, "duration": 0.0, "message": "",
         }
         if AsyncRequestUtils is None:
@@ -429,42 +446,91 @@ class RouterOSConfigGuard(_PluginBase):
         self._log("INFO", f"[{trigger}] 快照完成：{len(self._sections)} 分区 / "
                           f"{result['fetch']['total_rows']} 行；漂移={summary_text(diff)}")
 
-        # 5) 关联服务巡检
-        if self._check_services and (self._downloaders or self._mediaservers):
-            health = ServiceMonitorHelper.check(self._downloaders, self._mediaservers)
-            result["health"] = [h.to_dict() for h in health]
-            self.save_data(_KEY_HEALTH, result["health"])
-            offline = [h for h in health if not h.online]
-            self._log("INFO" if not offline else "WARN",
-                      f"关联服务巡检：{format_health(result['health'])}")
-
-        # 6) 持久化（试运行不落盘、不改基线）
+        # 5) 持久化（试运行不落盘、不改基线）
+        sid = snapshot_id(snap["ts"])
         if self._dry_run:
-            self._log("INFO", "试运行：跳过快照落盘与基线更新")
+            self._log("INFO", "试运行：跳过快照落盘、RouterOS 备份与基线更新")
         else:
-            sid = snapshot_id(snap["ts"])
-            if self._persist_snapshot(sid, snap, diff, fetched.identity):
-                result["snapshot_id"] = sid
+            # 基线始终是轻量检测状态，固定留 MP（与备份落点无关），且供 routeros 模式手动设基线
+            self.save_data(_KEY_LAST_SNAP, snap)
             if baseline is None and self._auto_baseline:
                 self.save_data(_KEY_BASELINE, snap)
                 result["baseline_set"] = True
                 result["baseline_ts"] = snap["ts"]
                 self._log("INFO", "已自动将首份快照设为基线")
 
+            # MP 插件目录快照（mp / both）
+            if self._backup_target in ("mp", "both"):
+                if self._persist_snapshot(sid, snap, diff, fetched.identity):
+                    result["snapshot_id"] = sid
+
+            # RouterOS 本机备份（routeros / both）
+            if self._backup_target in ("routeros", "both"):
+                ros = await self._backup_on_routeros(sid, client, http)
+                result["ros_backup"] = ros
+
         result["ok"] = True
-        result["message"] = (f"快照 {result.get('snapshot_id') or '(试运行)'} 完成；" + summary_text(diff))
+        pieces = []
+        if result.get("snapshot_id"):
+            pieces.append(f"MP快照 {result['snapshot_id']}")
+        if result.get("ros_backup", {}).get("done"):
+            pieces.append(f"RouterOS备份 {result['ros_backup'].get('basename')}")
+        if not pieces:
+            pieces.append("试运行" if self._dry_run else "(无归档)")
+        result["message"] = "、".join(pieces) + "；" + summary_text(diff)
         self._update_live(
             state_last=summary_text(diff),
             baseline_ts=result["baseline_ts"],
             last_run=snap["ts"],
             last_snapshot=result.get("snapshot_id", ""),
+            backup_target=self._backup_target,
             drift=diff.get("has_drift", False),
             sensitive_hits=diff.get("sensitive_hits", []),
             identity=fetched.identity,
-            health=result.get("health", []),
         )
         result["duration"] = round(time.time() - started, 2)
         return result
+
+    async def _backup_on_routeros(self, sid: str, client: RouterOSGuardClient,
+                                  http: Any) -> Dict[str, Any]:
+        """在 RouterOS 本机生成备份 + 导出，并按前缀轮转旧文件。"""
+        base = backup_basename(self._backup_prefix, sid)
+        out: Dict[str, Any] = {"done": False, "basename": base, "files": [], "errors": []}
+        password = self._backup_password if self._backup_encrypt else ""
+        ok_bak, detail_bak = await client.backup_save(base, password=password, client=http)
+        self._log("INFO" if ok_bak else "WARN", f"[RouterOS备份] 系统备份：{detail_bak}")
+        if ok_bak:
+            out["files"].append(detail_bak)
+        else:
+            out["errors"].append(f"系统备份：{detail_bak}")
+
+        ok_exp, detail_exp = await client.export_config(base, client=http)
+        self._log("INFO" if ok_exp else "WARN", f"[RouterOS备份] 配置导出：{detail_exp}")
+        if ok_exp:
+            out["files"].append(detail_exp)
+        else:
+            out["errors"].append(f"配置导出：{detail_exp}")
+
+        out["done"] = ok_bak or ok_exp
+        if not out["done"]:
+            return out
+
+        # 轮转：列举本机文件，按备份基名分组，删除超出 keep 的旧组
+        files = await client.list_files(client=http)
+        keep_files, removed = prune_routeros_files(files, self._backup_prefix, self._keep)
+        for old in removed:
+            fid = str(old.get(".id") or old.get("id") or "")
+            ok_del, err_del = await client.delete_file(fid, client=http)
+            self._log("INFO" if ok_del else "WARN",
+                      f"[RouterOS备份] 删除旧文件 {old.get('name', fid)}：{'成功' if ok_del else err_del}")
+        self.save_data(_KEY_ROS_FILES, [{
+            "name": str(f.get("name") or ""),
+            "size": str(f.get("size") or ""),
+            "created": str(f.get("creation-time") or f.get("created") or ""),
+        } for f in keep_files if is_our_backup(str(f.get("name") or ""), self._backup_prefix)])
+        out["kept_groups"] = self._keep
+        out["removed"] = len(removed)
+        return out
 
     # ------------------------------------------------------------------
     # 快照持久化
@@ -523,22 +589,34 @@ class RouterOSConfigGuard(_PluginBase):
     # ------------------------------------------------------------------
 
     def set_baseline(self, sid: Optional[str] = None) -> Dict[str, Any]:
-        """把某份快照（默认最近一份）设为基线。"""
+        """把某份快照（默认最近一份）设为基线。
+
+        mp/both：从 MP 快照文件读取；routeros：无快照文件时回退到最近一轮内存快照
+        （_KEY_LAST_SNAP），保证"仅存 RouterOS"模式下也能手动设基线。
+        """
         index = list(self.get_data(_KEY_INDEX) or [])
         target = sid or (index[0].get("id") if index else None)
-        if not target:
-            return {"ok": False, "message": "暂无快照，请先执行一次备份"}
-        payload = self._read_snapshot_file(str(target))
-        if not payload or not isinstance(payload.get("snapshot"), dict):
-            return {"ok": False, "message": f"快照 {target} 不存在或已损坏"}
-        snap = payload["snapshot"]
+        snap: Optional[Dict[str, Any]] = None
+        label = target or "最近一次检测"
+        if target:
+            payload = self._read_snapshot_file(str(target))
+            if payload and isinstance(payload.get("snapshot"), dict):
+                snap = payload["snapshot"]
+            elif not isinstance(payload, dict):
+                # 文件缺失（如 routeros 模式）：尝试最近一轮内存快照
+                snap = self.get_data(_KEY_LAST_SNAP)
+        if snap is None:
+            snap = self.get_data(_KEY_LAST_SNAP)
+        if not isinstance(snap, dict) or not snap.get("sections"):
+            return {"ok": False, "message": "暂无快照，请先执行一次备份检测"}
         self.save_data(_KEY_BASELINE, snap)
-        self._log("INFO", f"已将快照 {target} 设为基线")
-        self._update_live(baseline_ts=snap.get("ts"), last_snapshot=str(target))
-        return {"ok": True, "message": f"已将快照 {target} 设为基线", "ts": snap.get("ts")}
+        self._log("INFO", f"已将 {label} 设为基线")
+        self._update_live(baseline_ts=snap.get("ts"),
+                          last_snapshot=str(target) if target else "最近检测")
+        return {"ok": True, "message": f"已将 {label} 设为基线", "ts": snap.get("ts")}
 
     def clear_snapshots(self) -> Dict[str, Any]:
-        """清空快照索引、文件与健康缓存（保留基线指针可选：一并清除更彻底）。"""
+        """清空 MP 快照文件/索引与基线（不动 RouterOS 本机文件，避免误删灾备）。"""
         removed = 0
         try:
             directory = self._snapshot_dir()
@@ -553,12 +631,15 @@ class RouterOSConfigGuard(_PluginBase):
             pass
         self.save_data(_KEY_INDEX, [])
         self.save_data(_KEY_BASELINE, None)
-        self.save_data(_KEY_HEALTH, [])
-        self._log("INFO", f"已清空快照（{removed} 份）与基线")
-        return {"ok": True, "message": f"已清空 {removed} 份快照与基线"}
+        self.save_data(_KEY_LAST_SNAP, None)
+        self._log("INFO", f"已清空 MP 快照（{removed} 份）与基线；RouterOS 本机文件未改动")
+        return {"ok": True, "message": f"已清空 {removed} 份 MP 快照与基线（RouterOS 本机文件保留）"}
 
     def snapshot_list(self) -> List[Dict[str, Any]]:
         return list(self.get_data(_KEY_INDEX) or [])
+
+    def ros_file_list(self) -> List[Dict[str, Any]]:
+        return list(self.get_data(_KEY_ROS_FILES) or [])
 
     def current_status(self) -> Dict[str, Any]:
         live = dict(self.get_data(_KEY_LIVE) or {})
@@ -570,12 +651,14 @@ class RouterOSConfigGuard(_PluginBase):
             "running": bool(getattr(self, "_running", False)),
             "router": self._address,
             "sections": self._sections,
+            "backup_target": self._backup_target,
+            "backup_target_label": BACKUP_TARGET_LABELS.get(self._backup_target, self._backup_target),
             "baseline_ts": (baseline or {}).get("ts") if isinstance(baseline, dict) else None,
             "baseline_set": isinstance(baseline, dict) and bool(baseline.get("sections")),
             "snapshots": len(index),
             "latest": index[0] if index else None,
             "last": last,
-            "health": list(self.get_data(_KEY_HEALTH) or []),
+            "ros_files": self.ros_file_list(),
             "live": live,
         }
 
@@ -627,8 +710,9 @@ class RouterOSConfigGuard(_PluginBase):
         diff = result.get("diff") or {}
         drifted = bool(diff.get("has_drift"))
         has_issue = (not result.get("ok")) or result.get("fetch", {}).get("fail", 0) > 0
-        offline = [h for h in result.get("health", []) if not h.get("online")]
-        if mode == "drift" and not (drifted or has_issue or offline):
+        ros = result.get("ros_backup") or {}
+        ros_failed = bool(ros and ros.get("done") is False and ros.get("errors"))
+        if mode == "drift" and not (drifted or has_issue or ros_failed):
             return
 
         lines = [f"触发：{trigger}"]
@@ -637,15 +721,16 @@ class RouterOSConfigGuard(_PluginBase):
         else:
             ident = result.get("identity") or {}
             lines.append(f"设备：{ident.get('name', 'RouterOS')}（{ident.get('version', '')}）")
-            lines.append(f"快照：{result.get('snapshot_id') or '试运行'}｜{result.get('message', '')}")
+            lines.append(f"备份：{BACKUP_TARGET_LABELS.get(result.get('backup_target'), result.get('backup_target'))}"
+                         f"｜{result.get('message', '')}")
             if drifted:
                 lines.append(format_diff(diff, max_rows=6))
             else:
                 lines.append("配置无漂移")
-            if offline:
-                lines.append("⚠ 关联服务离线：" + "、".join(f"{h.get('name')}" for h in offline))
+            if ros_failed:
+                lines.append("⚠ RouterOS 本机备份异常：" + "；".join(ros.get("errors", [])))
         lines.append(f"耗时 {result.get('duration', 0)}s")
-        title = "RouterOS 配置漂移告警" if (drifted or has_issue or offline) else "RouterOS 配置备份完成"
+        title = "RouterOS 配置漂移告警" if (drifted or has_issue or ros_failed) else "RouterOS 配置备份完成"
         self._send_message(title, "\n".join(lines))
 
     # ------------------------------------------------------------------
@@ -655,15 +740,20 @@ class RouterOSConfigGuard(_PluginBase):
     def get_page(self) -> List[dict]:
         status = self.current_status()
         index = self.snapshot_list()
+        ros_files = self.ros_file_list()
         logs = list(self.get_data(_KEY_LOGS) or [])
         last = status.get("last") or {}
         diff = last.get("diff") or {}
-        health = status.get("health") or []
+        target_label = BACKUP_TARGET_LABELS.get(self._backup_target, self._backup_target)
 
-        # 快照清单
+        # 快照清单（MP 插件目录）
         snap_lines = [f"{it.get('id')}｜{_ts_text(it.get('ts'))}｜{it.get('rows', 0)} 行｜"
                       f"{'⚠ ' + it.get('drift', '') if it.get('has_drift') else '无漂移'}"
-                      for it in index[:12]] or ["暂无快照，请点击「立即备份并检测」"]
+                      for it in index[:12]] or ["暂无 MP 快照（当前备份位置可能不含 MP）"]
+
+        # RouterOS 本机备份清单
+        ros_lines = [f"{f.get('name')}｜{f.get('size', '')}｜{f.get('created', '')}"
+                     for f in ros_files[:12]] or ["暂无 RouterOS 本机备份文件"]
 
         # 漂移明细
         if diff.get("has_drift"):
@@ -671,12 +761,10 @@ class RouterOSConfigGuard(_PluginBase):
         else:
             drift_text = "无漂移" if last else "尚未执行检测"
 
-        health_lines = [f"{h.get('category')}:{h.get('name')}｜{'在线' if h.get('online') else '离线'}｜{h.get('detail', '')}"
-                        for h in health] or ["未选择关联服务"]
-
         buttons = []
         for label, api in (("立即备份并检测", "run"), ("测试连接", "test"),
-                           ("最近设为基线", "baseline"), ("重载快照列表", "snapshots"),
+                           ("最近设为基线", "baseline"), ("重载列表", "snapshots"),
+                           ("刷新ROS备份", "rosbackups"),
                            ("清空快照", "clear"), ("停止", "stop")):
             buttons.append({
                 "component": "VBtn", "props": {"variant": "tonal", "size": "small", "text": label},
@@ -687,40 +775,48 @@ class RouterOSConfigGuard(_PluginBase):
         def kv(label: str, value: str, md: int = 4) -> dict:
             return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
                 {"component": "VLabel", "text": label},
-                {"component": "div", "text": value, "props": {"style": "white-space:pre-wrap"}},
+                {"component": "div", "text": md_safe(value), "props": {"style": "white-space:pre-wrap"}},
             ]}
+
+        # 所有动态文本统一经 md_safe 转义，避免 [x][y] 被当 Markdown 参考式链接
+        # 渲染成空药丸（截图红框问题的根因）。
+        def text_row(value: str, size: int = 12) -> dict:
+            return {"component": "div", "text": md_safe(value),
+                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
+
+        content_nodes: List[dict] = [
+            {"component": "VRow", "content": [
+                kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
+                kv("当前任务", "运行中" if status.get("running") else "待命"),
+                kv("备份位置", target_label),
+                kv("备份周期", self._cron),
+                kv("监控分区", f"{len(self._sections)} 个：{basename_from_types(self._sections)}"),
+                kv("基线时间", _ts_text(status.get("baseline_ts"))),
+                kv("MP 快照份数", str(status.get("snapshots", 0))),
+                kv("ROS 备份文件", str(len(ros_files))),
+            ]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "最近检测结果"},
+            text_row(drift_text, 13),
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "快照清单 · MP 插件目录（最近 12 份）"},
+            *[text_row(line) for line in snap_lines],
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "备份清单 · RouterOS 本机（.backup 系统备份 + .rsc 配置导出）"},
+            *[text_row(line) for line in ros_lines],
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"},
+            *[text_row(format_log_line(l.get("time", ""), l.get("level", ""), l.get("message", "")))
+              for l in logs[:20]],
+            {"component": "VRow", "props": {"class": "mt-4"}, "content": [
+                {"component": "VCol", "content": buttons}]},
+        ]
 
         return [{
             "component": "VCard", "props": {"variant": "tonal"}, "content": [{
-                "component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
-                        kv("当前任务", "运行中" if status.get("running") else "待命"),
-                        kv("备份周期", self._cron),
-                        kv("监控分区", f"{len(self._sections)} 个：{basename_from_types(self._sections)}"),
-                        kv("基线时间", _ts_text(status.get("baseline_ts"))),
-                        kv("快照份数", str(status.get("snapshots", 0))),
-                    ]},
-                    {"component": "VDivider", "props": {"class": "my-3"}},
-                    {"component": "VLabel", "text": "最近检测结果"},
-                    {"component": "div", "text": drift_text, "props": {"style": "white-space:pre-wrap;font-size:13px"}},
-                    {"component": "VDivider", "props": {"class": "my-3"}},
-                    {"component": "VLabel", "text": "关联服务在线状态"},
-                    *[{"component": "div", "text": line, "props": {"style": "white-space:pre-wrap;font-size:13px"}}
-                      for line in health_lines],
-                    {"component": "VDivider", "props": {"class": "my-3"}},
-                    {"component": "VLabel", "text": "快照清单（最近 12 份，文件位于插件数据目录）"},
-                    *[{"component": "div", "text": line, "props": {"style": "white-space:pre-wrap;font-size:12px"}}
-                      for line in snap_lines],
-                    {"component": "VDivider", "props": {"class": "my-3"}},
-                    {"component": "VLabel", "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"},
-                    *[{"component": "div", "text": f"[{l['time']}][{l['level']}] {l['message']}",
-                       "props": {"style": "white-space:pre-wrap;font-size:12px"}} for l in logs[:20]],
-                    {"component": "VRow", "props": {"class": "mt-4"}, "content": [
-                        {"component": "VCol", "content": buttons}]},
-                ]},
-            ]},
-        ]
+                "component": "VCardText", "content": content_nodes,
+            }],
+        }]
 
     # ------------------------------------------------------------------
     # API
@@ -732,9 +828,10 @@ class RouterOSConfigGuard(_PluginBase):
             {"path": f"{base}/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
             {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
             {"path": f"{base}/baseline", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
-            {"path": f"{base}/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取快照索引列表"},
+            {"path": f"{base}/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
+            {"path": f"{base}/rosbackups", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
             {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": f"{base}/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空快照与基线"},
+            {"path": f"{base}/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
             {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
         ]
 
@@ -757,6 +854,22 @@ class RouterOSConfigGuard(_PluginBase):
 
     def api_snapshots(self, _=None) -> Response:
         return Response(success=True, data=self.snapshot_list())
+
+    def api_rosbackups(self, _=None) -> Response:
+        """实时拉取 RouterOS /file，刷新本机备份文件清单。"""
+        if AsyncRequestUtils is None or not self._address:
+            return Response(success=False, message="网络模块不可用或未配置地址")
+        http = AsyncRequestUtils(verify=self._use_ssl is False)
+        client = build_routeros_client(self._address, self._username, self._password, http,
+                                       port=self._port, use_ssl=self._use_ssl, timeout=self._timeout)
+        files = self._run_coroutine(client.list_files(client=http))
+        rows = [{
+            "name": str(f.get("name") or ""),
+            "size": str(f.get("size") or ""),
+            "created": str(f.get("creation-time") or f.get("created") or ""),
+        } for f in files if is_our_backup(str(f.get("name") or ""), self._backup_prefix)]
+        self.save_data(_KEY_ROS_FILES, rows)
+        return Response(success=True, message=f"已刷新 {len(rows)} 个 RouterOS 备份文件", data=rows)
 
     def api_status(self, _=None) -> Response:
         return Response(success=True, data=self.current_status())
@@ -804,10 +917,10 @@ class RouterOSConfigGuard(_PluginBase):
         status = self.current_status()
         last = status.get("last") or {}
         diff = last.get("diff") or {}
-        text = (f"基线：{_ts_text(status.get('baseline_ts'))}\n"
-                f"快照：{status.get('snapshots', 0)} 份\n"
-                f"最近：{summary_text(diff) if diff else '尚未检测'}\n"
-                f"关联服务：{format_health(status.get('health') or [])}")
+        text = (f"备份位置：{status.get('backup_target_label')}\n"
+                f"基线：{_ts_text(status.get('baseline_ts'))}\n"
+                f"MP 快照：{status.get('snapshots', 0)} 份｜ROS 备份：{len(status.get('ros_files') or [])} 个\n"
+                f"最近：{summary_text(diff) if diff else '尚未检测'}")
         if diff.get("has_drift"):
             text += "\n" + format_diff(diff, max_rows=5)
         self._send_message("RouterOS 备份 · 状态", text, channel=channel, userid=userid)
