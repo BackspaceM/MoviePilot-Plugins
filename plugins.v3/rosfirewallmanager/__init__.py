@@ -36,19 +36,13 @@ except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
 try:
-    from app import schemas
-
-    Response = schemas.Response
+    from schemas import Response
 except Exception:  # noqa: BLE001
-    from pydantic import BaseModel
-
-    class Response(BaseModel):  # type: ignore
-        """宿主不可用时的三字段 envelope 降级实现。"""
-
-        success: bool = True
-        message: str = ""
-        data: Any = None
-
+    class Response:  # type: ignore
+        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
+            self.success = success
+            self.message = message
+            self.data = data
 
 try:
     from fastapi import Body
@@ -62,7 +56,6 @@ except Exception:  # noqa: BLE001
     _PLUGIN_MTYPE = None
 
 from .clients import RouterOSFirewallClient, build_firewall_client
-from .importer import ImportRule, build_import_preview
 from .core import (
     ACTION_OPTIONS,
     CONNSTATE_OPTIONS,
@@ -118,15 +111,14 @@ _KEY_LAST_SCAN = "rfm_last_scan"
 _KEY_LAST_OP = "rfm_last_op"
 _KEY_SNAPSHOT = "rfm_snapshot"
 _KEY_CONN = "rfm_conn"
-_KEY_IMPORT = "rfm_import_preview"
 
 _NOTIFY_LABELS = {
-    "issue": "仅隐患/异常",
+    "issue": "仅隐患/异常（推荐）",
     "all": "每次扫描",
     "none": "关闭",
 }
 _PLACE_LABELS = {
-    "before_drop": "兜底 drop 之前",
+    "before_drop": "兜底 drop 之前（推荐）",
     "top": "置顶",
     "bottom": "末尾",
     "before_id": "指定规则之前",
@@ -146,8 +138,6 @@ def now_text_local() -> str:
     return now_text()
 
 
-
-from . import roslink
 class RosFirewallManager(_PluginBase):
     # 类级元数据一律用字符串字面量：官方 check_plugin_versions.py 以 AST 提取，
     # 常量引用会被判为"未声明"（与 plugin_version 同理）。
@@ -155,7 +145,7 @@ class RosFirewallManager(_PluginBase):
     plugin_desc = ("RouterOS 防火墙可视化管理器：表格化查看 filter/nat/mangle/raw 全部规则并检测影子规则·重复·缺失兜底，"
                    "逐条启停/上下移/删除或按表单新增（自动插到兜底 drop 前），操作前可留备份，定时扫描隐患并推送 MP 通知。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.0.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "rosfirewallmanager_"
@@ -196,20 +186,13 @@ class RosFirewallManager(_PluginBase):
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
-
-        # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持原配置不变
-        _ccfg = dict(config or {})
-        _rcc, _rcc_note = roslink.connection_overrides(_ccfg.get("ros_connection"), "std")
-        _ccfg.update(_rcc)
-        if _rcc_note:
-            (logger.info if _rcc else logger.warning)(f"RouterOS 连接中心：{_rcc_note}")
         self._enabled = bool(config.get("enabled"))
 
-        self._address = str(_ccfg.get("router_address") or "").strip()
-        self._port = int(_ccfg.get("router_port") or 443)
-        self._use_ssl = bool(_ccfg.get("router_ssl", True))
-        self._username = str(_ccfg.get("router_username") or "").strip()
-        self._password = str(_ccfg.get("router_password") or "")
+        self._address = str(config.get("router_address") or "").strip()
+        self._port = int(config.get("router_port") or 443)
+        self._use_ssl = bool(config.get("router_ssl", True))
+        self._username = str(config.get("router_username") or "").strip()
+        self._password = str(config.get("router_password") or "")
         self._timeout = max(3, min(60, int(config.get("timeout") or 10)))
 
         tables = config.get("manage_tables")
@@ -232,17 +215,6 @@ class RosFirewallManager(_PluginBase):
             key: config.get(key) for key in _NEW_RULE_FIELDS
         }
         self._new_rule["table"] = str(config.get("new_rule_table") or "filter").strip().lower()
-
-        # 批量导入：只解析出「待确认」预览，不自动写入 RouterOS。
-        # 用户在详情页核对中文含义后，点「确认批量写入」才会一次性下发。
-        preview = build_import_preview(config)
-        preview["created"] = now_text_local()
-        self.save_data(_KEY_IMPORT, preview)
-        if preview.get("rules"):
-            self._log("INFO", f"批量导入待确认：解析出 {len(preview['rules'])} 条规则"
-                              f"（来源：{preview.get('source')}）")
-        for err in (preview.get("errors") or [])[:5]:
-            self._log("WARN", f"批量导入解析：{err}")
 
         if config.get("add_once"):
             config["add_once"] = False
@@ -284,7 +256,9 @@ class RosFirewallManager(_PluginBase):
             "name": "RouterOS 防火墙隐患扫描",
             "trigger": trigger,
             "func": self.start_scan,
-            "kwargs": {"trigger": "定时扫描", "prefer_thread": True},
+            # kwargs 是展开给 APScheduler.add_job 的调度参数，绝不能含 trigger；
+            # 插件 func 由 MP 无参调用，触发来源/线程偏好放在 func 默认值里。
+            "kwargs": {},
         }]
 
     # ------------------------------------------------------------------
@@ -296,7 +270,6 @@ class RosFirewallManager(_PluginBase):
             "enabled": False,
             "add_once": False,
             "router_address": "",
-            "ros_connection": "",
             "router_port": 443,
             "router_ssl": True,
             "router_username": "",
@@ -327,12 +300,6 @@ class RosFirewallManager(_PluginBase):
             "new_rule_disabled": False,
             "new_rule_log": False,
             "new_rule_log_prefix": "",
-            "import_table": "filter",
-            "import_place": "append",
-            "import_disabled": False,
-            "import_file": None,
-            "import_file_path": "",
-            "import_rules": "",
         }
 
         def fld(model: str, label: str, props: Optional[dict] = None) -> dict:
@@ -357,25 +324,10 @@ class RosFirewallManager(_PluginBase):
         place_items = [{"title": v, "value": k} for k, v in _PLACE_LABELS.items()]
 
         content: List[dict] = [
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心"},
-                {"component": "VCardText", "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "ros_connection",
-                        "label": "已保存的路由器",
-                        "items": roslink.connection_items(),
-                        "clearable": True,
-                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
-                        "persistentHint": True}},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉是空的就直接手填，不影响使用。"},
-                ]},
-            ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "按执行顺序看 RouterOS 防火墙规则，揪出被挡住的死规则和重复规则，"
-                                 "也能逐条启停、排序、删除。只改你点名的那条，不会批量删。"
-                                 "账号要有 read/write/api 权限。"}},
+             "content": {"text": "在 MP 里可视化管理 RouterOS 防火墙：按执行顺序查看规则、自动揪出被遮挡的死规则与重复规则，"
+                                 "逐条启停/排序/删除，或填写表单新增。本插件是「管理器」不是「自动对齐器」，"
+                                 "绝不批量删除你的规则；删除、置底等破坏性操作都需二次确认。RouterOS 用户需具备 read/write/api 权限。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sw("enabled", "启用插件", "关闭后不再定时扫描，但详情页仍可手动操作")]},
@@ -422,55 +374,7 @@ class RosFirewallManager(_PluginBase):
                         "hint": "仅前 N 条规则生成快捷按钮，避免页面过长", "persistent-hint": True})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mb-1"},
-             "text": "批量导入规则"},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3"},
-             "content": {"text": "把 .rsc 粘进文本框或上传文件，保存后到详情页逐条核对中文含义，"
-                                 "确认了再点「确认批量写入」。解析阶段不动设备，也不删已有规则。"}},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sel("import_table", "默认表",
-                        [{"title": TABLE_LABELS[t], "value": t} for t in TABLES],
-                        {"hint": "规则文本未写 /ip firewall <表> 时使用",
-                         "persistent-hint": True})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sel("import_place", "插入位置", [
-                        {"title": "追加到链末尾", "value": "append"},
-                        {"title": "插到兜底 drop 之前", "value": "before_drop"}],
-                        {"hint": "放行规则插到兜底 drop 前面，不然不会生效",
-                         "persistent-hint": True})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sw("import_disabled", "导入后先禁用", "建好规则但不生效，便于逐条核对")]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
-                    {"component": "VFileInput", "props": {
-                        "model": "import_file", "label": "上传规则文件（.rsc / .txt）",
-                        "accept": ".rsc,.txt,.cfg,text/plain",
-                        "prepend-icon": "mdi-file-upload-outline", "clearable": True,
-                        "persistent-hint": True,
-                        "hint": "选择 RouterOS 导出的 .rsc 文件；若前端不支持选择文件，请直接粘贴到下方文本框"}}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    fld("import_file_path", "或填容器内文件路径",
-                        {"placeholder": "/config/firewall.rsc",
-                         "hint": "文件已放进 MP 容器时使用，最大 1MB", "persistent-hint": True})]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [
-                    {"component": "VTextarea", "props": {
-                        "model": "import_rules", "label": "规则文本 / 粘贴 .rsc 内容", "rows": 5,
-                        "auto-grow": True, "persistent-hint": True,
-                        "hint": "每行一条：add chain=input action=accept protocol=tcp dst-port=8291 comment=\"allow winbox\"；"
-                                "可用 /ip firewall filter、/ip firewall nat 切换表，支持反斜杠续行与 # 注释",
-                        "placeholder": "/ip firewall filter\n"
-                                       "add chain=input action=accept protocol=tcp dst-port=8291 comment=\"allow winbox\"\n"
-                                       "add chain=forward action=drop src-address=10.0.0.0/8"}}]},
-            ]},
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mb-1"},
-             "text": "单条新增"},
-            {"component": "VAlert", "props": {"type": "info", "variant": "text", "class": "mb-2"},
-             "content": {"text": "只加一条时用这个，填好打开下方开关、保存就写入。多条请用上面的批量导入。"}},
+            {"component": "VLabel", "text": "新增规则（填好后打开下方开关并保存，即刻写入 RouterOS）"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sel("new_rule_table", "表", table_items)]},
@@ -506,8 +410,8 @@ class RosFirewallManager(_PluginBase):
                     sw("add_once", "立即添加这条规则", "保存后按上面的字段写入 RouterOS，并自动复位本开关")]},
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "text", "class": "mt-2"},
-             "content": {"text": "放行规则默认插在兜底 drop 前面，不然不会生效。改防火墙可能把自己锁在外面，"
-                                 "先留个备份，确认有一条放行你管理 IP 的规则。"}},
+             "content": {"text": "安全提示：新增放行规则默认插到兜底 drop 之前（否则会变成永不匹配的死规则）。"
+                                 "改动防火墙可能导致远程中断，建议开启「改动前自动留备份」，并确认有一条放行你管理 IP/SSH 的规则。"}},
         ]
         return content, defaults
 
@@ -535,7 +439,7 @@ class RosFirewallManager(_PluginBase):
         )
         return client, http
 
-    def start_scan(self, trigger: str = "手动", prefer_thread: bool = False) -> bool:
+    def start_scan(self, trigger: str = "定时扫描", prefer_thread: bool = True) -> bool:
         with self._state_lock:
             if self._running:
                 return False
@@ -795,23 +699,15 @@ class RosFirewallManager(_PluginBase):
 
     def _action_button(self, label: str, api: str, *, params: Optional[dict] = None,
                        confirm: bool = False, variant: str = "tonal",
-                       color: Optional[str] = None, icon: str = "",
-                       method: str = "post", size: str = "small") -> dict:
-        """详情页按钮：文字放组件级 text，带颜色/图标，避免出现灰色空按钮。
-
-        所有按钮都指向 get_api() 中已注册的真实 endpoint，不使用 disabled。
-        """
-        props: Dict[str, Any] = {"variant": variant, "size": size, "class": "ma-1"}
+                       color: Optional[str] = None, size: str = "small") -> dict:
+        props: Dict[str, Any] = {"variant": variant, "size": size, "text": label}
         if color:
             props["color"] = color
-        if icon:
-            props["prepend-icon"] = icon
         event: Dict[str, Any] = {
-            "api": f"plugin/{PLUGIN_NAME}/{api}", "method": method,
+            "api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
             "params": params or {}, "confirm": confirm,
         }
-        return {"component": "VBtn", "props": props, "text": label,
-                "events": {"click": event}}
+        return {"component": "VBtn", "props": props, "events": {"click": event}}
 
     def _rule_op_row(self, r: Rule) -> dict:
         """为单条规则生成一行：简述 + 启停/上移/下移/置顶/置底/删除按钮。"""
@@ -849,124 +745,136 @@ class RosFirewallManager(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
-        """主界面只留按钮、导入预览和一行状态。"""
         status = self.current_status()
-        findings = [Finding.from_dict(f) for f in status["findings"]]
+        rules: List[Rule] = status["rules"]
+        findings: List[Finding] = [Finding.from_dict(f) for f in status["findings"]]
         conn = status["conn"]
-        preview = dict(self.get_data(_KEY_IMPORT) or {})
-        import_items = [ImportRule.from_dict(d) for d in (preview.get("rules") or [])]
-        import_errors = [str(e) for e in (preview.get("errors") or [])]
+        last_op = status["last_op"]
+        limit = int(status["display_limit"])
+
+        def kv(label: str, value: str, md: int = 4) -> dict:
+            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
+                {"component": "VLabel", "text": label},
+                {"component": "div", "text": md_safe(value),
+                 "props": {"style": "white-space:pre-wrap"}},
+            ]}
+
+        def text_row(value: str, size: int = 12) -> dict:
+            return {"component": "div", "text": md_safe(value),
+                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
+
         high = sum(1 for f in findings if f.severity == SEV_HIGH)
         med = sum(1 for f in findings if f.severity == "medium")
-        high_risk = sum(1 for r in import_items if "高危" in r.risk)
 
-        # 批量导入预览表格：含义与风险一目了然，确认后才写入
-        import_rows = []
-        for r in import_items:
-            action_color = ("success" if r.action == "accept" else
-                            "error" if r.action in ("drop", "reject") else "primary")
-            import_rows.append({
-                "component": "tr",
-                "content": [
-                    {"component": "td", "props": {"class": "text-caption"}, "text": f"#{r.index}"},
-                    {"component": "td", "props": {"class": "text-caption"}, "text": r.table_label},
-                    {"component": "td", "props": {"class": "text-caption"}, "text": r.chain or "-"},
-                    {"component": "td", "content": [
-                        {"component": "VChip", "props": {"size": "x-small", "variant": "tonal",
-                                                         "color": action_color},
-                         "text": r.action or "-"}]},
-                    {"component": "td", "props": {"class": "text-caption",
-                                                  "style": "max-width:420px"},
-                     "content": [{"component": "div", "props": {"class": "text-truncate"},
-                                  "text": md_safe(r.meaning)}]},
-                    {"component": "td", "props": {"class": "text-caption",
-                                                  "style": "max-width:180px"},
-                     "content": [{"component": "div",
-                                  "text": md_safe(r.risk or "-")}]},
-                ],
-            })
+        # 顶部操作按钮（全部有真实 endpoint，无 disabled）
+        op_buttons = [
+            self._action_button("立即扫描隐患", "scan", variant="flat", color="primary"),
+            self._action_button("刷新规则", "refresh"),
+            self._action_button("测试连接", "test"),
+            self._action_button("备份快照到 MP", "backup"),
+            self._action_button("RouterOS 留备份", "router_backup"),
+            self._action_button("停止任务", "stop", confirm=True),
+        ]
 
-        if import_items:
-            place_text = ("插到兜底 drop 之前" if preview.get("place") == "before_drop"
-                          else "追加到链末尾")
-            import_body: List[dict] = [
-                {"component": "VAlert", "props": {
-                    "type": "warning" if high_risk else "info", "variant": "tonal", "class": "mb-2"},
-                 "content": {"text": md_safe(
-                     f"解析出 {len(import_items)} 条，高危 {high_risk} 条；来源 {preview.get('source') or '-'}，"
-                     f"写入位置 {place_text}。核对完再点「确认批量写入」。")}},
-                {"component": "VTable", "props": {"density": "compact", "hover": True},
-                 "content": [
-                     {"component": "thead", "content": [
-                         {"component": "tr", "content": [
-                             {"component": "th", "text": t}
-                             for t in ("#", "表", "链", "动作", "规则含义", "风险提示")]}]},
-                     {"component": "tbody", "content": import_rows},
-                 ]},
-            ]
-            if import_errors:
-                import_body.append({"component": "VAlert", "props": {
-                    "type": "warning", "variant": "text", "class": "mt-2"},
-                    "content": {"text": "这几条没解析：" + "；".join(md_safe(e) for e in import_errors[:5])}})
-            import_body.append({"component": "div", "props": {"class": "mt-3"}, "content": [
-                self._action_button(f"确认批量写入（{len(import_items)} 条）", "import_apply",
-                                    color="primary", icon="mdi-upload-multiple",
-                                    variant="flat", confirm=True),
-                self._action_button("清空待导入", "import_clear", color="error",
-                                    icon="mdi-close-circle-outline"),
-            ]})
+        # 单条规则操作（仅前 limit 条生成按钮，避免页面过长）
+        op_rows: List[dict] = []
+        truncated = 0
+        for r in rules[:limit]:
+            op_rows.append(self._rule_op_row(r))
+        truncated = max(0, len(rules) - limit)
+
+        content_nodes: List[dict] = [
+            {"component": "VAlert", "props": {
+                "type": "warning" if high else "info", "variant": "tonal", "class": "mb-4"},
+             "content": {"text": md_safe(
+                 f"隐患 {len(findings)} 项（高危 {high}｜中危 {med}）。"
+                 + ("点击「立即扫描隐患」刷新检测。" if not findings else
+                    "高危项多是「放行规则被兜底 drop 遮挡」或「拒绝规则被全放行架空」，请优先处理。"))}},
+            {"component": "VRow", "content": [
+                kv("插件状态", "已启用" if status["enabled"] else "未启用"),
+                kv("当前任务", "运行中" if status["running"] else "待命"),
+                kv("连接状态", ("正常" if conn.get("ok") else
+                                ("异常" if conn else "未测试")) + f"｜{conn.get('msg', '')}"),
+                kv("试运行", "是（不改动）" if status["dry_run"] else "否"),
+                kv("管理表", "、".join(TABLE_LABELS.get(t, t) for t in status["tables"])),
+                kv("扫描周期", status["scan_cron"] if status["scan_enabled"] else "未启用定时"),
+                kv("上次扫描", status["last_scan"]),
+                kv("规则总数", f"{status['summary'].get('total', 0)} 条"
+                               f"（禁用 {status['summary'].get('disabled', 0)}"
+                               f"｜动态 {status['summary'].get('dynamic', 0)}）"),
+            ]},
+            {"component": "VRow", "props": {"class": "mt-2"}, "content": [
+                {"component": "VCol", "content": op_buttons}]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": f"隐患检测（{len(findings)} 项）"},
+            text_row(format_findings_text(findings), 12),
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "规则一览（自上而下即执行顺序）"},
+        ]
+        for table in status["tables"]:
+            content_nodes.append(text_row(format_rules_text(rules, table), 12))
+
+        content_nodes.append({"component": "VDivider", "props": {"class": "my-3"}})
+        if op_rows:
+            content_nodes.append({"component": "VLabel",
+                                  "text": f"逐条操作（前 {min(len(rules), limit)} 条；删除/置底需确认）"})
+            content_nodes.extend(op_rows)
+            if truncated:
+                content_nodes.append(text_row(
+                    f"……另有 {truncated} 条规则未显示操作按钮（可调大配置页「详情页操作按钮上限」，"
+                    "或用远程命令 /rfw_scan 查看隐患）", 11))
         else:
-            import_body = [
-                {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                 "content": {"text": "还没导入规则。在设置页粘贴 .rsc 或规则文本，保存后回来核对，"
-                                     "再点「确认批量写入」。"}}
-            ]
-            if import_errors:
-                import_body.append({"component": "VAlert", "props": {
-                    "type": "warning", "variant": "tonal", "class": "mt-2"},
-                    "content": {"text": "这几条没解析：" + "；".join(md_safe(e) for e in import_errors[:5])}})
+            content_nodes.append(text_row("尚无规则数据，点击「刷新规则」或「立即扫描隐患」加载。", 12))
 
-        primary = [
-            self._action_button("立即扫描隐患", "scan", color="primary",
-                                icon="mdi-radar", variant="flat"),
-            self._action_button("刷新规则", "refresh", color="info", icon="mdi-refresh"),
-        ]
-        secondary = [
-            self._action_button("测试连接", "test", icon="mdi-lan-connect"),
-            self._action_button("备份快照到 MP", "backup", icon="mdi-content-save-outline"),
-            self._action_button("RouterOS 留备份", "router_backup", icon="mdi-backup-restore"),
-            self._action_button("停止任务", "stop", color="error",
-                                icon="mdi-stop-circle-outline", confirm=True),
-        ]
+        # 最近一次操作结果：说明文字全角转义；命令中的 RouterOS *id 用 md_safe_command 保留原样
+        if last_op:
+            content_nodes.append({"component": "VDivider", "props": {"class": "my-3"}})
+            content_nodes.append({"component": "VLabel", "text": "最近一次操作"})
+            head = md_safe(
+                f"{'成功' if last_op.get('ok') else '失败'}：{last_op.get('message', '')}"
+                + (f"\n位置：{last_op.get('note')}" if last_op.get("note") else ""))
+            content_nodes.append({"component": "div", "text": head,
+                                  "props": {"style": "white-space:pre-wrap;font-size:12px"}})
+            if last_op.get("preview"):
+                content_nodes.append({"component": "div",
+                                      "text": "命令：" + md_safe_command(last_op["preview"]),
+                                      "props": {"style": "white-space:pre-wrap;font-size:12px"}})
 
-        return [
-            {"component": "div", "content": primary + secondary},
-            {"component": "VCard", "props": {"variant": "outlined", "class": "mt-3"},
-             "content": [{"component": "VCardText", "content": import_body}]},
-            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-             "text": md_safe(f"规则 {status['summary'].get('total', 0)} 条｜隐患 {len(findings)} 项"
-                             f"｜{'已连接' if conn.get('ok') else '未连接'}")},
-        ]
+        content_nodes.append({"component": "VDivider", "props": {"class": "my-3"}})
+        content_nodes.append({"component": "VLabel",
+                              "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"})
+        logs = list(self.get_data(_KEY_LOGS) or [])
+        if not logs:
+            content_nodes.append(text_row("暂无日志，点击上方「立即扫描隐患」或「测试连接」后显示。", 12))
+        for l in logs[:20]:
+            content_nodes.append(text_row(
+                format_log_line(l.get("time", ""), l.get("level", ""), l.get("message", "")), 12))
+
+        return [{
+            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
+                "component": "VCardText", "content": content_nodes,
+            }],
+        }]
+
+    # ------------------------------------------------------------------
+    # API（一一对应详情页按钮 + 配置页新增）
+    # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
-        # path 为相对路径：宿主自动补齐 /api/v1/plugin/<PluginID> 前缀
+        base = f"/plugin/{PLUGIN_NAME}"
         return [
-            {"path": "/scan", "auth": "bear", "endpoint": self.api_scan, "methods": ["POST"], "summary": "立即扫描隐患"},
-            {"path": "/refresh", "auth": "bear", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新四表规则"},
-            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": "/toggle", "auth": "bear", "endpoint": self.api_toggle, "methods": ["POST"], "summary": "启用/禁用单条规则"},
-            {"path": "/move", "auth": "bear", "endpoint": self.api_move, "methods": ["POST"], "summary": "移动单条规则顺序"},
-            {"path": "/remove", "auth": "bear", "endpoint": self.api_remove, "methods": ["POST"], "summary": "删除单条规则"},
-            {"path": "/add_preview", "auth": "bear", "endpoint": self.api_add_preview, "methods": ["POST"], "summary": "预览新增规则命令"},
-            {"path": "/add", "auth": "bear", "endpoint": self.api_add, "methods": ["POST"], "summary": "按表单新增规则"},
-            {"path": "/backup", "auth": "bear", "endpoint": self.api_backup, "methods": ["POST"], "summary": "导出规则快照到 MP"},
-            {"path": "/router_backup", "auth": "bear", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
-            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/import_apply", "auth": "bear", "endpoint": self.api_import_apply,
-             "methods": ["POST"], "summary": "确认后批量写入待导入规则"},
-            {"path": "/import_clear", "auth": "bear", "endpoint": self.api_import_clear,
-             "methods": ["POST"], "summary": "清空待导入规则"},
+            {"path": f"{base}/scan", "endpoint": self.api_scan, "methods": ["POST"], "summary": "立即扫描隐患"},
+            {"path": f"{base}/refresh", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新四表规则"},
+            {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": f"{base}/toggle", "endpoint": self.api_toggle, "methods": ["POST"], "summary": "启用/禁用单条规则"},
+            {"path": f"{base}/move", "endpoint": self.api_move, "methods": ["POST"], "summary": "移动单条规则顺序"},
+            {"path": f"{base}/remove", "endpoint": self.api_remove, "methods": ["POST"], "summary": "删除单条规则"},
+            {"path": f"{base}/add_preview", "endpoint": self.api_add_preview, "methods": ["POST"], "summary": "预览新增规则命令"},
+            {"path": f"{base}/add", "endpoint": self.api_add, "methods": ["POST"], "summary": "按表单新增规则"},
+            {"path": f"{base}/backup", "endpoint": self.api_backup, "methods": ["POST"], "summary": "导出规则快照到 MP"},
+            {"path": f"{base}/router_backup", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
+            {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
         ]
 
     def api_scan(self, _=None) -> Response:
@@ -1070,82 +978,6 @@ class RosFirewallManager(_PluginBase):
         st = self.current_status()
         st["rules"] = [r.to_dict() for r in st["rules"]]
         return Response(success=True, data=st)
-
-    def api_import_apply(self, _=None) -> Response:
-        """用户确认后，一次性把预览中的规则批量写入 RouterOS。"""
-        preview = dict(self.get_data(_KEY_IMPORT) or {})
-        items = [ImportRule.from_dict(d) for d in (preview.get("rules") or [])]
-        if not items:
-            return Response(success=False,
-                            message="没有待导入规则：请先在设置页粘贴/上传规则并保存，再到此处确认")
-        if self._running:
-            return Response(success=False, message="已有扫描任务在运行，请稍后再试")
-        client, http = self._make_client()
-        if client is None:
-            return Response(success=False, message="网络模块不可用或未配置 RouterOS 地址")
-
-        place_mode = str(preview.get("place") or "append")
-        if self._before_backup and not self._dry_run:
-            bok, bmsg = self._run_coroutine(
-                client.save_routeros_backup(
-                    f"rfm-import-{time.strftime('%Y%m%d-%H%M%S')}", client=http))
-            self._log("INFO" if bok else "WARN", f"【批量导入】改动前备份：{bmsg}")
-
-        rules_now = self._run_coroutine(client.list_all(client=http, tables=self._tables))
-        ok_count = 0
-        failures: List[str] = []
-        for item in items:
-            place = item.place_before or None
-            if not place and place_mode == "before_drop":
-                place, _ = choose_insert_place(rules_now, item.chain, "before_drop", "")
-            payload = dict(item.payload)
-            self._apply_comment_prefix(payload)
-            ok, msg = self._run_coroutine(
-                client.add_rule(item.table, payload, place, client=http))
-            if ok:
-                ok_count += 1
-            else:
-                failures.append(f"#{item.index} {msg}")
-            self._log("INFO" if ok else "WARN", f"【批量导入】#{item.index} {msg}")
-
-        message = (f"批量写入完成：成功 {ok_count} / {len(items)} 条"
-                   + ("（试运行，未实际改动）" if self._dry_run else ""))
-        result = {
-            "ok": not failures, "total": len(items), "ok_count": ok_count,
-            "fail_count": len(failures), "message": message,
-            "errors": failures[:10], "dry_run": self._dry_run,
-            "preview": items[0].command if items else "",
-        }
-        self.save_data(_KEY_LAST_OP, result)
-        if ok_count and not self._dry_run:
-            fresh = self._run_coroutine(client.list_all(client=http, tables=self._tables))
-            self.save_data(_KEY_RULES, [r.to_dict() for r in fresh])
-            self.save_data(_KEY_FINDINGS, [f.to_dict() for f in detect_findings(fresh)])
-        self._clear_import_preview()
-        self._send_message("防火墙批量导入完成" if not failures else "防火墙批量导入部分失败",
-                           message + ("；失败：" + "；".join(failures[:3]) if failures else ""))
-        return Response(success=not failures, message=message, data=result)
-
-    def api_import_clear(self, _=None) -> Response:
-        """放弃本次待导入规则。"""
-        self._clear_import_preview()
-        return Response(success=True, message="已清空待导入规则")
-
-    def _clear_import_preview(self) -> None:
-        """清空预览与配置里的导入内容，避免再次保存配置时重复导入。"""
-        self.save_data(_KEY_IMPORT, {})
-        try:
-            cfg = dict(self.get_config() or {})
-            changed = False
-            for key, empty in (("import_rules", ""), ("import_file", None),
-                               ("import_file_path", "")):
-                if cfg.get(key) not in (None, ""):
-                    cfg[key] = empty
-                    changed = True
-            if changed:
-                self.update_config(cfg)
-        except Exception as err:  # noqa: BLE001
-            logger.warning(f"{_LOG_PREFIX}：清空导入配置失败：{err}")
 
     # ------------------------------------------------------------------
     # 远程命令
