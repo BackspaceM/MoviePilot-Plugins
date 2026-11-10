@@ -121,12 +121,12 @@ _KEY_CONN = "rfm_conn"
 _KEY_IMPORT = "rfm_import_preview"
 
 _NOTIFY_LABELS = {
-    "issue": "仅隐患/异常（推荐）",
+    "issue": "仅隐患/异常",
     "all": "每次扫描",
     "none": "关闭",
 }
 _PLACE_LABELS = {
-    "before_drop": "兜底 drop 之前（推荐）",
+    "before_drop": "兜底 drop 之前",
     "top": "置顶",
     "bottom": "末尾",
     "before_id": "指定规则之前",
@@ -436,8 +436,8 @@ class RosFirewallManager(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sel("import_place", "插入位置", [
                         {"title": "追加到链末尾", "value": "append"},
-                        {"title": "插到兜底 drop 之前（推荐）", "value": "before_drop"}],
-                        {"hint": "放行规则建议插到兜底 drop 之前，避免变成死规则",
+                        {"title": "插到兜底 drop 之前", "value": "before_drop"}],
+                        {"hint": "放行规则插到兜底 drop 前面，不然不会生效",
                          "persistent-hint": True})]},
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sw("import_disabled", "导入后先禁用", "建好规则但不生效，便于逐条核对")]},
@@ -909,9 +909,8 @@ class RosFirewallManager(_PluginBase):
                 {"component": "VAlert", "props": {
                     "type": "warning" if high_risk else "info", "variant": "tonal", "class": "mb-2"},
                  "content": {"text": md_safe(
-                     f"共解析 {len(import_items)} 条规则，高危 {high_risk} 条；"
-                     f"来源：{preview.get('source') or '-'}；解析时间：{preview.get('created') or '-'}；"
-                     f"写入位置：{place_text}。请逐条核对含义后再确认写入。")}},
+                     f"解析出 {len(import_items)} 条，高危 {high_risk} 条；来源 {preview.get('source') or '-'}，"
+                     f"写入位置 {place_text}。核对完再点「确认批量写入」。")}},
                 {"component": "VTable", "props": {"density": "compact", "hover": True},
                  "content": [
                      {"component": "thead", "content": [
@@ -924,7 +923,7 @@ class RosFirewallManager(_PluginBase):
             if import_errors:
                 import_body.append({"component": "VAlert", "props": {
                     "type": "warning", "variant": "text", "class": "mt-2"},
-                    "content": {"text": "解析提示：" + "；".join(md_safe(e) for e in import_errors[:5])}})
+                    "content": {"text": "这几条没解析：" + "；".join(md_safe(e) for e in import_errors[:5])}})
             import_body.append({"component": "div", "props": {"class": "mt-3"}, "content": [
                 self._action_button(f"确认批量写入（{len(import_items)} 条）", "import_apply",
                                     color="primary", icon="mdi-upload-multiple",
@@ -935,13 +934,13 @@ class RosFirewallManager(_PluginBase):
         else:
             import_body = [
                 {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
-                 "content": {"text": "尚未有待导入规则。在「设置」页粘贴规则文本、上传 .rsc 文件或填写容器内路径并保存后，"
-                                     "这里会逐条显示中文含义与风险提示；确认无误再一键批量写入 RouterOS。"}}
+                 "content": {"text": "还没导入规则。在设置页粘贴 .rsc 或规则文本，保存后回来核对，"
+                                     "再点「确认批量写入」。"}}
             ]
             if import_errors:
                 import_body.append({"component": "VAlert", "props": {
                     "type": "warning", "variant": "tonal", "class": "mt-2"},
-                    "content": {"text": "解析提示：" + "；".join(md_safe(e) for e in import_errors[:5])}})
+                    "content": {"text": "这几条没解析：" + "；".join(md_safe(e) for e in import_errors[:5])}})
 
         primary = [
             self._action_button("立即扫描隐患", "scan", color="primary",
@@ -968,7 +967,7 @@ class RosFirewallManager(_PluginBase):
              "content": {"text": md_safe(
                  f"隐患 {len(findings)} 项（高危 {high}｜中危 {med}）。"
                  + ("点击「立即扫描隐患」刷新检测。" if not findings else
-                    "高危项多是「放行规则被兜底 drop 遮挡」或「拒绝规则被全放行架空」，请优先处理。"))}},
+                    "高危项多是「放行规则被兜底 drop 遮挡」或「拒绝规则被全放行架空」，先处理这些。"))}},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
                 {"component": "VCardText", "content": [

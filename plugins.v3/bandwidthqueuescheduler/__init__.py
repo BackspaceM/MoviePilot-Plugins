@@ -121,7 +121,7 @@ _KEY_RATES = "bqs_rates"             # 最近一次队列速率列表
 _KEY_FASTTRACK = "bqs_fasttrack"     # 最近一次 FastTrack 诊断
 
 _NOTIFY_LABELS = {
-    "change": "仅变更/异常（推荐）",
+    "change": "仅变更/异常",
     "all": "每次调度",
     "none": "关闭",
 }

@@ -2,7 +2,7 @@
 
 在 RouterOS 上按"带宽方案（profile）"智能编排简单队列（Simple Queue）：可按时段自动切换方案，也可在详情页一键切换，并实时监控队列速率、诊断 FastTrack 绕过风险。
 
-## 核心能力
+## 能做什么
 
 - **设备定义**：`名称=IP/CIDR|角色`，角色 `download`（下载设备，观影时压制）/ `nas`（NAS/服务器）/ `media`（观影设备，不限速）/ `other`（其它）。
 - **四套内置方案**：
@@ -24,7 +24,7 @@
 
 `max-limit` / `limit-at` 采用 RouterOS 原生 **上行/下行** 格式（如 `20M/60M`、`512k/2M`），`0/0` 表示不限速。`priority` 为 1~8，**1 最高**。
 
-## 界面说明（按钮均可点击）
+## 界面
 
 详情页每个按钮都绑定真实 API，点击即有响应，不存在灰色/无效按钮：
 
@@ -33,7 +33,7 @@
 
 带参按钮（方案切换）用 POST body（`{"profile": key}`）传给 `apply_profile` endpoint。
 
-## 配置要点
+## 配置
 
 1. RouterOS 需开启 REST API（`/ip/service` 中 `www-ssl` 或 `www`），账号需具备读写权限。
 2. 自签名证书可关闭「使用 HTTPS」改走 HTTP，或信任证书。

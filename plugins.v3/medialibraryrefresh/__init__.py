@@ -499,7 +499,7 @@ class MediaLibraryRefresh(_PluginBase):
                     "model": "fallback_level", "label": "失败回退策略",
                     "items": [
                         {"title": "不回退（只做精准刷新）", "value": "none"},
-                        {"title": "父目录 / 局部目录（推荐）", "value": "parent"},
+                        {"title": "父目录 / 局部目录", "value": "parent"},
                         {"title": "全库扫描", "value": "full"},
                     ],
                     "hint": "精准刷新失败时逐级降级，避免入库后媒体库不出现",
@@ -535,7 +535,7 @@ class MediaLibraryRefresh(_PluginBase):
                     "model": "verify_ssl", "label": "校验 HTTPS 证书"}}]),
                 self._col(12, 3, [{"component": "VSwitch", "props": {
                     "model": "dry_run", "label": "试运行（不发请求）",
-                    "hint": "首次调通建议开启，确认路径映射正确后再关闭",
+                    "hint": "第一次先开着，确认路径映射对了再关掉",
                     "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
@@ -640,7 +640,7 @@ class MediaLibraryRefresh(_PluginBase):
                 "type": "info", "variant": "tonal", "class": "mt-2",
                 "text": f"上次运行：{stats.get('last_run_text', '尚未运行')}　触发：{stats.get('last_trigger', '-')}　"
                         f"文件 {last.get('files', 0)} / 服务器 {last.get('servers', 0)} / "
-                        f"成功 {last.get('servers_ok', 0)}　说明：{last.get('message', '-')}"}}])]})
+                        f"成功 {last.get('servers_ok', 0)}　{last.get('message') or '-'}"}}])]})
         content.append({"component": "VRow", "content": [self._col(12, 12, [
             {"component": "VAlert", "props": {
                 "type": "primary" if live.get("running") else "secondary",

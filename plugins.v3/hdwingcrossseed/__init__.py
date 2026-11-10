@@ -415,7 +415,7 @@ class HDWinGCrossSeed(_PluginBase):
                     self._col(12, 4, [{"component": "VTextField", "props": {
                         "model": "interval", "label": "请求间隔（秒）",
                         "placeholder": "6", "type": "number",
-                        "hint": "站点有频率限制，建议不低于 5 秒",
+                        "hint": "站点有频率限制，别低于 5 秒",
                         "persistentHint": True}}]),
                 ],
             },
@@ -569,7 +569,7 @@ class HDWinGCrossSeed(_PluginBase):
                                      f"触发：{stats.get('last_trigger', '-')}　"
                                      f"扫描 {stats.get('last_scanned', 0)} / 命中 {stats.get('last_matched', 0)} / "
                                      f"新增 {stats.get('last_added', 0)} / 失败 {stats.get('last_failed', 0)}"
-                                     + (f"　说明：{stats.get('last_message')}" if stats.get("last_message") else ""))}}
+                                     + (f"　{stats.get('last_message')}" if stats.get("last_message") else ""))}}
                     ]),
                 ],
             },

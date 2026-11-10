@@ -62,7 +62,7 @@ WireGuard 接口与 Peer，共 10 个分区。
 > RouterOS 本机的 `.backup` 是最后一道保险，需要在 WinBox / CLI 里手动恢复；
 > 「回滚」按钮只处理本次新建的条目，不是整机还原。
 
-## 配置要点
+## 配置
 
 - **连接**：地址、端口、HTTPS、账号、密码、超时、校验证书；`ros_connection` 下拉选中后自动覆盖
   手填字段。API 账号需要 `read / write / api / rest-api` 权限，创建系统备份还需 `policy`。

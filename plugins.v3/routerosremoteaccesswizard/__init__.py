@@ -73,7 +73,7 @@ _KEY_CONN = "b1_conn"
 _KEY_SNAPSHOTS = "b1_snapshots"
 _KEY_PROBE = "b1_probe"
 
-_NOTIFY_LABELS = {"issue": "仅异常/失败（推荐）", "all": "每次部署", "none": "关闭"}
+_NOTIFY_LABELS = {"issue": "仅异常/失败", "all": "每次部署", "none": "关闭"}
 _KIND_LABELS = {"media": "媒体服务器", "downloader": "下载器",
                 "mp": "MoviePilot", "manual": "手填"}
 
@@ -420,7 +420,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                 self._col(2, [self._sw("router_ssl", "使用 HTTPS", "自签证书通常仍可连接")]),
             ]},
             {"component": "VRow", "content": [
-                self._col(4, [self._fld("router_username", "API 用户名", "建议最小权限账号", "mp-api")]),
+                self._col(4, [self._fld("router_username", "API 用户名", "单独建个最小权限的账号", "mp-api")]),
                 self._col(4, [self._fld("router_password", "API 密码", "明文存在插件配置里")]),
                 self._col(2, [self._fld("timeout", "超时（秒）", "", "10", "number")]),
                 self._col(2, [self._sw("verify", "校验证书", "自签证书请关闭")]),

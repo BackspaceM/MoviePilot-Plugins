@@ -312,7 +312,7 @@ class RouterOSConfigGuard(_PluginBase):
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3"},
              "content": {"text": "账号要有 read/write/api 权限。.backup 含账号和证书，记得开加密、存好密码。"
                                  "换设备或首次启用后去详情页点「最近设为基线」，不然每次都会报漂移。"
-                                 "第一次建议先开「试运行」。"}},
+                                 "第一次先开「试运行」看看。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时备份"}}]},

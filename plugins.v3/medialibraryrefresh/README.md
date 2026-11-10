@@ -2,7 +2,7 @@
 
 MoviePilot V3 插件。监听整理入库事件，把**具体文件路径**换算成媒体服务器侧路径后发起**文件级增量刷新**，而不是扫描整个媒体库。
 
-## 与 MoviePilot 内置刷新的区别
+## 和内置刷新的区别
 
 | | MP 内置 | 本插件 |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ jellyfin|JF备库|http://192.168.1.12:8096|你的API_KEY|/media::/data/media|0
 | 监听删除事件 | 关 | 开启后 `DownloadFileDeleted` 等事件发 `Deleted` 更新 |
 | 试运行 | 关 | 不发任何 HTTP 请求，只验证路径映射与调度 |
 
-## 触发方式
+## 怎么触发
 
 - **事件**：`TransferComplete` → `Created`；`SubtitleTransferComplete` → `Modified`；`DownloadFileDeleted` / `DownloadDeleted` → `Deleted`（可分别开关）。
 - **定时**：cron 对账，兜底处理重试与插件重载期间丢失的一次性任务。
@@ -65,7 +65,7 @@ jellyfin|JF备库|http://192.168.1.12:8096|你的API_KEY|/media::/data/media|0
 
 每级结果都记录在详情页「上轮逐服务器结果」，并注明实际生效的层级。
 
-## 日志与通知
+## 日志和通知
 
 - 关键节点全部写 **INFO 级**宿主日志（`plugins/medialibraryrefresh.log`）。MP 插件卡片「查看日志」窗口通过 SSE 实时推送，可看到逐服务器、逐文件路径与写入结果。**MP 全局日志级别设为 WARNING 时 INFO 会被过滤**，此时请看详情页「运行日志」或调回 INFO。
 - 详情页另有：实时运行状态、媒体服务器清单、最近连通性检测、待刷新队列、运行日志、运行历史。点「刷新页面」拉取最新数据。

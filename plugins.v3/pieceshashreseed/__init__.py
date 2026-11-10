@@ -317,15 +317,15 @@ class PiecesHashReseed(_PluginBase):
         except Exception as err:  # noqa: BLE001
             logger.error(f"{LOG_TAG}读取下载器列表失败：{err}")
             downloader_items = []
-        downloader_choice = [{"title": "同下载器（推荐）", "value": ""}] + downloader_items
+        downloader_choice = [{"title": "同下载器", "value": ""}] + downloader_items
 
         return [
             {
                 "component": "VForm",
                 "content": [
                     _alert(
-                        "原理：读取下载器已有种子文件计算 pieces hash（sha1(info.pieces)），向站点的 pieces-hash "
-                        "接口查询同内容种子，下载后按原保存路径添加到下载器做种。需先配置站点 Passkey 与种子缓存目录。",
+                        "从下载器已有的种子算出 pieces hash，去站点找内容一样的种子，下下来按原路径加进下载器做种。"
+                        "先配好站点 Passkey 和种子缓存目录。",
                     ),
                     _row(
                         _field("VSwitch", "enabled", "启用插件", 3),
@@ -412,8 +412,8 @@ class PiecesHashReseed(_PluginBase):
                         _field("VSwitch", "clearcache", "清除缓存与检测记录", 4),
                     ),
                     _alert(
-                        "已知限制：pieces hash 依赖相同的分块大小与文件集合；站点需提供 pieces-hash 接口；"
-                        "跨下载器辅种要求目标下载器能看到同一份文件。请勿与 IYUU 等辅种插件对同一站点重复启用。",
+                        "分块大小和文件集合得一样，站点也要有 pieces-hash 接口；跨下载器时目标下载器得能看到同一份文件。"
+                        "同一站点别跟 IYUU 那类辅种插件一起开。",
                         "warning",
                     ),
                 ],
@@ -491,8 +491,8 @@ class PiecesHashReseed(_PluginBase):
                         }},
                     ]},
                 ]},
-                _alert("站点支持检测说明：接口对 GET 返回 405 或 POST 返回标准 JSON 视为支持；"
-                       "404 / 登录页表示站点不支持或 Cookie 已失效。", "info"),
+                _alert("GET 返回 405，或 POST 返回标准 JSON，就算支持；"
+                       "404 或跳登录页，是站点不支持或 Cookie 过期了。", "info"),
             ]},
         ]
         if errors:

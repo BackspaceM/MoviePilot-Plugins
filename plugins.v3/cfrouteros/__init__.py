@@ -528,7 +528,7 @@ class CFRouterOS(_PluginBase):
                     self._col(12, 3, [{"component": "VSwitch", "props": {"model": "notify", "label": "运行结果通知"}}]),
                     self._col(12, 3, [{"component": "VSwitch", "props": {
                         "model": "dry_run", "label": "仅测速不写入",
-                        "hint": "首次调通建议开启，确认优选结果后再写入路由器",
+                        "hint": "第一次先开着，看结果没问题再关掉",
                         "persistentHint": True}}]),
                     self._col(12, 3, [{"component": "VTextField", "props": {
                         "model": "cron", "label": "执行周期（cron）",
@@ -549,7 +549,7 @@ class CFRouterOS(_PluginBase):
                         "model": "router_user", "label": "用户名", "placeholder": "admin"}}]),
                     self._col(12, 3, [{"component": "VTextField", "props": {
                         "model": "router_password", "label": "密码", "type": "password",
-                        "hint": "建议单独建只含 read/write/rest-api 权限的账号",
+                        "hint": "单独建个只给 read/write/rest-api 权限的账号",
                         "persistentHint": True}}]),
                 ],
             },
@@ -578,7 +578,7 @@ class CFRouterOS(_PluginBase):
                     self._col(12, 4, [{"component": "VSelect", "props": {
                         "model": "check_mode", "label": "站点判定方式",
                         "items": [
-                            {"title": "不检测，全部纳入（推荐）", "value": "all"},
+                            {"title": "不检测，全部纳入", "value": "all"},
                             {"title": "系统 DNS 判定 CDN IP", "value": "system"},
                             {"title": "多源 DoH 判定 CDN IP", "value": "doh"},
                         ],
@@ -641,7 +641,7 @@ class CFRouterOS(_PluginBase):
                     self._col(12, 4, [{"component": "VSelect", "props": {
                         "model": "cidr_source", "label": "IP 网段 / IP 池来源",
                         "items": [
-                            {"title": "官方 + 自定义（推荐）", "value": "official+custom"},
+                            {"title": "官方 + 自定义", "value": "official+custom"},
                             {"title": "仅 Cloudflare 官方", "value": "official"},
                             {"title": "仅自定义 / 第三方池", "value": "custom"},
                             {"title": "仅内置静态（不联网）", "value": "builtin"},
@@ -735,7 +735,7 @@ class CFRouterOS(_PluginBase):
                     self._col(12, 3, [{"component": "VTextField", "props": {
                         "model": "probe_sni", "label": "TLS 测速 SNI",
                         "placeholder": DEFAULT_PROBE_SNI,
-                        "hint": "TLS 测速使用的 SNI，建议固定为 cloudflare.com",
+                        "hint": "TLS 测速用的 SNI，固定填 cloudflare.com",
                         "persistentHint": True}}]),
                 ],
             },
@@ -852,8 +852,7 @@ class CFRouterOS(_PluginBase):
         if not self._enabled:
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal", "class": "mb-2",
-                "text": "插件未启用：请先在配置中启用并填写 RouterOS 地址与账号。"
-                        "下方仍可手动检测路由器，但定时与立即执行需要先启用。"}})
+                "text": "插件没开，下面的按钮照样能用。"}})
         content.append({
             "component": "VRow",
             "content": [
@@ -874,7 +873,7 @@ class CFRouterOS(_PluginBase):
                          f"域名 {last.get('domains_total', 0)} / 纳入 {last.get('domains_cf', 0)} / "
                          f"候选 {last.get('probed', 0)} / 可用 {last.get('alive', 0)} / "
                          f"写入 {last.get('written', 0)}"
-                         + (f"　说明：{last.get('message')}" if last.get("message") else ""))}}])],
+                         + (f"　{last.get('message')}" if last.get("message") else ""))}}])],
         })
         content.append({
             "component": "VRow",
@@ -1836,7 +1835,7 @@ class CFRouterOS(_PluginBase):
             if len(domain_rows) > 8:
                 lines.append(f"  …另有 {len(domain_rows) - 8} 个站点，详见插件详情页")
         if message:
-            lines.append(f"说明：{message}")
+            lines.append(f"{message}")
         lines.append("通知来自 MoviePilot 插件，点击消息可回到插件详情页。")
         if abnormal:
             lines.append("排查：插件卡片「查看日志」（实时 SSE），或详情页「运行日志」。")

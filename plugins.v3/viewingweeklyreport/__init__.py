@@ -92,7 +92,7 @@ _KEY_ACTIVE = "vwr_active"
 _MEDIA_TYPES = ("emby", "plex", "jellyfin")
 
 _NOTIFY_LABELS = {
-    "all": "周报 + 诊断（推荐）",
+    "all": "周报 + 诊断",
     "report": "仅周报",
     "none": "仅站内查看，不推送",
 }
@@ -734,8 +734,8 @@ class ViewingWeeklyReport(_PluginBase):
             {"component": "VAlert", "props": {
                 "type": "warning" if level in ("中", "差") else "success",
                 "variant": "tonal", "class": "mb-3", "title": "播放健康度"},
-             "content": {"text": md_safe(f"播放健康度：{level}（{level_note}）。"
-                                        f"优化建议 {live.get('findings_count', 0)} 条。")}},
+             "content": {"text": md_safe(f"{level}（{level_note}），查到 "
+                                        f"{live.get('findings_count', 0)} 条可优化项。")}},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
                 {"component": "VCardText", "content": [
@@ -764,7 +764,7 @@ class ViewingWeeklyReport(_PluginBase):
                     "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
                     "content": [
                         {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": "转码诊断与优化建议"},
+                         "text": "转码诊断"},
                         {"component": "VCardText", "content": [text_row(findings_text)]},
                     ]}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{

@@ -5,7 +5,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 
 > 与 IYUU 类「按 infohash 查询」不同，pieces hash 能识别不同站点重新打包、tracker/文件名不同但内容完全相同的种子。
 
-## 功能
+## 能做什么
 
 | 能力 | 说明 |
 | --- | --- |
@@ -19,7 +19,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 | 通知与统计 | 运行汇总通知、最近一次统计、错误清单、站点检测表格 |
 | 手动触发 | 配置页三个开关、远程命令 `/辅种`、插件 API |
 
-## 前置条件
+## 开始前
 
 1. MoviePilot **V3**（索引声明 `system_version: ">=3.0.0"`）。
 2. 站点提供 pieces-hash 接口（青蛙、AGSVPT、红豆饭、麒麟、UBits、聆音、憨憨等 NexusPHP 系常见），并在站点管理中启用、Cookie 有效。
@@ -31,7 +31,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
    插件默认会尝试这些路径，也可用「种子缓存目录」显式指定，格式 `下载器名称:/qb/BT_backup,/tr/torrents`。
 5. 目标下载器能看到同一份媒体文件；跨下载器时需配置路径映射。
 
-## 配置说明
+## 配置
 
 | 配置项 | 说明 |
 | --- | --- |
@@ -57,7 +57,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 - 启用「自动检测站点支持」后，定时任务会复用已支持的检测结果；未通过检测的站点每次运行会重试探测，并自动跳过。
 - 结果写入插件数据区，可在插件详情页查看（站点、接口路径、原因、检测时间）。
 
-## 辅种流程
+## 怎么跑
 
 ```
 下载器已完成任务 → 扫描本地 .torrent 建立 info_hash → 指纹索引
@@ -79,7 +79,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 
 所有接口使用 `bear` 鉴权；远程命令 `/辅种` 等价于 `/run`。
 
-## 限制与安全
+## 限制
 
 - pieces hash 依赖相同的分块大小与文件集合；同一内容若站点重新分块，指纹会不同，无法匹配。
 - Transmission 不支持跳过哈希校验，添加后会自动/显式触发重新校验。
@@ -87,7 +87,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 - 请勿与 IYUU 辅种等插件对同一站点同时启用，避免重复添加。
 - Passkey、Cookie 只用于请求，日志与 API 响应中不做明文输出。
 
-## 开发验证
+## 测试
 
 ```bash
 ../MoviePilot/.venv/bin/python -m compileall plugins.v3/pieceshashreseed
