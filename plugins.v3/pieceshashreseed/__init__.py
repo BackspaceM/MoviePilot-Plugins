@@ -116,7 +116,7 @@ class PiecesHashReseed(_PluginBase):
     plugin_name = "Pieces Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
@@ -447,57 +447,14 @@ class PiecesHashReseed(_PluginBase):
         }
 
     def get_page(self) -> list[dict]:
-        """返回详情页：最近一次运行统计与站点支持检测结果。"""
+        """主界面只留一行最近结果，明细看插件日志。"""
         last = self._last_run or dict(self.get_data(_LASTRUN_KEY) or {})
-        support = self._site_support or dict(self.get_data(_SUPPORT_KEY) or {})
         if last:
-            summary = (
-                f"最近运行：{last.get('finished_at', '-')} ｜ 下载器 {last.get('downloaders', 0)} 个、"
-                f"扫描种子 {last.get('torrents', 0)} 个、有效指纹 {last.get('pieces', 0)} 个、"
-                f"站点命中 {last.get('matched', 0)} 个、辅种成功 {last.get('success', 0)} 个、"
-                f"已存在 {last.get('exist', 0)} 个、失败 {last.get('failed', 0)} 个"
-                f"（耗时 {last.get('duration', 0)} 秒）"
-            )
+            summary = (f"{last.get('finished_at', '-')}｜辅种成功 {last.get('success', 0)} 个"
+                       f"｜已存在 {last.get('exist', 0)} 个｜失败 {last.get('failed', 0)} 个")
         else:
-            summary = "尚未运行。配置站点 Passkey 与种子缓存目录后，勾选『立即辅种一次』或等待定时任务执行。"
-        errors = [str(x) for x in (last.get("errors") or [])][:10]
-        rows = [
-            {
-                "site": name,
-                "supported": "支持" if item.get("supported") else "不支持",
-                "api": item.get("api_path") or "-",
-                "reason": item.get("reason", ""),
-                "checked": item.get("checked_at", ""),
-            }
-            for name, item in (support or {}).items()
-            if isinstance(item, dict)
-        ]
-        page = [
-            {"component": "VForm", "content": [
-                _alert(summary, "success" if last.get("success") else "info"),
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VDataTable", "props": {
-                            "headers": [
-                                {"title": "站点", "key": "site"},
-                                {"title": "支持", "key": "supported"},
-                                {"title": "接口路径", "key": "api"},
-                                {"title": "说明", "key": "reason"},
-                                {"title": "检测时间", "key": "checked"},
-                            ],
-                            "items": rows,
-                            "density": "compact",
-                            "itemsPerPage": 10,
-                        }},
-                    ]},
-                ]},
-                _alert("GET 返回 405，或 POST 返回标准 JSON，就算支持；"
-                       "404 或跳登录页，是站点不支持或 Cookie 过期了。", "info"),
-            ]},
-        ]
-        if errors:
-            page[0]["content"].append(_alert("最近错误：" + "；".join(errors), "warning"))
-        return page
+            summary = "还没跑过。"
+        return [_alert(summary, "success" if last.get("success") else "info")]
 
     def get_api(self) -> list[dict]:
         """注册状态查询与手动触发接口。"""

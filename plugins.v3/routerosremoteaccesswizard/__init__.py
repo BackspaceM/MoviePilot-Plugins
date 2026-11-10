@@ -537,30 +537,10 @@ class RouterOSRemoteAccessWizard(_PluginBase):
     def get_page(self) -> List[dict]:
         plan = self._plan()
         actions = actions_from_plan(plan)
-        services = list(plan.get("services") or [])
-        report = dict(self.get_data(_KEY_LAST_DEPLOY) or {})
-        probe_result = dict(self.get_data(_KEY_PROBE) or {})
         rollback_entries = list(self.get_data(_KEY_ROLLBACK) or [])
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        conn = dict(self.get_data(_KEY_CONN) or {})
-        summary = dict(plan.get("summary") or {})
-        refreshed = bool(plan.get("refreshed"))
         limit = self._display_limit
 
         content: List[dict] = [
-            {"component": "VRow", "content": [
-                self._stat_card("选中的服务", f"{len(services)} 个",
-                                "、".join(str(s.get("name")) for s in services[:3]) or "还没选",
-                                "primary"),
-                self._stat_card("待写入动作", f"{len(actions)} 条",
-                                f"待写入 {summary.get('to_write', len(actions))} 条 · 涉及 {summary.get('sections', 0)} 个分区",
-                                "info"),
-                self._stat_card("公网暴露", f"{summary.get('high', 0)} 条",
-                                "每条都对应一个外网端口", "error" if summary.get("high") else "success"),
-                self._stat_card("预览状态", "已刷新" if refreshed else "待刷新",
-                                str(conn.get("msg") or "尚未测试连接"),
-                                "success" if refreshed else "warning"),
-            ]},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"}, "content": [
                 {"component": "VCardTitle", "text": "操作"},
                 {"component": "VCardText", "content": [
@@ -581,7 +561,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                               "部署前会在 RouterOS 留备份，失败时逆序回滚本次新建的条目。")
                               + (f" 可回滚条目 {len(rollback_entries)} 条。" if rollback_entries else "")},
                 ]},
-            ]},
+            ]}
         ]
 
         if plan.get("errors"):
@@ -601,49 +581,6 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                                     + _esc("、".join(str(s) for s in plan["unreadable"]))}})
 
         # 服务映射表：外网端口 → 内网服务
-        mapping_rows: List[dict] = []
-        for svc in services[:limit]:
-            mapping_rows.append({"component": "tr", "content": [
-                {"component": "td", "props": {"class": "text-caption"},
-                 "text": _esc(svc.get("name"))},
-                {"component": "td", "props": {"class": "text-caption"},
-                 "text": _esc(_KIND_LABELS.get(str(svc.get("kind")), svc.get("kind")))},
-                {"component": "td", "props": {"class": "text-caption font-weight-bold text-primary"},
-                 "text": _esc(svc.get("wan_port"))},
-                {"component": "td", "props": {"class": "text-caption"},
-                 "text": _esc(f"{svc.get('lan_ip')}:{svc.get('lan_port')}")},
-                {"component": "td", "props": {"class": "text-caption"},
-                 "text": _esc(svc.get("domain") or "未填域名")},
-                {"component": "td", "props": {"class": "text-caption"},
-                 "text": _esc(svc.get("mapping"))},
-                {"component": "td", "props": {"class": "text-caption"},
-                 "text": _esc(svc.get("actions"))},
-            ]})
-        mapping_body: List[dict] = []
-        if mapping_rows:
-            mapping_body.append({"component": "VTable", "props": {
-                "density": "compact", "hover": True}, "content": [
-                {"component": "thead", "content": [
-                    {"component": "tr", "content": [
-                        {"component": "th", "text": "服务"},
-                        {"component": "th", "text": "来源"},
-                        {"component": "th", "text": "外网端口"},
-                        {"component": "th", "text": "内网目标"},
-                        {"component": "th", "text": "域名备注"},
-                        {"component": "th", "text": "中文含义"},
-                        {"component": "th", "text": "动作数"},
-                    ]}]},
-                {"component": "tbody", "content": mapping_rows},
-            ]})
-        else:
-            mapping_body.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "title": "还没有服务"},
-                "content": {"text": "到设置页勾选已连接服务，或在手动补充里写一行，保存后回来点「生成 / 刷新预览」。"}})
-        content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
-                        "content": [
-                            {"component": "VCardTitle", "text": "外网端口 → 内网服务"},
-                            {"component": "VCardText", "content": mapping_body},
-                        ]})
 
         # 待确认计划表
         rows: List[dict] = []
@@ -682,16 +619,6 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                                       ]}]},
                                   {"component": "tbody", "content": rows},
                               ]})
-            cmds = [{"component": "div", "props": {"class": "text-caption mt-1"},
-                     "text": f"#{a.index} {_cmd_esc(a.command)} "
-                             f"｜{_esc(planner.PLACE_LABELS.get(a.placement, ''))}"}
-                    for a in actions[:limit]]
-            plan_body.append({"component": "VCard", "props": {
-                "variant": "text", "class": "mt-2"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-caption"},
-                 "text": "等价命令，写的时候走 REST"},
-                {"component": "VCardText", "content": cmds},
-            ]})
             if len(actions) > limit:
                 plan_body.append({"component": "div", "props": {"class": "text-caption mt-2"},
                                   "text": f"共 {len(actions)} 条，只显示前 {limit} 条"})
@@ -703,69 +630,9 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                         "content": [{"component": "VCardTitle", "text": "待确认的计划"},
                                     {"component": "VCardText", "content": plan_body}]})
 
-        # 连通性测试
-        if probe_result:
-            lines = [_esc(probe_result.get("message") or "")]
-            for item in (probe_result.get("details") or [])[:20]:
-                lines.append(_esc(f"{'通过' if item.get('ok') else '失败'}｜"
-                                  f"{item.get('label')}｜{item.get('message')}"))
-            for note in (probe_result.get("notes") or []):
-                lines.append(_esc(note))
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3",
-                "color": "success" if probe_result.get("ok") else "warning"}, "content": [
-                {"component": "VCardTitle", "text": "最近一次连通性测试"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-1"},
-                     "text": _esc(line)} for line in lines]},
-            ]})
 
-        # 部署报告 / 快照 / 日志
-        if report:
-            lines = [
-                f"结果：{'成功' if report.get('ok') else '失败/部分失败'} · {_esc(report.get('message'))}",
-                f"时间：{_esc(report.get('started'))} → {_esc(report.get('finished'))}",
-                f"连接：{_esc(report.get('conn'))}",
-                f"备份：{_esc((report.get('backup') or {}).get('message'))}",
-                f"快照：{_esc((report.get('snapshot') or {}).get('path') or '未生成')}",
-                f"回滚：已回滚 {int((report.get('rollback') or {}).get('ok_count') or 0)} 条",
-            ]
-            for err in (report.get("errors") or [])[:5]:
-                lines.append("失败明细：" + _esc(err))
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3",
-                "color": "success" if report.get("ok") else "error"}, "content": [
-                {"component": "VCardTitle", "text": "最近一次部署报告"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-1"},
-                     "text": _esc(line)} for line in lines]},
-            ]})
 
-        snapshots = self._list_snapshots()
-        if snapshots:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "MP 侧配置快照"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{s['time']}｜{s['name']}｜{s['size']} 字节")}
-                    for s in snapshots]},
-            ]})
-        if logs:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "运行日志（最近 30 条）"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{x.get('time')} ｜ {x.get('level')} ｜ {x.get('message')}")}
-                    for x in logs[:30]]},
-            ]})
 
-        content.append({"component": "VAlert", "props": {
-            "type": "secondary", "variant": "tonal", "class": "mt-3"},
-            "content": {"text": "「回滚」只删上次写入的带标签规则，你自己加的不动。"
-                                "从内网用公网地址访问需要回环规则，没配的话用手机流量测更准。"
-                                "RouterOS 本机的 .backup 要在 WinBox 或命令行里手动恢复。"}})
         return content
 
     # ------------------------------------------------------------------

@@ -152,7 +152,7 @@ class PlaybackScheduler(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "playbackscheduler_"
@@ -756,9 +756,6 @@ class PlaybackScheduler(_PluginBase):
     def get_page(self) -> List[dict]:
         """详情页：卡片分区 + 分组彩色按钮，所有按钮指向已注册的真实 API。"""
         live = dict(self.get_data(_LIVE_KEY) or {})
-        last = dict(self.get_data(_LAST_KEY) or {})
-        logs = list(self.get_data(_LOG_KEY) or [])
-        history = list(self.get_data(_HISTORY_KEY) or [])
         state = live.get("state", STATE_IDLE)
         sessions = [Session(**s) for s in (live.get("sessions") or [])]
         playing = [s for s in sessions if s.is_playing]
@@ -800,8 +797,6 @@ class PlaybackScheduler(_PluginBase):
             self._action_button("停止", "stop", color="error",
                                 icon="mdi-stop-circle-outline", confirm=True),
         ]
-        log_nodes = [text_row(f"[{l.get('time', '')}][{l.get('level', '')}] {l.get('message', '')}")
-                     for l in logs[:20]] or [text_row("暂无运行日志")]
 
         return [
             {"component": "VAlert", "props": {
@@ -809,28 +804,6 @@ class PlaybackScheduler(_PluginBase):
                 "title": "当前播放状态"},
              "content": {"text": f"{state_label(state)}　|　下载 {limits['dl_mbps']:g} Mbps / "
                                  f"上传 {limits['up_mbps']:g} Mbps　|　在播 {len(playing)} 路"}},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
-                {"component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        kv("插件状态", "已启用" if self._enabled else "未启用"),
-                        kv("轮询周期", self._cron),
-                        kv("观看历史条目", len(history)),
-                        kv("试运行", "是" if self._dry_run else "否"),
-                    ]},
-                    {"component": "VDivider", "props": {"class": "my-2"}},
-                    {"component": "VLabel", "text": "在播会话"},
-                    *[text_row(line) for line in session_lines],
-                    {"component": "VDivider", "props": {"class": "my-2"}},
-                    {"component": "VLabel", "text": "最近状态"},
-                    text_row(last.get("message") or "尚未执行", 13),
-                ]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "运行日志（最近 20 条）"},
-                {"component": "VCardText", "content": log_nodes},
-            ]},
             {"component": "VCard", "props": {"variant": "outlined"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "操作"},
                 {"component": "VCardText", "content": [
@@ -841,7 +814,7 @@ class PlaybackScheduler(_PluginBase):
                      "text": "维护与清理"},
                     {"component": "div", "content": secondary},
                 ]},
-            ]},
+            ]}
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:

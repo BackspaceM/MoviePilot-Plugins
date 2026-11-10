@@ -515,29 +515,10 @@ class RouterOSScenarioTemplates(_PluginBase):
     def get_page(self) -> List[dict]:
         plan = self._plan()
         actions = actions_from_plan(plan)
-        report = dict(self.get_data(_KEY_LAST_DEPLOY) or {})
         rollback_entries = list(self.get_data(_KEY_ROLLBACK) or [])
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        conn = dict(self.get_data(_KEY_CONN) or {})
-        summary = dict(plan.get("summary") or {})
-        refreshed = bool(plan.get("refreshed"))
         limit = self._display_limit
 
         content: List[dict] = [
-            {"component": "VRow", "content": [
-                self._stat_card("选中模板", f"{summary.get('templates', 0)} 套",
-                                "、".join(str(x) for x in (plan.get("templates") or [])) or "未选择",
-                                "primary"),
-                self._stat_card("待部署动作", f"{len(actions)} 条",
-                                f"涉及 {summary.get('sections', 0)} 个分区 · 待写入 {summary.get('to_write', len(actions))} 条",
-                                "info"),
-                self._stat_card("高危动作", f"{summary.get('high', 0)} 条",
-                                "公网暴露 / IPv6 / 端口放行需重点核对",
-                                "error" if summary.get("high") else "success"),
-                self._stat_card("预览状态", "已刷新" if refreshed else "待刷新",
-                                f"{conn.get('msg') or '尚未测试连接'}",
-                                "success" if refreshed else "warning"),
-            ]},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"}, "content": [
                 {"component": "VCardTitle", "text": "操作"},
                 {"component": "VCardText", "content": [
@@ -558,7 +539,7 @@ class RouterOSScenarioTemplates(_PluginBase):
                               "部署前会自动创建 RouterOS 系统备份；失败时逆序回滚本次新建条目。")
                               + (f" 最近一次可回滚条目 {len(rollback_entries)} 条。" if rollback_entries else "")},
                 ]},
-            ]},
+            ]}
         ]
 
         if plan.get("errors"):
@@ -577,40 +558,6 @@ class RouterOSScenarioTemplates(_PluginBase):
                 "content": {"text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
                                     + _esc("、".join(str(s) for s in plan["unreadable"]))}})
 
-        # 模板卡片
-        selected_ids = [str(x) for x in (plan.get("templates") or [])]
-        template_cards: List[dict] = []
-        for tpl in tplmod.TEMPLATES:
-            chosen = tpl.id in selected_ids
-            count = sum(1 for a in actions if a.template_id == tpl.id)
-            body: List[dict] = [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": f"{_esc(tpl.name)}　{_esc('已选中' if chosen else '未选中')} "
-                         f"· 风险{_esc(RISK_LABELS.get(tpl.risk_level, '?'))} · 本计划 {count} 条"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-2"},
-                     "text": _esc(tpl.summary)},
-                    {"component": "div", "props": {"class": "text-caption font-weight-bold"},
-                     "text": "会改：" + _esc("、".join(sorted({
-                         str(SECTIONS.get(s.section, {}).get("label") or s.section)
-                         for s in tpl.steps})))},
-                    {"component": "div", "props": {"class": "text-caption mt-2"},
-                     "text": _esc("；".join(tpl.notes))},
-                ]},
-            ]
-            template_cards.append({"component": "VCard", "props": {
-                "variant": "outlined" if chosen else "tonal", "class": "h-100"},
-                "content": body})
-        grid_rows: List[dict] = []
-        for i in range(0, len(template_cards), 2):
-            grid_rows.append({"component": "VRow", "content": [
-                self._col(6, template_cards[i:i + 2]),
-            ]})
-        content.append({"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"},
-                        "content": [
-                            {"component": "VCardTitle", "text": "场景模板"},
-                            {"component": "VCardText", "content": grid_rows},
-                        ]})
 
         # 待确认计划表
         rows: List[dict] = []
@@ -630,10 +577,6 @@ class RouterOSScenarioTemplates(_PluginBase):
                 {"component": "td", "props": {"class": "text-caption"},
                  "text": _esc(a.state)},
             ]})
-        extra_cmds = [{"component": "div", "props": {"class": "text-caption mt-1"},
-                       "text": f"#{a.index} {_cmd_esc(a.command)} "
-                               f"｜{_esc(tplmod.PLACE_LABELS.get(a.placement, ''))}"}
-                      for a in actions[:limit]]
         plan_body: List[dict] = []
         if actions:
             plan_body.append({"component": "div", "props": {"class": "text-caption mb-2"},
@@ -653,12 +596,6 @@ class RouterOSScenarioTemplates(_PluginBase):
                                       ]}]},
                                   {"component": "tbody", "content": rows},
                               ]})
-            plan_body.append({"component": "VCard", "props": {
-                "variant": "text", "class": "mt-2"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-caption"},
-                 "text": "等价命令，写的时候走 REST"},
-                {"component": "VCardText", "content": extra_cmds},
-            ]})
             if len(actions) > limit:
                 plan_body.append({"component": "div", "props": {"class": "text-caption mt-2"},
                                   "text": f"共 {len(actions)} 条，仅显示前 {limit} 条"})
@@ -671,55 +608,10 @@ class RouterOSScenarioTemplates(_PluginBase):
                                     {"component": "VCardText", "content": plan_body}]})
 
         # 最近一次部署报告
-        if report:
-            lines = [
-                f"结果：{'成功' if report.get('ok') else '失败/部分失败'} · {_esc(report.get('message'))}",
-                f"时间：{_esc(report.get('started'))} → {_esc(report.get('finished'))}",
-                f"连接：{_esc(report.get('conn'))}",
-                f"备份：{_esc((report.get('backup') or {}).get('message'))}",
-                f"快照：{_esc((report.get('snapshot') or {}).get('path') or '未生成')}"
-                f"（现有条目 {int((report.get('snapshot') or {}).get('count') or 0)} 条）",
-                f"回滚：{_esc((report.get('rollback') or {}).get('done'))}"
-                f" · 已回滚 {int((report.get('rollback') or {}).get('ok_count') or 0)} 条",
-            ]
-            for err in (report.get("errors") or [])[:5]:
-                lines.append("失败明细：" + _esc(err))
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3",
-                "color": "success" if report.get("ok") else "error"}, "content": [
-                {"component": "VCardTitle", "text": "最近一次部署报告"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-1"},
-                     "text": _esc(line)} for line in lines]},
-            ]})
 
         # 快照清单
-        snapshots = self._list_snapshots()
-        if snapshots:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "MP 侧配置快照"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{s['time']}｜{s['name']}｜{s['size']} 字节")}
-                    for s in snapshots]},
-            ]})
 
-        # 日志
-        if logs:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "运行日志（最近 30 条）"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{x.get('time')} ｜ {x.get('level')} ｜ {x.get('message')}")}
-                    for x in logs[:30]]},
-            ]})
 
-        content.append({"component": "VAlert", "props": {
-            "type": "secondary", "variant": "tonal", "class": "mt-3"},
-            "content": {"text": "「回滚」只删上次写入的带标签条目，你自己加的规则不动。"
-                                "RouterOS 本机的 .backup 要在 WinBox 或命令行里手动恢复。"}})
         return content
 
     # ------------------------------------------------------------------

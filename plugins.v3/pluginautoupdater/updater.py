@@ -239,7 +239,7 @@ def normalize_plugins(installed_records: Any,
 
 
 def author_items(plugins: Iterable[InstalledPlugin]) -> List[Dict[str, Any]]:
-    """作者单选下拉：第一项固定「全部作者」，后面按作者去重排序并带数量。"""
+    """作者下拉：第一项固定「全部作者」，后面按作者去重排序并带数量。"""
     plugins = list(plugins or [])
     counts: Dict[str, int] = {}
     for p in plugins:
@@ -252,6 +252,29 @@ def author_items(plugins: Iterable[InstalledPlugin]) -> List[Dict[str, Any]]:
         items.append({"title": f"{author} · {counts[author]} 个",
                       "value": author, "count": counts[author]})
     return items
+
+
+def multi_author_items(plugins: Iterable[InstalledPlugin]) -> List[Dict[str, Any]]:
+    """多选作者下拉：不含「全部作者」，一个都不勾就代表全部。"""
+    return author_items(plugins)[1:]
+
+
+def normalize_authors(value: Any) -> List[str]:
+    """配置里的作者筛选兼容三种写法：列表、逗号分隔字符串、单个作者。"""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw = [str(x).strip() for x in value]
+    elif isinstance(value, str):
+        raw = [x.strip() for x in value.split(",")]
+    else:
+        raw = [str(value).strip()]
+    out: List[str] = []
+    for author in raw:
+        if not author or author == ALL_AUTHORS or author in out:
+            continue
+        out.append(author)
+    return out
 
 
 def plugin_items(plugins: Iterable[InstalledPlugin],
@@ -268,15 +291,19 @@ def plugin_items(plugins: Iterable[InstalledPlugin],
     return result
 
 
-def filter_targets(plugins: Iterable[InstalledPlugin], author: str,
+def filter_targets(plugins: Iterable[InstalledPlugin], authors: Any,
                    selected: Any, skip_self_id: str = "",
                    include_self: bool = False) -> Tuple[List[InstalledPlugin], List[str]]:
-    """运行时真实筛选：作者单选 + 目标多选 + 默认排除自身。"""
+    """运行时真实筛选：作者多选 + 目标多选 + 默认排除自身。
+
+    authors 兼容旧配置的单个字符串；勾了具体插件时，作者筛选与插件勾选取交集。
+    """
     notes: List[str] = []
     pool = list(plugins or [])
-    label = "全部作者" if not author or author == ALL_AUTHORS else str(author)
-    if author and author != ALL_AUTHORS:
-        pool = [p for p in pool if unknown_author(p.author) == author]
+    wanted = normalize_authors(authors)
+    label = "、".join(wanted) if wanted else "全部作者"
+    if wanted:
+        pool = [p for p in pool if unknown_author(p.author) in wanted]
     notes.append(f"作者 {label}｜匹配 {len(pool)} 个")
 
     if isinstance(selected, str):
@@ -286,7 +313,7 @@ def filter_targets(plugins: Iterable[InstalledPlugin], author: str,
         pool = [p for p in pool if p.id in sel]
         notes.append(f"勾选 {len(sel)} 个｜命中 {len(pool)} 个")
     else:
-        notes.append("未勾选目标｜取该作者下全部插件")
+        notes.append("未勾选目标｜取筛选后的全部插件")
 
     if not include_self and skip_self_id:
         before = len(pool)

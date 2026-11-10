@@ -10,7 +10,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 | 能力 | 说明 |
 | --- | --- |
 | pieces hash 辅种 | 自建零依赖 bencode 解析器，计算 info_hash / pieces_hash，添加前复核远端种子指纹 |
-| 站点支持检测 | 自动探测 `api/pieces-hash`、`nexusapi/pieces-hash` 及自定义路径；GET 405 或 POST 标准 JSON 判为支持；结果持久化并在详情页展示 |
+| 站点支持检测 | 自动探测 `api/pieces-hash`、`nexusapi/pieces-hash` 及自定义路径；GET 405 或 POST 标准 JSON 判为支持；结果记下来，明细看宿主日志 |
 | cron 定时 | 5 段 crontab（默认 `0 4 * * *`）/ 固定间隔 / 禁用；支持「立即辅种一次」 |
 | 下载器选择 | 下拉多选要扫描的下载器；可另选目标下载器，并配置跨下载器路径映射 |
 | 跳过哈希校验 | qBittorrent 通过 `is_skip_checking`（兼容 seedMode）跳过校验；Transmission 自动 recheck |
@@ -55,7 +55,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 - 判定规则：接口对 GET 返回 **405**（接口存在但只允许 POST），或 POST 返回带 `data` 的标准 JSON → 支持；
   404、登录页 HTML、401/403 → 不支持或 Cookie / Passkey 失效。
 - 启用「自动检测站点支持」后，定时任务会复用已支持的检测结果；未通过检测的站点每次运行会重试探测，并自动跳过。
-- 结果写入插件数据区，可在插件详情页查看（站点、接口路径、原因、检测时间）。
+- 结果写入插件数据区（站点、接口路径、原因、检测时间），明细看宿主日志。
 
 ## 怎么跑
 

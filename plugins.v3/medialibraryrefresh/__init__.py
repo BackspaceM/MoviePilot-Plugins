@@ -123,7 +123,7 @@ class MediaLibraryRefresh(_PluginBase):
     plugin_name = "媒体库精准刷新"
     plugin_desc = "监听整理入库事件，按文件级增量刷新 Emby/Jellyfin/Plex，支持多服务器、路径映射、合并去重与分级回退"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/medialibraryrefresh.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_label = "媒体库,Emby,Plex,Jellyfin,刷新"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -612,13 +612,9 @@ class MediaLibraryRefresh(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
+        """主界面只留一行状态和按钮，日志与队列明细看插件日志。"""
         stats = dict(self.get_data(_STATS_KEY) or {})
         last = dict(stats.get("last_result") or {})
-        live = dict(self.get_data(_LIVE_KEY) or {})
-        logs = list(self.get_data(_LOG_KEY) or [])
-        history = list(self.get_data(_HISTORY_KEY) or [])
-        checks = list(self.get_data(_CHECK_KEY) or [])
-        queue = self._load_queue()
         content: List[dict] = []
         if not self._enabled:
             content.append({"component": "VAlert", "props": {
@@ -628,28 +624,12 @@ class MediaLibraryRefresh(_PluginBase):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal", "class": "mb-2",
                 "text": "服务器配置不对：" + "；".join(self._server_errors[:3])}})
-        content.append({"component": "VRow", "content": [
-            self._stat_card("累计刷新文件", str(stats.get("total_files", 0)), "mdi-file-check-outline"),
-            self._stat_card("成功 / 失败轮次", f"{stats.get('ok_runs', 0)} / {stats.get('fail_runs', 0)}",
-                            "mdi-check-circle-outline"),
-            self._stat_card("待刷新队列", str(len(queue)), "mdi-tray-full"),
-            self._stat_card("上轮耗时", f"{stats.get('last_duration', '-')}s", "mdi-timer-outline"),
-        ]})
         content.append({"component": "VRow", "content": [self._col(12, 12, [
             {"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "mt-2",
                 "text": f"上次运行：{stats.get('last_run_text', '尚未运行')}　触发：{stats.get('last_trigger', '-')}　"
                         f"文件 {last.get('files', 0)} / 服务器 {last.get('servers', 0)} / "
                         f"成功 {last.get('servers_ok', 0)}　{last.get('message') or '-'}"}}])]})
-        content.append({"component": "VRow", "content": [self._col(12, 12, [
-            {"component": "VAlert", "props": {
-                "type": "primary" if live.get("running") else "secondary",
-                "variant": "tonal", "class": "mt-2", "title": "实时运行状态",
-                "text": (f"运行中：{live.get('stage', '-')}　当前服务器：{live.get('current', '-')}　"
-                         f"开始：{live.get('started_text', '-')}"
-                         if live.get("running") else
-                         "空闲。MP 插件卡片「查看日志」窗口通过 SSE 实时推送逐服务器明细；"
-                         "本页点「刷新页面」拉取最新结果。")}}])]})
         content.append({"component": "VRow", "content": [self._col(12, 12, [
             self._action_button("立即刷新", "mdi-refresh", "/run", "primary"),
             self._action_button("检测服务器", "mdi-lan-connect", "/check", "info"),
@@ -659,39 +639,7 @@ class MediaLibraryRefresh(_PluginBase):
             self._action_button("刷新页面", "mdi-page-refresh-outline", "/status", "info", "get"),
             self._action_button("中止任务", "mdi-stop-circle-outline", "/stop", "error"),
         ])]})
-        server_lines = []
-        for server in self._servers:
-            server_lines.append(
-                f"{'[启用]' if server.enabled else '[停用]'} {server.label}　{server.url}　"
-                f"映射 {len(server.mappings)} 条"
-            )
-        check_lines = [f"{item.get('time', '')}　{item.get('server', '')}　"
-                       f"{'成功' if item.get('ok') else '失败'}　{item.get('message', '')}"
-                       for item in checks]
-        last_lines = [f"{item.get('server', '')}　{item.get('level_label', '')}　"
-                      f"{'成功' if item.get('ok') else '失败'}　{item.get('message', '')}"
-                      for item in last.get("server_results", [])]
-        queue_lines = [f"{item.update_type}　{item.path}　重试 {item.attempts}　来源 {item.source}"
-                       for item in queue[:40]]
-        log_lines = [f"{item.get('time', '')} [{item.get('level', '')}] {item.get('message', '')}"
-                     for item in logs[:60]]
-        history_lines = [f"{item.get('time', '')}　{item.get('trigger', '')}　"
-                         f"文件 {item.get('files', 0)}　成功服务器 {item.get('servers_ok', 0)}/{item.get('servers', 0)}"
-                         for item in history[:20]]
-        content.append({"component": "VRow", "content": [
-            self._col(12, 6, [self._html_block("媒体服务器", server_lines or ["未配置"])]),
-            self._col(12, 6, [self._html_block("最近连通性检测", check_lines or ["尚未检测"])])]})
-        content.append({"component": "VRow", "content": [
-            self._col(12, 6, [self._html_block("上轮逐服务器结果", last_lines or ["暂无数据"])]),
-            self._col(12, 6, [self._html_block(f"待刷新队列（共 {len(queue)} 项）", queue_lines or ["队列为空"])])]})
-        content.append({"component": "VRow", "content": [
-            self._col(12, 6, [self._html_block("运行日志", log_lines or ["暂无日志"])]),
-            self._col(12, 6, [self._html_block("运行历史", history_lines or ["暂无历史"])])]})
         return content
-
-    # ------------------------------------------------------------------
-    # 插件 API
-    # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [

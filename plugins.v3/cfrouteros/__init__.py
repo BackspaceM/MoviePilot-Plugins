@@ -150,7 +150,7 @@ class CFRouterOS(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png"
     )
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -855,17 +855,6 @@ class CFRouterOS(_PluginBase):
                 "text": "插件没开，下面的按钮照样能用。"}})
         content.append({
             "component": "VRow",
-            "content": [
-                self._stat_card("符合域名", str(last.get("domains_cf", 0)), "mdi-cloud-check-outline"),
-                self._stat_card("写入记录", str(last.get("written", 0)), "mdi-dns-outline"),
-                self._stat_card("最快延迟",
-                                format_latency(float(last.get("best_latency", 0) or 0)),
-                                "mdi-speedometer"),
-                self._stat_card("上轮耗时", f"{stats.get('last_duration', '-')}s", "mdi-timer-outline"),
-            ],
-        })
-        content.append({
-            "component": "VRow",
             "content": [self._col(12, 12, [{"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "mt-2",
                 "text": (f"上次运行：{stats.get('last_run_text', '尚未运行')}　"
@@ -874,30 +863,6 @@ class CFRouterOS(_PluginBase):
                          f"候选 {last.get('probed', 0)} / 可用 {last.get('alive', 0)} / "
                          f"写入 {last.get('written', 0)}"
                          + (f"　{last.get('message')}" if last.get("message") else ""))}}])],
-        })
-        content.append({
-            "component": "VRow",
-            "content": [self._col(12, 12, [{"component": "VAlert", "props": {
-                "type": "primary" if live.get("running") else "secondary",
-                "variant": "tonal", "class": "mt-2",
-                "title": "实时运行状态",
-                "text": (f"运行中：{live.get('stage', '-')}　进度 {live.get('done', 0)}/{live.get('total', 0)}　"
-                         f"当前：{live.get('current', '-')}　开始：{live.get('started_text', '-')}"
-                         if live.get("running") else
-                         f"空闲（上次阶段：{live.get('stage', '-')}）。"
-                         "插件卡片「查看日志」窗口通过 SSE 实时推送逐站点明细；"
-                         "本页点「刷新页面」即可拉取最新进度与日志。")}}])],
-        })
-        content.append({
-            "component": "VRow",
-            "content": [self._col(12, 12, [{"component": "VAlert", "props": {
-                "type": "success" if last.get("best") else "secondary",
-                "variant": "tonal", "class": "mt-2",
-                "title": "本轮优选 IP",
-                "text": "　".join(
-                    f"{item.get('ip')}（{format_latency(float(item.get('latency_ms') or 0))}）"
-                    for item in (last.get("best") or [])
-                ) or "暂无数据，点击下方「立即执行」。"}}])],
         })
         domain_lines = []
         for item in (live.get("domains") or stats.get("last_domains") or [])[:60]:
@@ -909,7 +874,6 @@ class CFRouterOS(_PluginBase):
                 f"（新增 {item.get('added', 0)} / 清理 {item.get('deleted', 0)}）"
                 + (f"　{item.get('message') or item.get('reason')}" if (item.get("message") or item.get("reason")) else "")
             )
-        content.append(self._html_block("站点优选明细（原 IP / 优选 IP / RouterOS 写入）", domain_lines, 60))
         pool_lines = [
             f"{item.get('name')}｜{item.get('url') or '-'}｜"
             f"{'成功' if item.get('ok') else '失败'}"
@@ -922,20 +886,6 @@ class CFRouterOS(_PluginBase):
                              f"来源模式：{pool.get('source_mode', '-')}　"
                              f"官方段：{'在线' if pool.get('official_ok') else '内置兜底'}　"
                              f"合并网段 {pool.get('network_count', 0)} 段 / 池 IP {pool.get('pool_count', 0)} 个")
-        content.append(self._html_block("IP 池 / 网段来源", pool_lines, 25))
-        history_lines = [
-            f"{item.get('time')}　[{item.get('trigger')}]　纳入 {item.get('domains_cf')}　"
-            f"写入 {item.get('written')}　{item.get('message') or ''}"
-            for item in history
-        ]
-        content.append(self._html_block("运行历史（最近 20 条）", history_lines, 20))
-        log_lines = [
-            f"{item.get('time')}　[{item.get('level')}]　{item.get('message')}"
-            for item in logs
-        ]
-        content.append(self._html_block(
-            "运行日志（最近 120 条；插件卡片「查看日志」= SSE 实时 plugins/cfrouteros.log）",
-            log_lines, 120))
         content.append({
             "component": "VRow",
             "content": [self._col(12, 12, [

@@ -69,7 +69,7 @@ class RouterOSConnectionCenter(_PluginBase):
                    "不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查端口、REST、权限与版本，"
                    "失败时给出可直接复制到 RouterOS 终端执行的修复命令。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosconnectioncenter_"
@@ -240,23 +240,11 @@ class RouterOSConnectionCenter(_PluginBase):
     def get_page(self) -> List[dict]:
         probe = self._probe_data()
         results: List[Dict[str, Any]] = list(probe.get("results") or [])
-        fixes: List[str] = list(probe.get("fixes") or [])
-        checked_at = str(probe.get("checked_at") or "尚未体检")
         failed = len([r for r in results if r.get("level") == LEVEL_FAIL])
         warned = len([r for r in results if r.get("level") == LEVEL_WARN])
         overall = "有失败项" if failed else ("有注意项" if warned else ("全部通过" if results else "未体检"))
 
         content: List[dict] = [
-            {"component": "VRow", "content": [
-                self._stat_card("已保存路由器", f"{len(self._routers)} 台",
-                                "mdi-router-network", "primary"),
-                self._stat_card("广播状态", "已同步" if self._broadcast_ok else "未生效",
-                                _esc(self._shared_path or self._broadcast_error or "-"),
-                                "success" if self._broadcast_ok else "warning"),
-                self._stat_card("最近体检", overall,
-                                f"{checked_at} · {len(results)} 台",
-                                "error" if failed else ("warning" if warned else "success")),
-            ]},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"}, "content": [
                 {"component": "VCardTitle", "text": "操作"},
                 {"component": "VCardText", "content": [
@@ -266,7 +254,7 @@ class RouterOSConnectionCenter(_PluginBase):
                     self._action_button("清空体检结果", "clear", "warning", "mdi-delete-outline",
                                         confirm=True),
                 ]},
-            ]},
+            ]}
         ]
 
         if self._errors:
@@ -330,21 +318,7 @@ class RouterOSConnectionCenter(_PluginBase):
             content.append({"component": "VCard", "props": {
                 "variant": "outlined", "class": "mt-3"}, "content": body})
 
-        if fixes:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "修复命令，复制到 RouterOS 终端执行"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-2"},
-                     "text": "按检查项汇总去重，执行前按自己的网络改一下；# 开头是注释。"},
-                ] + [{"component": "div", "props": {"class": "text-caption font-monospace"},
-                      "text": _esc(cmd)} for cmd in fixes]},
-            ]})
 
-        content.append({"component": "VAlert", "props": {
-            "type": "secondary", "variant": "tonal", "class": "mt-3"},
-            "content": {"text": "配置备份、带宽调度、防火墙管理、CF 优选 IP 的设置页顶部都能选这里保存的路由器；"
-                                "不选就继续用各自手填的参数。"}})
         return content
 
     # ------------------------------------------------------------------

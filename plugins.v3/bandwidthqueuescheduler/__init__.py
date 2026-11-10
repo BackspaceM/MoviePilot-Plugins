@@ -146,7 +146,7 @@ class BandwidthQueueScheduler(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "bandwidthqueuescheduler_"
@@ -680,7 +680,6 @@ class BandwidthQueueScheduler(_PluginBase):
             fasttrack = self.get_data(_KEY_FASTTRACK)
         if not isinstance(fasttrack, dict):
             fasttrack = None
-        logs = list(self.get_data(_KEY_LOGS) or [])
         current = status.get("profile") or "—"
 
         def kv(label: str, value: Any, md: int = 3) -> dict:
@@ -721,12 +720,8 @@ class BandwidthQueueScheduler(_PluginBase):
                                 icon="mdi-stop-circle-outline", confirm=True),
         ]
 
-        rate_text = format_rates_text(rates, self._prefix)
         fast_text = format_fasttrack_text(fasttrack)
         apply_text = format_apply_text(apply) if apply else "尚无调度记录，点击「立即按规则调度」开始"
-        log_nodes = [text_row(format_log_line(l.get("time", ""), l.get("level", ""),
-                                              l.get("message", "")))
-                     for l in logs[:20]] or [text_row("暂无运行日志")]
 
         return [
             {"component": "VAlert", "props": {
@@ -734,50 +729,11 @@ class BandwidthQueueScheduler(_PluginBase):
                 "variant": "tonal", "class": "mb-3", "title": "FastTrack"},
              "content": {"text": md_safe(fast_text)}},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
-                {"component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
-                        kv("当前任务", "运行中" if status.get("running") else "待命"),
-                        kv("当前方案", current),
-                        kv("方案来源", "时段自动" if last.get("auto") else "手动指定"),
-                        kv("调度周期", self._cron),
-                        kv("设备数量", status.get("target_count", 0)),
-                        kv("队列前缀", self._prefix),
-                        kv("试运行", "是" if self._dry_run else "否"),
-                    ]},
-                ]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
                  "text": "一键切换带宽方案（点击即刻改写 RouterOS 队列）"},
                 {"component": "VCardText", "content": [
                     {"component": "div", "content": profile_buttons},
                 ]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": "最近一次调度结果"},
-                        {"component": "VCardText", "content": [text_row(apply_text, 13),
-                                                              {"component": "VDivider",
-                                                               "props": {"class": "my-2"}},
-                                                              text_row(rate_text)]},
-                    ]}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": "FastTrack 诊断"},
-                        {"component": "VCardText", "content": [text_row(fast_text)]},
-                    ]}]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "my-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "运行日志（最近 20 条）"},
-                {"component": "VCardText", "content": log_nodes},
             ]},
             {"component": "VCard", "props": {"variant": "outlined"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "操作"},
@@ -792,7 +748,7 @@ class BandwidthQueueScheduler(_PluginBase):
                      "text": "清理与停止"},
                     {"component": "div", "content": danger},
                 ]},
-            ]},
+            ]}
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:

@@ -757,13 +757,8 @@ class RouterOSSiteRouting(_PluginBase):
         plan = self._plan()
         actions = actions_from_plan(plan)
         site_rows = list(plan.get("sites") or [])
-        report = dict(self.get_data(_KEY_LAST_DEPLOY) or {})
-        cleanup = dict(self.get_data(_KEY_CLEANUP) or {})
         rollback_entries = list(self.get_data(_KEY_ROLLBACK) or [])
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        conn = dict(self.get_data(_KEY_CONN) or {})
         summary = dict(plan.get("summary") or {})
-        refreshed = bool(plan.get("refreshed"))
         stale = list(plan.get("stale_tags") or [])
         limit = self._display_limit
 
@@ -831,52 +826,7 @@ class RouterOSSiteRouting(_PluginBase):
                 "content": {"text": f"设备上还有 {len(stale)} 个带 {_esc(self._prefix)} 标签、"
                                     f"但当前站点清单里没有的条目。要清掉先在设置页打开清理开关。"}})
 
-        # 站点表
-        site_body: List[dict] = []
-        if site_rows:
-            rows: List[dict] = []
-            for s in site_rows[:limit]:
-                rows.append({"component": "tr", "content": [
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _esc(s.get("name"))},
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _esc(s.get("source"))},
-                    {"component": "td", "props": {"class": "text-caption font-weight-bold text-primary"},
-                     "text": _esc(s.get("domain"))},
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _esc("、".join(str(x) for x in (s.get("tracker_domains") or [])) or "无")},
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _esc(len(s.get("domains") or []))},
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _esc(s.get("note") or "-")},
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _esc(s.get("actions"))},
-                ]})
-            site_body.append({"component": "VTable", "props": {
-                "density": "compact", "hover": True}, "content": [
-                {"component": "thead", "content": [
-                    {"component": "tr", "content": [
-                        {"component": "th", "text": "站点"},
-                        {"component": "th", "text": "来源"},
-                        {"component": "th", "text": "主域名"},
-                        {"component": "th", "text": "Tracker 域名"},
-                        {"component": "th", "text": "域名数"},
-                        {"component": "th", "text": "备注"},
-                        {"component": "th", "text": "动作数"},
-                    ]}]},
-                {"component": "tbody", "content": rows},
-            ]})
-        else:
-            site_body.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "title": "还没有站点"},
-                "content": {"text": "到设置页勾选已配置站点，或在手动补充里写一行，保存后回来点「生成 / 刷新预览」。"}})
-        content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
-                        "content": [
-                            {"component": "VCardTitle", "text": "当前站点"},
-                            {"component": "VCardText", "content": site_body},
-                        ]})
 
-        # 动作表（中文含义 / 分区 / 风险 / 状态 / 等价命令）
         rows = []
         for a in actions[:limit]:
             color = RISK_COLORS.get(a.risk_level, "info")
@@ -913,16 +863,6 @@ class RouterOSSiteRouting(_PluginBase):
                                       ]}]},
                                   {"component": "tbody", "content": rows},
                               ]})
-            cmds = [{"component": "div", "props": {"class": "text-caption mt-1"},
-                     "text": f"#{a.index} {_cmd_esc(a.command)} "
-                             f"｜{_esc(planner.PLACE_LABELS.get(a.placement, ''))}"}
-                    for a in actions[:limit]]
-            plan_body.append({"component": "VCard", "props": {
-                "variant": "text", "class": "mt-2"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-caption"},
-                 "text": "等价命令，写的时候走 REST"},
-                {"component": "VCardText", "content": cmds},
-            ]})
             if len(actions) > limit:
                 plan_body.append({"component": "div", "props": {"class": "text-caption mt-2"},
                                   "text": f"共 {len(actions)} 条，只显示前 {limit} 条"})
@@ -934,71 +874,9 @@ class RouterOSSiteRouting(_PluginBase):
                         "content": [{"component": "VCardTitle", "text": "待确认的计划"},
                                     {"component": "VCardText", "content": plan_body}]})
 
-        # 最近部署报告
-        if report:
-            lines = [
-                f"结果：{'成功' if report.get('ok') else '失败/部分失败'} · {_esc(report.get('message'))}",
-                f"时间：{_esc(report.get('started'))} → {_esc(report.get('finished'))}",
-                f"连接：{_esc(report.get('conn'))}",
-                f"备份：{_esc((report.get('backup') or {}).get('message'))}",
-                f"快照：{_esc((report.get('snapshot') or {}).get('path') or '未生成')}",
-                f"回滚：已回滚 {int((report.get('rollback') or {}).get('ok_count') or 0)} 条",
-            ]
-            for err in (report.get("errors") or [])[:5]:
-                lines.append("失败明细：" + _esc(err))
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3",
-                "color": "success" if report.get("ok") else "error"}, "content": [
-                {"component": "VCardTitle", "text": "最近一次部署报告"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-1"},
-                     "text": _esc(line)} for line in lines]},
-            ]})
 
-        # 最近清理报告
-        if cleanup:
-            lines = [
-                f"结果：{'成功' if cleanup.get('ok') else '未完成'} · {_esc(cleanup.get('message'))}",
-                f"时间：{_esc(cleanup.get('created'))}",
-                f"备份：{_esc((cleanup.get('backup') or {}).get('message') or '未执行')}",
-                f"失效标签：{len(cleanup.get('stale') or [])} 个 · 删除 {int(cleanup.get('deleted') or 0)} 条",
-            ]
-            for tag in (cleanup.get("stale") or [])[:8]:
-                lines.append("标签：" + _esc(tag))
-            for err in (cleanup.get("errors") or [])[:5]:
-                lines.append("失败明细：" + _esc(err))
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "最近一次清理报告"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-1"},
-                     "text": _esc(line)} for line in lines]},
-            ]})
 
-        snapshots = self._list_snapshots()
-        if snapshots:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "MP 侧配置快照"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{s['time']}｜{s['name']}｜{s['size']} 字节")}
-                    for s in snapshots]},
-            ]})
-        if logs:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "运行日志（最近 30 条）"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{x.get('time')} ｜ {x.get('level')} ｜ {x.get('message')}")}
-                    for x in logs[:30]]},
-            ]})
 
-        content.append({"component": "VAlert", "props": {
-            "type": "secondary", "variant": "tonal", "class": "mt-3"},
-            "content": {"text": "「回滚」只删上次写入的带标签规则，你自己加的不动。"
-                                "RouterOS 本机的 .backup 要在 WinBox 或命令行里手动恢复。"}})
         return content
 
     # ------------------------------------------------------------------

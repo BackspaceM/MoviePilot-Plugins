@@ -11,7 +11,7 @@ MoviePilot V3 插件。监听整理入库事件，把**具体文件路径**换�
 | 服务器数量 | 绑定主程序里配置的一台 | 任意多台 Emby / Jellyfin / Plex 混合 |
 | 路径映射 | 依赖主程序与媒体服务器路径一致 | 每台服务器独立配置 `MP路径::媒体服务器路径` |
 | 失败处理 | 单次请求 | 合并窗口去重 + 三级回退 + 指数退避重试 + 丢弃告警 |
-| 可观测性 | 少量日志 | INFO 级 SSE 实时日志、逐服务器明细、待刷新队列、运行历史、MP 通知 |
+| 可观测性 | 少量日志 | INFO 级 SSE 实时日志、逐服务器明细、MP 通知 |
 
 ## 配置
 
@@ -32,7 +32,7 @@ jellyfin|JF备库|http://192.168.1.12:8096|你的API_KEY|/media::/data/media|0
 - **路径映射**：`MP容器路径::媒体服务器看到的路径`，多个用分号分隔，按最长前缀匹配。这是最关键的配置：MP 容器里的 `/media/movies/A.mkv`，在 Emby 容器里可能挂在 `/volume1/media/movies/A.mkv`，在 Plex 里可能是 `/mnt/media/movies/A.mkv`。若两者路径完全一致可留空。
 - **启用**：`1/0/true/false/yes/no`，留空默认启用。
 
-首次配置建议：开启「试运行（不发请求）」→ 保存 → 打开详情页看「运行日志」里的映射后路径是否正确 → 关闭试运行。
+第一次用先开「试运行（不发请求）」，看宿主日志里的映射后路径对不对，再关掉试运行。
 
 ### 主要参数
 
@@ -63,12 +63,12 @@ jellyfin|JF备库|http://192.168.1.12:8096|你的API_KEY|/media::/data/media|0
 2. **父目录**：Emby `POST /Library/Refresh?Path=<目录>`；Plex 按目录逐个刷新。
 3. **库级 / 全库**：Emby `POST /Library/Refresh`；Plex 对每个媒体库发起刷新。
 
-每级结果都记录在详情页「上轮逐服务器结果」，并注明实际生效的层级。
+每级结果和生效层级都写在宿主日志里。
 
 ## 日志和通知
 
-- 关键节点全部写 **INFO 级**宿主日志（`plugins/medialibraryrefresh.log`）。MP 插件卡片「查看日志」窗口通过 SSE 实时推送，可看到逐服务器、逐文件路径与写入结果。**MP 全局日志级别设为 WARNING 时 INFO 会被过滤**，此时请看详情页「运行日志」或调回 INFO。
-- 详情页另有：实时运行状态、媒体服务器清单、最近连通性检测、待刷新队列、运行日志、运行历史。点「刷新页面」拉取最新数据。
+- 关键节点全部写 **INFO 级**宿主日志（`plugins/medialibraryrefresh.log`）。逐服务器、逐文件路径和写入结果都在 MP 插件卡片「查看日志」里看。**MP 全局日志级别设为 WARNING 时 INFO 会被过滤**，把级别调回 INFO 就行。
+- 详情页只留一行上次结果和操作按钮，点「刷新页面」拉最新数据。
 - 通知走基类 `post_message`（自动沿用 MP 全局通知开关、收件人路由与跳回插件页的链接），支持「全部 / 仅异常 / 关闭」。队列为空不会发通知。
 - 插件 API：`/run`、`/check`、`/status`、`/queue`、`/logs`、`/refresh_all`、`/clear_queue`、`/clear_logs`、`/stop`（路径前缀 `/api/v1/plugin/MediaLibraryRefresh`）。
 

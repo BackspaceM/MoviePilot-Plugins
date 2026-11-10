@@ -513,7 +513,6 @@ class RouterOSWorkbench(_PluginBase):
         active = self._active()
         tabs = snapshot.get("tabs") or {}
         tab = dict(tabs.get(active) or {}) if isinstance(tabs, dict) else {}
-        logs = list(self.get_data(_KEY_LOGS) or [])
         conn = dict(self.get_data(_KEY_CONN) or {})
         warnings = list(snapshot.get("warnings") or [])
 
@@ -591,48 +590,21 @@ class RouterOSWorkbench(_PluginBase):
             "有" if p.get("has_update") else "-",
             _shortcut(p.get("id")),
         ] for p in plugins]
-        if box_rows:
-            box_nodes = self._table_node({
-                "columns": ["ID", "名称", "版本", "启用", "可更新", "快捷入口"],
-                "rows": box_rows,
-            }, 100)
-        else:
-            box_nodes = [{"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal"},
-                "content": {"text": "还没刷到插件状态，点「仅刷新插件状态」。"}}]
-        content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
-                        "content": [
-                            {"component": "VCardTitle", "text": "插件工具箱"},
-                            {"component": "VCardText", "content": box_nodes},
-                        ]})
-
-        info_lines = [
-            f"最近刷新：{_esc(snapshot.get('created') or '还没刷新')}",
-            f"触发：{_esc(snapshot.get('trigger') or '-')}",
-            f"来源：{_esc(snapshot.get('source') or '-')}",
-            f"页签：{_esc(sections.tab_label(active))}",
-        ]
-        content.append({"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"},
-                        "content": [
-                            {"component": "VCardTitle", "text": "最近刷新"},
-                            {"component": "VCardText", "content": [
-                                {"component": "div", "props": {"class": "text-caption mb-1"},
-                                 "text": line} for line in info_lines]},
-                        ]})
-        if logs:
-            content.append({"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"},
+        box_nodes = self._table_node({
+            "columns": ["ID", "名称", "版本", "启用", "可更新", "快捷入口"],
+            "rows": box_rows[:20],
+        }, 20) if box_rows else []
+        if box_nodes:
+            content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
                             "content": [
-                                {"component": "VCardTitle", "text": "运行日志（最近 30 条）"},
-                                {"component": "VCardText", "content": [
-                                    {"component": "div", "props": {"class": "text-caption"},
-                                     "text": _esc(f"{x.get('time')} ｜ {x.get('level')} ｜ "
-                                                  f"{x.get('message')}")}
-                                    for x in logs[:30] if isinstance(x, dict)]},
+                                {"component": "VCardTitle", "text": "插件工具箱"},
+                                {"component": "VCardText", "content": box_nodes},
                             ]})
 
-        content.append({"component": "VAlert", "props": {
-            "type": "secondary", "variant": "tonal", "class": "mt-3"},
-            "content": {"text": "页签点一下就切，数据来自最近一次刷新；想看速率就再刷一次。"}})
+        content.append({"component": "div", "props": {
+            "class": "text-caption text-medium-emphasis mt-2"},
+            "text": _esc(f"最近刷新 {snapshot.get('created') or '还没刷新'}"
+                         f"｜{sections.tab_label(active)}")})
         return content
 
     # ------------------------------------------------------------------

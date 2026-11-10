@@ -156,7 +156,7 @@ class ViewingWeeklyReport(_PluginBase):
                    "电影剧集占比、热门影片），并按规则引擎扫描转码记录给出硬件加速、音频直通、"
                    "字幕烧录、远程码率等可执行诊断建议。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/viewingweeklyreport.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "viewingweeklyreport_"
@@ -673,57 +673,23 @@ class ViewingWeeklyReport(_PluginBase):
                 "events": {"click": event}}
 
     def get_page(self) -> List[dict]:
-        """详情页：卡片分区 + 分组彩色按钮，所有按钮指向真实 API。"""
+        """主界面只留状态、周报和按钮，日志与历史看插件日志。"""
         live = dict(self.get_data(_KEY_LIVE) or {})
-        last = dict(self.get_data(_KEY_LAST) or {})
         report = dict(self.get_data(_KEY_REPORT) or {})
-        findings_raw = list(self.get_data(_KEY_FINDINGS) or [])
-        active = list(self.get_data(_KEY_ACTIVE) or [])
-        logs = list(self.get_data(_KEY_LOGS) or [])
-
         report_text = format_report_text(report)
-        findings_text = format_findings_text([Finding.from_dict(f) for f in findings_raw])
         level, level_note = health_level(report)
-
-        def kv(label: str, value: Any, md: int = 3) -> dict:
-            return {"component": "VCol", "props": {"cols": 6, "md": md}, "content": [
-                {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                 "text": label},
-                {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"},
-                 "text": md_safe(str(value))},
-            ]}
 
         def text_row(value: str, size: int = 12) -> dict:
             return {"component": "div", "text": md_safe(value),
                     "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
 
-        servers, _ = self._resolve_servers()
-        active_lines: List[str] = []
-        for r in active:
-            flag = "转码" if r.get("is_transcode") else "原画"
-            zone = "远程" if r.get("is_remote") else "内网"
-            active_lines.append(
-                f"• {r.get('user', '未知')} ｜ {r.get('title', '')} ｜ {zone}/{flag} ｜ "
-                f"{r.get('video_codec', '')} {r.get('resolution', '')}")
-        if not active_lines:
-            active_lines.append("当前无在播会话（运行「转码诊断」可刷新实时现场）")
-
-        log_nodes = [text_row(format_log_line(l.get("time", ""), l.get("level", ""),
-                                              l.get("message", "")))
-                     for l in logs[:20]] or [
-            text_row("暂无运行日志，点击「生成周报」或「转码诊断」后将在此实时显示。")]
-
-        primary = [
+        buttons = [
             self._action_button("生成周报", "run", color="primary", icon="mdi-chart-box-outline",
                                 variant="flat"),
             self._action_button("转码诊断", "diagnose", color="info", icon="mdi-stethoscope"),
-        ]
-        secondary = [
             self._action_button("采集近期历史", "collect", icon="mdi-history"),
             self._action_button("立即推送", "push", icon="mdi-send-outline"),
             self._action_button("测试连接", "test", icon="mdi-lan-connect"),
-        ]
-        danger = [
             self._action_button("清空本地记录", "clear", color="error",
                                 icon="mdi-delete-outline", confirm=True),
             self._action_button("停止", "stop", color="error",
@@ -737,61 +703,12 @@ class ViewingWeeklyReport(_PluginBase):
              "content": {"text": md_safe(f"{level}（{level_note}），查到 "
                                         f"{live.get('findings_count', 0)} 条可优化项。")}},
             {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
-                {"component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        kv("插件状态", "已启用" if live.get("enabled") else "未启用"),
-                        kv("当前任务", "运行中" if live.get("running") else "待命"),
-                        kv("统计周期", WEEK_MODE_LABELS.get(self._week_mode, self._week_mode)),
-                        kv("推送周期", self._cron),
-                        kv("数据源", f"{len(servers)} 个媒体服务器"),
-                        kv("本周播放", f"{live.get('total_plays', 0)} 次"),
-                        kv("观看时长", format_duration(live.get("watch_seconds", 0))),
-                        kv("转码占比", f"{live.get('transcode_ratio', 0)}%"),
-                        kv("健康等级", level),
-                        kv("本地记录", f"{live.get('record_count', 0)} 条"),
-                        kv("最近运行", _ts_text(live.get("last_run"))),
-                        kv("上次触发", last.get("trigger", "—")),
-                    ]},
-                ]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
                 {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "观影周报"},
                 {"component": "VCardText", "content": [text_row(report_text, 13)]},
             ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": "转码诊断"},
-                        {"component": "VCardText", "content": [text_row(findings_text)]},
-                    ]}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": "实时在播会话（转码现场）"},
-                        {"component": "VCardText", "content": [text_row(line) for line in active_lines]},
-                    ]}]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "my-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "运行日志（最近 20 条）"},
-                {"component": "VCardText", "content": log_nodes},
-            ]},
             {"component": "VCard", "props": {"variant": "outlined"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "操作"},
                 {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": "周报与诊断"},
-                    {"component": "div", "content": primary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "数据与通知"},
-                    {"component": "div", "content": secondary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "清理与停止"},
-                    {"component": "div", "content": danger},
+                    {"component": "div", "content": buttons},
                 ]},
             ]},
         ]

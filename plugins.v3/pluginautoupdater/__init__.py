@@ -1,8 +1,8 @@
 """插件自动更新 —— MoviePilot V3 插件主类。
 
-扫描装了哪些插件（ID / 名称 / 作者 / 当前版本 / 可更新版本 / 来源仓库），
-配置页先按作者单选筛一遍，再用另一个下拉多选要更新的插件；可以点「立即运行」，
-也能按 cron 定时跑。更新时只挑被选中、市场里确实有新版的插件，走宿主的安装入口。
+设置页里两个下拉都能多选：先勾作者，再勾具体插件；填 cron 就能定时跑，
+也可以回主界面点「立即运行」。更新只动勾选过、市场里确实有新版的插件，
+走宿主自己的安装入口。配置页只读本机插件表，不联网、不等在线目录。
 """
 from __future__ import annotations
 
@@ -65,7 +65,6 @@ _KEY_SCAN = "pau_last_scan"
 _KEY_REPORT = "pau_last_report"
 _KEY_HISTORY = "pau_history"
 _KEY_LOGS = "pau_logs"
-_KEY_PAGE_AUTHOR = "pau_page_author"
 
 _NOTIFY_LABELS = {
     "issue": "有更新或失败时",
@@ -95,10 +94,10 @@ def _now_text() -> str:
 class PluginAutoUpdater(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取
     plugin_name = "插件自动更新"
-    plugin_desc = ("扫描已安装插件，按作者筛选后多选要更新的插件，"
-                   "点「立即运行」或按 cron 定时执行；只更新选中的、市场里有新版的插件。")
+    plugin_desc = ("扫描已安装插件，设置页多选作者和插件，按 cron 定时或点按钮立即更新；"
+                   "只更新选中的、市场里有新版的插件。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pluginautoupdater.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "pluginautoupdater_"
@@ -114,16 +113,14 @@ class PluginAutoUpdater(_PluginBase):
         self._enabled = True
         self._onlyonce = False
         self._cron = _DEFAULT_CRON
-        self._author_filter = updater.ALL_AUTHORS
+        self._author_filters: List[str] = []
         self._target_plugins: List[str] = []
         self._dry_run = False
         self._include_self = False
         self._force_reinstall = False
         self._max_per_run = 10
         self._notify_mode = "issue"
-        self._display_limit = 40
         self._repo_url_override = ""
-        self._timeout = 0
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -140,7 +137,11 @@ class PluginAutoUpdater(_PluginBase):
         valid, normalized = updater.validate_cron(self._cron)
         self._cron = normalized if valid else _DEFAULT_CRON
 
-        self._author_filter = str(cfg.get("author_filter") or updater.ALL_AUTHORS)
+        # 兼容 1.0 的单选作者配置
+        raw_authors = cfg.get("author_filters")
+        if raw_authors is None:
+            raw_authors = cfg.get("author_filter")
+        self._author_filters = updater.normalize_authors(raw_authors)
         selected = cfg.get("target_plugins") or []
         if isinstance(selected, str):
             selected = [x.strip() for x in selected.split(",") if x.strip()]
@@ -153,12 +154,10 @@ class PluginAutoUpdater(_PluginBase):
         self._notify_mode = str(cfg.get("notify_mode") or "issue")
         if self._notify_mode not in _NOTIFY_LABELS:
             self._notify_mode = "issue"
-        self._display_limit = _clamp_int(cfg.get("display_limit"), 40, 10, 200)
         self._repo_url_override = str(cfg.get("repo_url_override") or "").strip()
-        self._timeout = _clamp_int(cfg.get("timeout"), 0, 0, 600)
 
         self._log("INFO", f"配置已载入｜启用 {self._enabled}｜cron {self._cron}｜"
-                          f"作者 {self._author_filter}｜单次上限 {self._max_per_run}")
+                          f"作者 {self._author_filters or '全部'}｜单次上限 {self._max_per_run}")
 
         if cfg.get("onlyonce"):
             cfg["onlyonce"] = False
@@ -297,13 +296,34 @@ class PluginAutoUpdater(_PluginBase):
     # 扫描 / 运行
     # ------------------------------------------------------------------
 
-    def _scan(self) -> Tuple[List[updater.InstalledPlugin], str]:
-        installed, online, source = host.scan_plugins()
-        plugins = updater.normalize_plugins(installed, online)
+    def _apply_repo_override(self, plugins: List[updater.InstalledPlugin]) -> None:
         if self._repo_url_override:
             for plugin in plugins:
                 plugin.repo_url = self._repo_url_override
+
+    def _scan(self) -> Tuple[List[updater.InstalledPlugin], str]:
+        installed, online, source = host.scan_plugins()
+        plugins = updater.normalize_plugins(installed, online)
+        self._apply_repo_override(plugins)
         return plugins, source
+
+    def _form_plugins(self) -> List[updater.InstalledPlugin]:
+        """配置页只认本机清单：先读缓存，缓存空了再读一次内存里的插件表。"""
+        snapshot = self._scan_snapshot()
+        cached = [updater.InstalledPlugin.from_dict(x)
+                  for x in (snapshot.get("plugins") or []) if isinstance(x, dict)]
+        if cached:
+            return cached
+        try:
+            local = host.scan_local()
+            plugins = updater.normalize_plugins(local, [])
+            self._apply_repo_override(plugins)
+            if plugins:
+                self._save_scan(plugins, "本机清单")
+            return plugins
+        except Exception as err:  # noqa: BLE001 - 配置页不因为扫描失败而打不开
+            self._log("WARN", f"读本机插件表失败｜{err}")
+            return []
 
     def _save_scan(self, plugins: List[updater.InstalledPlugin],
                    source: str) -> None:
@@ -360,7 +380,7 @@ class PluginAutoUpdater(_PluginBase):
         self._log("INFO", f"扫描完成｜{source}｜本机 {len(plugins)} 个插件")
 
         targets, notes = updater.filter_targets(
-            plugins, self._author_filter, self._target_plugins,
+            plugins, self._author_filters, self._target_plugins,
             skip_self_id=PLUGIN_ID, include_self=self._include_self)
         plan = updater.build_run_plan(targets, dry, self._max_per_run,
                                       self._force_reinstall)
@@ -413,8 +433,9 @@ class PluginAutoUpdater(_PluginBase):
     @staticmethod
     def _fld(model: str, label: str, hint: str = "", placeholder: str = "",
              field_type: str = "text") -> dict:
-        props: Dict[str, Any] = {"model": model, "label": label,
-                                 "hint": hint, "persistentHint": True}
+        props: Dict[str, Any] = {"model": model, "label": label}
+        if hint:
+            props.update({"hint": hint, "persistentHint": True})
         if placeholder:
             props["placeholder"] = placeholder
         if field_type == "number":
@@ -423,87 +444,74 @@ class PluginAutoUpdater(_PluginBase):
 
     @staticmethod
     def _sw(model: str, label: str, hint: str = "") -> dict:
-        return {"component": "VSwitch", "props": {
-            "model": model, "label": label, "hint": hint, "persistentHint": True}}
+        props: Dict[str, Any] = {"model": model, "label": label}
+        if hint:
+            props.update({"hint": hint, "persistentHint": True})
+        return {"component": "VSwitch", "props": props}
 
     @staticmethod
     def _sel(model: str, label: str, items: List[Dict[str, Any]],
              hint: str = "", multiple: bool = False) -> dict:
-        props: Dict[str, Any] = {"model": model, "label": label, "items": items,
-                                 "hint": hint, "persistentHint": True}
+        props: Dict[str, Any] = {"model": model, "label": label, "items": items}
+        if hint:
+            props.update({"hint": hint, "persistentHint": True})
         if multiple:
             props.update({"multiple": True, "chips": True, "closableChips": True,
                           "clearable": True})
         return {"component": "VSelect", "props": props}
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        plugins, source = self._scan()
-        author_items = updater.author_items(plugins)
-        current_author = self._author_filter or updater.ALL_AUTHORS
-        plugin_items = updater.plugin_items(plugins, current_author)
-        offline = not plugins
-        if offline:
-            plugin_items = [{"title": "没读到插件清单，可以先保存配置，回详情页点扫描",
-                             "value": ""}]
+        # 只读本机插件表，不碰在线目录：设置页不能因为网络等待打不开
+        plugins = self._form_plugins()
+        author_items = updater.multi_author_items(plugins)
+        plugin_items = updater.plugin_items(plugins)
 
         content: List[dict] = [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                              "class": "mb-4"},
-             "content": {"text": "按作者筛完，下面的插件下拉跟着变；不选插件就是更新这个作者的全部。"}},
             {"component": "VRow", "content": [
-                self._col(4, [self._sel("author_filter", "按作者筛选（单选）",
-                                        author_items,
-                                        "选一个作者，下面的插件下拉会跟着收窄")]),
-                self._col(3, [self._fld("cron", "定时执行（cron）", "", "0 5 * * *")]),
-                self._col(2, [self._fld("max_per_run", "单次最多更新", "", "10", "number")]),
-                self._col(3, [self._sel("notify_mode", "通知方式",
+                self._col(6, [self._sel("author_filters", "作者（可多选）", author_items,
+                                        "不选就是所有作者", multiple=True)]),
+                self._col(6, [self._sel("target_plugins", "插件（可多选）", plugin_items,
+                                        "不选就按上面选的作者来", multiple=True)]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(4, [self._fld("cron", "定时执行（cron）", "", "0 5 * * *")]),
+                self._col(3, [self._fld("max_per_run", "单次最多更新", "", "10", "number")]),
+                self._col(5, [self._sel("notify_mode", "通知方式",
                                         [{"title": v, "value": k}
                                          for k, v in _NOTIFY_LABELS.items()])]),
             ]},
             {"component": "VRow", "content": [
-                self._col(12, [self._sel("target_plugins", "要更新的插件（可多选）",
-                                         plugin_items,
-                                         "不选就更新所选作者下的全部插件；只更新确实有新版的",
-                                         multiple=True)]),
+                self._col(2, [self._sw("enabled", "启用")]),
+                self._col(2, [self._sw("onlyonce", "保存后跑一次")]),
+                self._col(2, [self._sw("dry_run", "试运行")]),
+                self._col(3, [self._sw("include_self", "允许更新自己")]),
+                self._col(3, [self._sw("force_reinstall", "强制重装")]),
             ]},
             {"component": "VRow", "content": [
-                self._col(2, [self._sw("enabled", "启用", "关掉后定时与立即运行都不跑")]),
-                self._col(2, [self._sw("onlyonce", "保存后跑一次", "只跑这一次，开关会自动复位")]),
-                self._col(2, [self._sw("dry_run", "试运行", "只走流程，不真的安装")]),
-                self._col(3, [self._sw("include_self", "允许更新自己", "默认跳过，避免更新时重载中断")]),
-                self._col(3, [self._sw("force_reinstall", "强制重装", "没新版也重装一遍")]),
-            ]},
-            {"component": "VRow", "content": [
-                self._col(3, [self._fld("display_limit", "详情页最多显示行数", "", "40", "number")]),
-                self._col(3, [self._fld("timeout", "超时（秒，0 为不限制）", "", "0", "number")]),
-                self._col(6, [self._fld("repo_url_override", "来源仓库覆盖（可选）",
-                                        "留空就用扫描到的来源仓库")]),
+                self._col(12, [self._fld("repo_url_override", "来源仓库覆盖（可选）")]),
             ]},
         ]
-        if offline:
-            content.append({"component": "VAlert", "props": {
-                "type": "warning", "variant": "tonal", "class": "mt-3"},
-                "content": {"text": f"没读到插件清单（{_esc(source)}）。可以先保存配置，"
-                                    "回详情页点「扫描已安装插件」再试。"}})
+        if plugins:
+            content.append({"component": "div", "props": {
+                "class": "text-caption text-medium-emphasis mt-1"},
+                "text": _esc(f"本机 {len(plugins)} 个插件，{len(author_items)} 位作者")})
         else:
             content.append({"component": "div", "props": {
-                "class": "text-caption text-medium-emphasis mt-2"},
-                "text": _esc(f"这次读到 {len(plugins)} 个插件，来自 {source}")})
+                "class": "text-caption text-medium-emphasis mt-1"},
+                "text": "还没读到插件清单，回主界面点一下「刷新清单」再来勾。"})
 
         defaults: Dict[str, Any] = {
             "enabled": self._enabled,
             "onlyonce": False,
             "cron": self._cron,
-            "author_filter": current_author,
+            "author_filters": list(self._author_filters),
             "target_plugins": list(self._target_plugins),
             "dry_run": self._dry_run,
             "include_self": self._include_self,
             "force_reinstall": self._force_reinstall,
             "max_per_run": self._max_per_run,
             "notify_mode": self._notify_mode,
-            "display_limit": self._display_limit,
             "repo_url_override": self._repo_url_override,
-            "timeout": self._timeout,
         }
         return content, defaults
 
@@ -522,175 +530,36 @@ class PluginAutoUpdater(_PluginBase):
                 "events": {"click": {"api": f"plugin/{PLUGIN_ID}/{api}",
                                      "method": method, "params": {}, "confirm": confirm}}}
 
-    def _filter_button(self, label: str, author: str, active: bool) -> dict:
-        return {"component": "VBtn",
-                "props": {"variant": "flat" if active else "tonal", "size": "small",
-                          "class": "ma-1", "color": "primary" if active else "secondary"},
-                "text": _esc(label),
-                "events": {"click": {"api": f"plugin/{PLUGIN_ID}/filter",
-                                     "method": "post",
-                                     "params": {"author": str(author)},
-                                     "confirm": False}}}
-
-    @staticmethod
-    def _stat_card(title: str, value: str, sub: str, color: str) -> dict:
-        return {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-            {"component": "VCard", "props": {"variant": "tonal", "class": "h-100"}, "content": [
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": _esc(title)},
-                    {"component": "div", "props": {"class": f"text-h6 font-weight-bold text-{color}"},
-                     "text": _esc(value)},
-                    {"component": "div", "props": {"class": "text-caption mt-1"},
-                     "text": _esc(sub)},
-                ]},
-            ]},
-        ]}
-
     def get_page(self) -> List[dict]:
-        snapshot = self._scan_snapshot()
-        plugins = [updater.InstalledPlugin.from_dict(x)
-                   for x in (snapshot.get("plugins") or []) if isinstance(x, dict)]
+        """主界面只留按钮和一行状态；日志、记录、清单都在宿主日志和接口里看。"""
         report = dict(self.get_data(_KEY_REPORT) or {})
-        history = list(self.get_data(_KEY_HISTORY) or [])
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        page_author = str(self.get_data(_KEY_PAGE_AUTHOR) or updater.ALL_AUTHORS)
-        limit = self._display_limit
-
-        author_items = updater.author_items(plugins)
-        updatable = [p for p in plugins if p.has_update]
-        authors_count = len([a for a in author_items
-                             if a["value"] != updater.ALL_AUTHORS])
-        if page_author and page_author != updater.ALL_AUTHORS:
-            shown = [p for p in plugins
-                     if updater.unknown_author(p.author) == page_author]
+        snapshot = self._scan_snapshot()
+        plugins = list(snapshot.get("plugins") or [])
+        if report:
+            summary = f"{report.get('finished') or ''}｜{report.get('message') or ''}"
         else:
-            shown = list(plugins)
-
-        content: List[dict] = [
+            summary = "还没跑过"
+        lines = [
+            _esc(summary),
+            _esc(f"本机 {len(plugins)} 个插件｜定时 {self._cron}｜"
+                 f"{'已启用' if self._enabled else '没启用'}"),
+        ]
+        return [
             {"component": "VRow", "content": [
-                self._stat_card("已安装插件", f"{len(plugins)} 个",
-                                str(snapshot.get("source") or "还没扫描过"), "primary"),
-                self._stat_card("作者", f"{authors_count} 位",
-                                "从扫描结果里数的", "info"),
-                self._stat_card("有更新", f"{len(updatable)} 个",
-                                "只更新被选中的", "warning" if updatable else "success"),
-                self._stat_card("上次成功", f"{int(report.get('success') or 0)} 个",
-                                str(report.get("message") or "还没跑过"), "success"),
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "操作"},
-                {"component": "VCardText", "content": [
-                    self._action_button("扫描已安装插件", "scan", "info", "mdi-magnify"),
+                self._col(12, [
+                    self._action_button("刷新清单", "scan", "info", "mdi-refresh"),
                     self._action_button("立即运行", "run", "primary", "mdi-update",
                                         confirm=True),
                     self._action_button("试运行", "dryrun", "secondary", "mdi-play-circle-outline"),
                     self._action_button("清空记录", "clear", "warning", "mdi-delete-outline",
                                         confirm=True),
-                    self._action_button("查看状态", "status", "info", "mdi-information-outline",
-                                        method="get"),
-                ]},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": _esc(f"扫描时间 {snapshot.get('time') or '还没扫描'}；"
-                                  f"当前表格按「{'全部作者' if page_author == updater.ALL_AUTHORS else page_author}」"
-                                  f"显示 {len(shown)} 个")},
-                ]},
+                ]),
             ]},
-            {"component": "VCard", "props": {"outlined": True, "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "按作者看"},
-                {"component": "VCardText", "content": [
-                    self._filter_button(item["title"], item["value"],
-                                        item["value"] == page_author)
-                    for item in author_items
-                ]},
-            ]},
+            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+             "content": [
+                 {"component": "div", "text": line} for line in lines
+             ]},
         ]
-
-        rows: List[dict] = []
-        for p in shown[:limit]:
-            status = "有新版本" if p.has_update else "已最新"
-            if not p.enabled:
-                status = "已停用"
-            rows.append({"component": "tr", "content": [
-                {"component": "td", "props": {"class": "text-caption"}, "text": _esc(p.name)},
-                {"component": "td", "props": {"class": "text-caption"}, "text": _esc(p.author)},
-                {"component": "td", "props": {"class": "text-caption"}, "text": _esc(p.version)},
-                {"component": "td", "props": {"class": "text-caption font-weight-bold text-primary"},
-                 "text": _esc(p.latest_version if p.has_update else "-")},
-                {"component": "td", "props": {"class": "text-caption"}, "text": _esc(p.repo_url or "-")},
-                {"component": "td", "props": {"class": "text-caption"}, "text": _esc(status)},
-            ]})
-        table_body: List[dict] = []
-        if rows:
-            table_body.append({"component": "VTable", "props": {
-                "density": "compact", "hover": True}, "content": [
-                {"component": "thead", "content": [
-                    {"component": "tr", "content": [
-                        {"component": "th", "text": "名称"},
-                        {"component": "th", "text": "作者"},
-                        {"component": "th", "text": "当前版本"},
-                        {"component": "th", "text": "可更新版本"},
-                        {"component": "th", "text": "来源"},
-                        {"component": "th", "text": "状态"},
-                    ]}]},
-                {"component": "tbody", "content": rows},
-            ]})
-            if len(shown) > limit:
-                table_body.append({"component": "div", "props": {
-                    "class": "text-caption mt-2"},
-                    "text": _esc(f"共 {len(shown)} 个，只显示前 {limit} 个")})
-        else:
-            table_body.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "title": "还没有扫描结果"},
-                "content": {"text": "点上面的「扫描已安装插件」，装了的插件就会列在这里。"}})
-        content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
-                        "content": [
-                            {"component": "VCardTitle", "text": "扫描到的插件"},
-                            {"component": "VCardText", "content": table_body},
-                        ]})
-
-        if report:
-            lines = [
-                f"结果｜{'成功' if report.get('ok') else '有失败'}｜{report.get('message')}",
-                f"时间｜{report.get('started')} → {report.get('finished')}｜耗时 {report.get('duration')}s",
-                f"触发｜{report.get('trigger')}｜来源｜{report.get('source')}",
-                f"计划 {report.get('total')}｜成功 {report.get('success')}"
-                f"｜失败 {report.get('failed')}｜跳过 {report.get('skipped')}",
-            ]
-            for detail in (report.get("details") or [])[:limit]:
-                lines.append(f"{'成功' if detail.get('ok') else '失败'}｜"
-                             f"{detail.get('name')}｜{detail.get('from')} → {detail.get('to')}"
-                             f"｜{detail.get('message')}")
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3",
-                "color": "success" if report.get("ok") else "warning"}, "content": [
-                {"component": "VCardTitle", "text": "最近一次运行"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption mb-1"},
-                     "text": _esc(line)} for line in lines]},
-            ]})
-
-        if history:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "更新记录"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{x.get('finished')}｜{x.get('trigger')}｜{x.get('message')}")}
-                    for x in history[:_MAX_HISTORY]]},
-            ]})
-
-        if logs:
-            content.append({"component": "VCard", "props": {
-                "variant": "tonal", "class": "mt-3"}, "content": [
-                {"component": "VCardTitle", "text": "运行日志（最近 30 条）"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption"},
-                     "text": _esc(f"{x.get('time')}｜{x.get('level')}｜{x.get('message')}")}
-                    for x in logs[:30]]},
-            ]})
-        return content
 
     # ------------------------------------------------------------------
     # API
@@ -705,7 +574,7 @@ class PluginAutoUpdater(_PluginBase):
             {"path": "/dryrun", "auth": "bear", "endpoint": self.api_dryrun,
              "methods": ["POST"], "summary": "试运行，不真的安装"},
             {"path": "/filter", "auth": "bear", "endpoint": self.api_filter,
-             "methods": ["POST"], "summary": "按作者筛选详情页表格"},
+             "methods": ["POST"], "summary": "兼容旧版：记录作者筛选值"},
             {"path": "/status", "auth": "bear", "endpoint": self.api_status,
              "methods": ["GET"], "summary": "查询插件状态与最近结果"},
             {"path": "/history", "auth": "bear", "endpoint": self.api_history,
@@ -716,7 +585,7 @@ class PluginAutoUpdater(_PluginBase):
              "methods": ["GET"], "summary": "查询运行日志"},
         ]
 
-    def api_scan(self, _=None) -> Any:
+    def api_scan(self) -> Any:
         plugins, source = self._scan()
         self._save_scan(plugins, source)
         self._log("INFO", f"手动扫描｜{source}｜{len(plugins)} 个插件")
@@ -726,17 +595,18 @@ class PluginAutoUpdater(_PluginBase):
                         data={"count": len(plugins), "source": source,
                               "plugins": [p.to_dict() for p in plugins]})
 
-    def api_run(self, _=None) -> Any:
+    def api_run(self) -> Any:
         report = self._run_coroutine(self._api_run("手动", None))
         return Response(success=bool(report.get("ok")),
                         message=str(report.get("message") or ""), data=report)
 
-    def api_dryrun(self, _=None) -> Any:
+    def api_dryrun(self) -> Any:
         report = self._run_coroutine(self._api_run("试运行", True))
         return Response(success=bool(report.get("ok")),
                         message=str(report.get("message") or ""), data=report)
 
-    def api_filter(self, payload: Any = None, **kwargs: Any) -> Any:
+    def api_filter(self, payload: Optional[dict] = None) -> Any:
+        """保留给旧调用方；签名里不能有 **kwargs，否则 FastAPI 会当成必填参数报 422。"""
         author = ""
         if isinstance(payload, dict):
             author = str(payload.get("author") or "")
@@ -744,19 +614,17 @@ class PluginAutoUpdater(_PluginBase):
             author = payload
         elif payload is not None:
             author = str(getattr(payload, "author", "") or "")
-        author = author or str(kwargs.get("author") or "")
         author = author or updater.ALL_AUTHORS
-        self.save_data(_KEY_PAGE_AUTHOR, author)
-        return Response(success=True, message=f"表格已按「{author}」筛选",
+        return Response(success=True, message=f"已记下「{author}」",
                         data={"author": author})
 
-    def api_status(self, _=None) -> Any:
+    def api_status(self) -> Any:
         snapshot = self._scan_snapshot()
         return Response(success=True, data={
             "plugin": PLUGIN_ID,
             "enabled": self._enabled,
             "cron": self._cron,
-            "author_filter": self._author_filter,
+            "author_filters": list(self._author_filters),
             "target_plugins": list(self._target_plugins),
             "dry_run": self._dry_run,
             "include_self": self._include_self,
@@ -764,26 +632,24 @@ class PluginAutoUpdater(_PluginBase):
             "max_per_run": self._max_per_run,
             "notify_mode": self._notify_mode,
             "repo_url_override": self._repo_url_override,
-            "timeout": self._timeout,
             "scan": snapshot,
             "last_report": dict(self.get_data(_KEY_REPORT) or {}),
             "history": list(self.get_data(_KEY_HISTORY) or []),
             "logs": list(self.get_data(_KEY_LOGS) or [])[:30],
-            "page_author": str(self.get_data(_KEY_PAGE_AUTHOR) or updater.ALL_AUTHORS),
         })
 
-    def api_history(self, _=None) -> Any:
+    def api_history(self) -> Any:
         return Response(success=True, data={
             "history": list(self.get_data(_KEY_HISTORY) or [])[:_MAX_HISTORY]})
 
-    def api_clear(self, _=None) -> Any:
+    def api_clear(self) -> Any:
         self.save_data(_KEY_REPORT, {})
         self.save_data(_KEY_HISTORY, [])
         self.save_data(_KEY_LOGS, [])
         logger.info(f"{_LOG_PREFIX}｜运行报告、更新记录和日志已清空")
         return Response(success=True, message="运行报告、更新记录和日志已清空")
 
-    def api_logs(self, _=None) -> Any:
+    def api_logs(self) -> Any:
         return Response(success=True, data={
             "logs": list(self.get_data(_KEY_LOGS) or [])[:100]})
 

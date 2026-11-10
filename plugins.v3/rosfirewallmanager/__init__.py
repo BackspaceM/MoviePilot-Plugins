@@ -155,7 +155,7 @@ class RosFirewallManager(_PluginBase):
     plugin_desc = ("RouterOS 防火墙可视化管理器：表格化查看 filter/nat/mangle/raw 全部规则并检测影子规则·重复·缺失兜底，"
                    "逐条启停/上下移/删除或按表单新增（自动插到兜底 drop 前），操作前可留备份，定时扫描隐患并推送 MP 通知。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "rosfirewallmanager_"
@@ -849,29 +849,13 @@ class RosFirewallManager(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
-        """详情页：卡片分区 + 批量导入预览 + 分组彩色按钮。"""
+        """主界面只留按钮、导入预览和一行状态。"""
         status = self.current_status()
-        rules: List[Rule] = status["rules"]
-        findings: List[Finding] = [Finding.from_dict(f) for f in status["findings"]]
+        findings = [Finding.from_dict(f) for f in status["findings"]]
         conn = status["conn"]
-        last_op = status["last_op"]
-        limit = int(status["display_limit"])
         preview = dict(self.get_data(_KEY_IMPORT) or {})
         import_items = [ImportRule.from_dict(d) for d in (preview.get("rules") or [])]
         import_errors = [str(e) for e in (preview.get("errors") or [])]
-
-        def kv(label: str, value: Any, md: int = 3) -> dict:
-            return {"component": "VCol", "props": {"cols": 6, "md": md}, "content": [
-                {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                 "text": label},
-                {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"},
-                 "text": md_safe(str(value))},
-            ]}
-
-        def text_row(value: str, size: int = 12) -> dict:
-            return {"component": "div", "text": md_safe(value),
-                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
-
         high = sum(1 for f in findings if f.severity == SEV_HIGH)
         med = sum(1 for f in findings if f.severity == "medium")
         high_risk = sum(1 for r in import_items if "高危" in r.risk)
@@ -955,111 +939,14 @@ class RosFirewallManager(_PluginBase):
                                 icon="mdi-stop-circle-outline", confirm=True),
         ]
 
-        op_rows: List[dict] = []
-        for r in rules[:limit]:
-            op_rows.append(self._rule_op_row(r))
-        truncated = max(0, len(rules) - limit)
-
-        nodes: List[dict] = [
-            {"component": "VAlert", "props": {
-                "type": "warning" if high else "info", "variant": "tonal", "class": "mb-3",
-                "title": "隐患检测"},
-             "content": {"text": md_safe(
-                 f"隐患 {len(findings)} 项（高危 {high}｜中危 {med}）。"
-                 + ("点击「立即扫描隐患」刷新检测。" if not findings else
-                    "高危项多是「放行规则被兜底 drop 遮挡」或「拒绝规则被全放行架空」，先处理这些。"))}},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
-                {"component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        kv("插件状态", "已启用" if status["enabled"] else "未启用"),
-                        kv("当前任务", "运行中" if status["running"] else "待命"),
-                        kv("连接状态", ("正常" if conn.get("ok") else
-                                        ("异常" if conn else "未测试")) + f"｜{conn.get('msg', '')}"),
-                        kv("试运行", "是（不改动）" if status["dry_run"] else "否"),
-                        kv("管理表", "、".join(TABLE_LABELS.get(t, t) for t in status["tables"])),
-                        kv("扫描周期", status["scan_cron"] if status["scan_enabled"] else "未启用定时"),
-                        kv("上次扫描", status["last_scan"]),
-                        kv("规则总数", f"{status['summary'].get('total', 0)} 条"
-                                       f"（禁用 {status['summary'].get('disabled', 0)}"
-                                       f"｜动态 {status['summary'].get('dynamic', 0)}）"),
-                    ]},
-                ]},
-            ]},
-            {"component": "VCard", "props": {"variant": "outlined", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "批量导入 · 待确认规则"},
-                {"component": "VCardText", "content": import_body},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "快捷操作"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": "扫描与刷新"},
-                    {"component": "div", "content": primary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "连接、备份与停止"},
-                    {"component": "div", "content": secondary},
-                ]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": f"隐患明细（{len(findings)} 项）"},
-                {"component": "VCardText", "content": [text_row(format_findings_text(findings))]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "规则一览（自上而下即执行顺序）"},
-                {"component": "VCardText", "content": [
-                    text_row(format_rules_text(rules, table)) for table in status["tables"]
-                ]},
-            ]},
+        return [
+            {"component": "div", "content": primary + secondary},
+            {"component": "VCard", "props": {"variant": "outlined", "class": "mt-3"},
+             "content": [{"component": "VCardText", "content": import_body}]},
+            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+             "text": md_safe(f"规则 {status['summary'].get('total', 0)} 条｜隐患 {len(findings)} 项"
+                             f"｜{'已连接' if conn.get('ok') else '未连接'}")},
         ]
-
-        if op_rows:
-            op_content: List[dict] = [
-                {"component": "VLabel", "text": f"逐条操作（前 {min(len(rules), limit)} 条）"},
-                *op_rows,
-            ]
-            if truncated:
-                op_content.append(text_row(
-                    f"……另有 {truncated} 条规则未显示操作按钮（可调大配置页「详情页操作按钮上限」）", 11))
-            nodes.append({"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"},
-                          "content": [{"component": "VCardText", "content": op_content}]})
-        else:
-            nodes.append({"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"},
-                          "content": [{"component": "VCardText", "content": [
-                              text_row("尚无规则数据，点击「刷新规则」或「立即扫描隐患」加载。")]}]})
-
-        if last_op:
-            head = md_safe(
-                f"{'成功' if last_op.get('ok') else '失败'}：{last_op.get('message', '')}"
-                + (f"\n位置：{last_op.get('note')}" if last_op.get("note") else ""))
-            op_last: List[dict] = [
-                {"component": "div", "text": head,
-                 "props": {"style": "white-space:pre-wrap;font-size:12px"}},
-            ]
-            if last_op.get("preview"):
-                op_last.append({"component": "div",
-                                "text": "命令：" + md_safe_command(last_op["preview"]),
-                                "props": {"style": "white-space:pre-wrap;font-size:12px"}})
-            nodes.append({"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"},
-                          "content": [
-                              {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                               "text": "最近一次操作"},
-                              {"component": "VCardText", "content": op_last},
-                          ]})
-
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        log_nodes = [text_row(format_log_line(l.get("time", ""), l.get("level", ""),
-                                              l.get("message", "")))
-                     for l in logs[:20]] or [text_row("暂无日志，点击上方「立即扫描隐患」或「测试连接」后显示。")]
-        nodes.append({"component": "VCard", "props": {"variant": "tonal"}, "content": [
-            {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-             "text": "运行日志（最近 20 条）"},
-            {"component": "VCardText", "content": log_nodes},
-        ]})
-        return nodes
 
     def get_api(self) -> List[Dict[str, Any]]:
         # path 为相对路径：宿主自动补齐 /api/v1/plugin/<PluginID> 前缀

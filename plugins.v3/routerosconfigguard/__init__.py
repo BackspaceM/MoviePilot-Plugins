@@ -135,7 +135,7 @@ class RouterOSConfigGuard(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "routerosconfigguard_"
@@ -788,121 +788,36 @@ class RouterOSConfigGuard(_PluginBase):
                                      "method": method, "params": {}, "confirm": confirm}}}
 
     def get_page(self) -> List[dict]:
-        """详情页：卡片分区 + 分组彩色按钮；按钮全部指向真实 API。"""
+        """主界面只留按钮和一行状态，快照清单与检测明细看插件日志。"""
         status = self.current_status()
-        index = self.snapshot_list()
-        ros_files = self.ros_file_list()
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        last = status.get("last") or {}
-        diff = last.get("diff") or {}
-        target_label = BACKUP_TARGET_LABELS.get(self._backup_target, self._backup_target)
-        has_drift = bool(diff.get("has_drift"))
-
-        def kv(label: str, value: Any, md: int = 3) -> dict:
-            return {"component": "VCol", "props": {"cols": 6, "md": md}, "content": [
-                {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                 "text": label},
-                {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"},
-                 "text": md_safe(str(value))},
-            ]}
-
-        def text_row(value: str, size: int = 12) -> dict:
-            return {"component": "div", "text": md_safe(value),
-                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
-
-        snap_lines = [
-            f"{it.get('id')}｜{_ts_text(it.get('ts'))}｜{it.get('rows', 0)} 行｜"
-            f"{'⚠ ' + str(it.get('drift', '')) if it.get('has_drift') else '无漂移'}"
-            for it in index[:8]
-        ] or ["暂无 MP 快照（当前备份位置可能不含 MP）"]
-        ros_lines = [
-            f"{f.get('name')}｜{f.get('size', '')}｜{f.get('created', '')}"
-            for f in ros_files[:8]
-        ] or ["暂无 RouterOS 本机备份文件"]
-        drift_text = format_diff(diff, max_rows=8) if has_drift else (
-            "无漂移" if last else "尚未执行检测")
-        log_nodes = [text_row(format_log_line(l.get("time", ""), l.get("level", ""),
-                                              l.get("message", "")))
-                     for l in logs[:20]] or [text_row("暂无运行日志")]
-
-        primary = [
-            self._action_button("立即备份并检测", "run", color="primary", icon="mdi-backup-restore",
-                                variant="flat"),
+        last = dict(status.get("last") or {})
+        diff = dict(last.get("diff") or {})
+        drift = "有漂移" if diff.get("has_drift") else ("无漂移" if last else "还没检测")
+        buttons = [
+            self._action_button("立即备份并检测", "run", color="primary",
+                                icon="mdi-backup-restore", variant="flat"),
             self._action_button("测试连接", "test", color="info", icon="mdi-lan-connect"),
-        ]
-        secondary = [
             self._action_button("最近设为基线", "baseline", icon="mdi-flag-outline", confirm=True),
             self._action_button("重载快照列表", "snapshots", icon="mdi-refresh", method="get"),
             self._action_button("刷新 ROS 备份", "rosbackups", icon="mdi-file-refresh-outline"),
+            self._action_button("清空快照", "clear", color="error",
+                                icon="mdi-delete-outline", confirm=True),
+            self._action_button("停止", "stop", color="error",
+                                icon="mdi-stop-circle-outline", confirm=True),
         ]
-        danger = [
-            self._action_button("清空快照", "clear", color="error", icon="mdi-delete-outline",
-                                confirm=True),
-            self._action_button("停止", "stop", color="error", icon="mdi-stop-circle-outline",
-                                confirm=True),
-        ]
-
+        summary = (f"备份位置：{status.get('backup_target_label') or '-'}"
+                   f"｜MP 快照 {status.get('snapshots', 0)} 份"
+                   f"｜本机备份 {len(status.get('ros_files') or [])} 个"
+                   f"｜{drift}"
+                   f"｜上次 {last.get('time') or last.get('ts') or '-'}")
         return [
-            {"component": "VAlert", "props": {
-                "type": "warning" if has_drift else "success", "variant": "tonal",
-                "class": "mb-3", "title": "漂移检测"},
-             "content": {"text": ("检测到配置漂移，详情见下方「最近检测结果」。"
-                                  if has_drift else "当前配置与基线一致，未检测到漂移。")}},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "运行概览"},
+            {"component": "VCard", "props": {"variant": "tonal"}, "content": [
                 {"component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
-                        kv("当前任务", "运行中" if status.get("running") else "待命"),
-                        kv("备份位置", target_label),
-                        kv("备份周期", self._cron),
-                        kv("监控分区", f"{len(self._sections)} 个：{basename_from_types(self._sections)}"),
-                        kv("基线时间", _ts_text(status.get("baseline_ts"))),
-                        kv("MP 快照份数", status.get("snapshots", 0)),
-                        kv("ROS 备份文件", len(ros_files)),
-                    ]},
+                    {"component": "div", "content": buttons},
                 ]},
             ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "最近检测结果"},
-                {"component": "VCardText", "content": [text_row(drift_text, 13)]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": f"快照清单 · MP（共 {len(index)} 份）"},
-                        {"component": "VCardText", "content": [text_row(line) for line in snap_lines]},
-                    ]}]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{
-                    "component": "VCard", "props": {"variant": "tonal", "class": "h-100"},
-                    "content": [
-                        {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                         "text": f"备份清单 · RouterOS 本机（共 {len(ros_files)} 个）"},
-                        {"component": "VCardText", "content": [text_row(line) for line in ros_lines]},
-                    ]}]},
-            ]},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "my-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "运行日志（最近 20 条）"},
-                {"component": "VCardText", "content": log_nodes},
-            ]},
-            {"component": "VCard", "props": {"variant": "outlined"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "操作"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": "备份与检测"},
-                    {"component": "div", "content": primary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "基线与列表"},
-                    {"component": "div", "content": secondary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "清理与停止"},
-                    {"component": "div", "content": danger},
-                ]},
-            ]},
+            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+             "text": md_safe(summary)},
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:

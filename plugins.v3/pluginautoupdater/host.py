@@ -1,19 +1,26 @@
 """插件自动更新 —— 宿主适配层。
 
 只在函数被调用时才去 import 宿主模块：导入期不联网、不碰 app.*、不抛异常。
-扫描走 app.sdk.plugin.PluginManager，拿不到再试公开的插件列表端点；安装走
-app.api.endpoints.plugin.install（同步或异步都能接）。异常都转成可读消息返回。
+本机清单优先读 PluginManager（V3 是 plugins/running_plugins 映射，V2/旧版是
+get_installed_plugins / get_local_plugins），在线清单走公开目录接口；同步/异步
+都能接，所有宿主调用都放在带超时的后台线程里，读不到就返回空清单。
+
+scan_local() 只碰本机内存里的插件表，不给配置页引入网络等待。
 """
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
 import inspect
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # 离线桩测试可以替换掉扫描 / 安装实现，不依赖真实宿主
 _scan_hook: Optional[Callable[[], Tuple[List[Any], List[Any], str]]] = None
 _install_hook: Optional[Callable[[str, str, bool], Tuple[bool, str, str]]] = None
+
+_LOCAL_TIMEOUT = 2.0
+_MARKET_TIMEOUT = 6.0
 
 
 def set_test_hooks(scan: Optional[Callable] = None,
@@ -51,6 +58,33 @@ def _records_from(result: Any) -> List[Any]:
     return [result]
 
 
+def _as_mapping(record: Any) -> Dict[str, Any]:
+    """dict / Pydantic / 插件类 / 插件实例统一摊成 dict。"""
+    if isinstance(record, dict):
+        return dict(record)
+    if record is None:
+        return {}
+    for attr in ("model_dump", "dict"):
+        fn = getattr(record, attr, None)
+        if callable(fn):
+            try:
+                out = fn()
+            except Exception:  # noqa: BLE001
+                out = None
+            if isinstance(out, dict):
+                return dict(out)
+    try:
+        raw = dict(record.__dict__)
+        if raw:
+            return raw
+    except Exception:  # noqa: BLE001
+        pass
+    keys = ("id", "plugin_id", "plugin_name", "name", "plugin_author", "author",
+            "plugin_version", "version", "installed", "state", "has_update",
+            "repo_url", "update_candidate")
+    return {k: getattr(record, k) for k in keys if hasattr(record, k)}
+
+
 def _instance(manager_cls: Any) -> Any:
     """V3 的 PluginManager 用实例方法；实例化不了就退回类本身（兼容类方法形态）。"""
     try:
@@ -59,76 +93,12 @@ def _instance(manager_cls: Any) -> Any:
         return manager_cls
 
 
-def _manager_scan(manager: Any, label: str) -> Tuple[List[Any], List[Any], str]:
-    installed: List[Any] = []
-    online: List[Any] = []
-    note = ""
-    for fname in ("get_installed_plugins", "get_local_plugins"):
-        fn = getattr(manager, fname, None)
-        if not callable(fn):
-            continue
-        try:
-            rows = _records_from(fn())
-        except Exception as err:  # noqa: BLE001
-            note = f"{label}.{fname}() 读取失败：{err}"
-            continue
-        if rows:
-            installed = rows
-            note = f"{label}.{fname}()"
-            break
-
-    fn = getattr(manager, "get_online_plugins", None)
-    if callable(fn):
-        try:
-            online = _records_from(fn(force=True))
-        except Exception as err:  # noqa: BLE001
-            note += f"；在线清单读取失败：{err}"
-            online = []
-    else:
-        note += "；没有在线清单接口"
-    return installed, online, note
-
-
-def scan_plugins() -> Tuple[List[Any], List[Any], str]:
-    """返回 (本机记录, 在线记录, 来源说明)。拿不到就给空清单，不抛异常。"""
-    if _scan_hook is not None:
-        try:
-            installed, online, note = _scan_hook()
-            return list(installed or []), list(online or []), str(note or "")
-        except Exception as err:  # noqa: BLE001
-            return [], [], f"扫描桩异常：{err}"
-
-    managers: List[Tuple[Any, str]] = []
+def _manager() -> Any:
     try:
         from app.sdk.plugin import PluginManager  # type: ignore
-        managers.append((_instance(PluginManager), "app.sdk.plugin.PluginManager"))
+        return _instance(PluginManager)
     except Exception:  # noqa: BLE001
-        pass
-
-    last_note = ""
-    for manager, label in managers:
-        try:
-            installed, online, note = _manager_scan(manager, label)
-        except Exception as err:  # noqa: BLE001
-            last_note = f"{label} 扫描异常：{err}"
-            continue
-        last_note = note or label
-        if installed:
-            return installed, online, last_note
-
-    # 最后回退：公开插件列表端点（V3 是 async，老宿主是同步，都要能接）
-    try:
-        from app.api.endpoints.plugin import all_plugins  # type: ignore
-        result = all_plugins(state="installed", _=None, response=None)
-        if inspect.isawaitable(result):
-            result = _run_coroutine(result)
-        installed = _records_from(result)
-        if installed:
-            return installed, [], "app.api.endpoints.plugin.all_plugins（仅本机清单）"
-    except Exception as err:  # noqa: BLE001
-        last_note = f"all_plugins 读取失败：{err}"
-
-    return [], [], last_note or "没读到插件清单"
+        return None
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -139,6 +109,155 @@ def _run_coroutine(coro: Any) -> Any:
         return asyncio.run(coro)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result(timeout=180)
+
+
+def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return _run_coroutine(value)
+    return value
+
+
+def _guarded(fn: Callable[[], Any], timeout: float) -> Tuple[Any, str]:
+    """在守护线程里跑宿主调用，超时就放弃；不阻塞请求线程。"""
+    box: Dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            box["value"] = fn()
+        except Exception as err:  # noqa: BLE001
+            box["error"] = err
+
+    thread = threading.Thread(target=worker, name="PAUHostCall", daemon=True)
+    thread.start()
+    thread.join(max(0.1, float(timeout)))
+    if thread.is_alive():
+        return None, "读取超时"
+    if "error" in box:
+        return None, str(box["error"])
+    return box.get("value"), ""
+
+
+def _plugin_record(pid: Any, obj: Any) -> Dict[str, Any]:
+    """把 PluginManager 的 {id: 插件类/实例} 转成扫描记录。"""
+    raw = _as_mapping(obj)
+    return {
+        "id": str(raw.get("id") or pid or ""),
+        "plugin_name": str(raw.get("plugin_name") or raw.get("name") or pid or ""),
+        "plugin_author": str(raw.get("plugin_author") or raw.get("author") or ""),
+        "plugin_version": str(raw.get("plugin_version") or raw.get("version") or ""),
+        "installed": True,
+        "state": raw.get("state", True),
+        "has_update": bool(raw.get("has_update", False)),
+        "repo_url": str(raw.get("repo_url") or ""),
+    }
+
+
+def _local_records() -> Tuple[List[Any], str]:
+    """只读本机插件表，不发网络请求。"""
+    manager = _manager()
+    if manager is not None:
+        for fname in ("get_installed_plugins", "get_local_plugins"):
+            fn = getattr(manager, fname, None)
+            if not callable(fn):
+                continue
+            try:
+                rows = _records_from(_maybe_await(fn()))
+            except Exception:  # noqa: BLE001
+                continue
+            if rows:
+                return rows, f"PluginManager.{fname}()"
+        for attr in ("running_plugins", "plugins"):
+            try:
+                mapping = getattr(manager, attr)
+                if callable(mapping):
+                    mapping = mapping()
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(mapping, dict) and mapping:
+                rows = [_plugin_record(pid, obj) for pid, obj in mapping.items()]
+                return rows, f"PluginManager.{attr}"
+    try:
+        from app.api.endpoints.plugin import all_plugins  # type: ignore
+        result = _maybe_await(all_plugins(state="installed", _=None, response=None))
+        rows = _records_from(result)
+        if rows:
+            return rows, "all_plugins(installed)"
+    except Exception:  # noqa: BLE001
+        pass
+    return [], ""
+
+
+def _online_records() -> Tuple[List[Any], str]:
+    """在线清单，用来补新版本与来源仓库；读不到不影响本机清单。"""
+    manager = _manager()
+    if manager is not None:
+        fn = getattr(manager, "get_online_plugins", None)
+        if callable(fn):
+            try:
+                try:
+                    rows = _records_from(_maybe_await(fn(force=False)))
+                except TypeError:
+                    rows = _records_from(_maybe_await(fn()))
+                if rows:
+                    return rows, "在线插件清单"
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        from app.api.endpoints.plugin import all_plugins  # type: ignore
+        try:
+            result = all_plugins(state="all", force=False, _=None, response=None)
+        except TypeError:
+            result = all_plugins(state="all", _=None, response=None)
+        rows = _records_from(_maybe_await(result))
+        if rows:
+            return rows, "插件目录"
+    except Exception:  # noqa: BLE001
+        pass
+    return [], ""
+
+
+def scan_plugins(with_market: bool = True,
+                 timeout: float = _MARKET_TIMEOUT) -> Tuple[List[Any], List[Any], str]:
+    """返回 (本机记录, 在线记录, 来源说明)。拿不到就给空清单，不抛异常。"""
+    if _scan_hook is not None:
+        try:
+            installed, online, note = _scan_hook()
+            return list(installed or []), list(online or []), str(note or "")
+        except Exception as err:  # noqa: BLE001
+            return [], [], f"扫描桩异常：{err}"
+
+    local, local_error = _guarded(_local_records, _LOCAL_TIMEOUT)
+    installed: List[Any] = []
+    source = ""
+    if isinstance(local, tuple) and len(local) == 2:
+        installed = list(local[0] or [])
+        source = str(local[1] or "")
+    notes = [source] if source else []
+    if local_error:
+        notes.append(f"本机清单：{local_error}")
+
+    online: List[Any] = []
+    if with_market:
+        market, market_error = _guarded(_online_records, timeout)
+        online_source = ""
+        if isinstance(market, tuple) and len(market) == 2:
+            online = list(market[0] or [])
+            online_source = str(market[1] or "")
+        if online_source:
+            notes.append(online_source)
+        if market_error:
+            notes.append(f"在线清单：{market_error}")
+    return installed, online, "｜".join(x for x in notes if x) or "没读到插件清单"
+
+
+def scan_local() -> List[Any]:
+    """配置页用：只取本机插件表，不碰在线目录，绝不长时间等待。"""
+    installed, _, _ = scan_plugins(with_market=False, timeout=_LOCAL_TIMEOUT)
+    return installed
+
+
+def _run_coroutine_for_install(coro: Any) -> Any:
+    return _run_coroutine(coro)
 
 
 def _parse_install_result(result: Any) -> Tuple[bool, str]:
@@ -178,7 +297,7 @@ def install_plugin(plugin_id: str, repo_url: str = "",
         result = install(plugin_id, repo_url=repo_url or "",
                          force=bool(force), _=None)
         if inspect.isawaitable(result):
-            result = _run_coroutine(result)
+            result = _run_coroutine_for_install(result)
         ok, msg = _parse_install_result(result)
         if ok:
             return True, msg or "已安装", "app.api.endpoints.plugin.install"

@@ -191,7 +191,7 @@ class HDWinGCrossSeed(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
     )
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_label = "站点,辅种,HDWinG"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -538,144 +538,35 @@ class HDWinGCrossSeed(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[dict]:
-        """返回插件详情页。"""
-        if not self._enabled:
-            return [
-                {"component": "VAlert", "props": {
-                    "type": "warning", "variant": "tonal",
-                    "text": "插件未启用，请先在配置中启用并填写站点 Cookie。"}}
-            ]
+        """主界面只留按钮和一行状态，辅种明细看插件日志。"""
         stats = self.get_data(_STATS_KEY) or {}
-        history = self.get_data(_HISTORY_KEY) or []
-        # 待重试数在运行结束时写入统计，详情页不再遍历整份辅种缓存（缓存可能上万条）
-        pending = _to_int(stats.get("pending_retry"), 0)
-        content: List[dict] = [
-            {
-                "component": "VRow",
-                "content": [
-                    self._stat_card("累计辅种", str(stats.get("total_added", 0)), "mdi-content-duplicate"),
-                    self._stat_card("累计失败", str(stats.get("total_failed", 0)), "mdi-alert-circle-outline"),
-                    self._stat_card("上次运行", str(stats.get("last_duration", "-")) + "s", "mdi-timer-outline"),
-                    self._stat_card("待重试缓存", str(pending), "mdi-cached"),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [
-                        {"component": "VAlert", "props": {
-                            "type": "info", "variant": "tonal", "class": "mt-2",
-                            "text": (f"上次运行：{stats.get('last_run_text', '尚未运行')}　"
-                                     f"触发：{stats.get('last_trigger', '-')}　"
-                                     f"扫描 {stats.get('last_scanned', 0)} / 命中 {stats.get('last_matched', 0)} / "
-                                     f"新增 {stats.get('last_added', 0)} / 失败 {stats.get('last_failed', 0)}"
-                                     + (f"　{stats.get('last_message')}" if stats.get("last_message") else ""))}}
-                    ]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [
-                        {"component": "VBtn", "props": {
-                            "variant": "tonal", "color": "primary",
-                            "prepend-icon": "mdi-play", "class": "ma-1"},
-                         "text": "立即辅种",
-                         "events": {"click": {"api": f"plugin/{self.__class__.__name__}/run", "method": "post"}}},
-                        {"component": "VBtn", "props": {
-                            "variant": "tonal", "prepend-icon": "mdi-account-check", "class": "ma-1"},
-                         "text": "检测 Cookie",
-                         "events": {"click": {"api": f"plugin/{self.__class__.__name__}/check", "method": "post"}}},
-                        {"component": "VBtn", "props": {
-                            "variant": "tonal", "color": "warning",
-                            "prepend-icon": "mdi-delete-sweep", "class": "ma-1"},
-                         "text": "清空缓存",
-                         "events": {"click": {"api": f"plugin/{self.__class__.__name__}/clear_cache", "method": "post"}}},
-                    ]),
-                ],
-            },
+        pid = self.__class__.__name__
+        buttons = [
+            {"component": "VBtn", "props": {
+                "variant": "tonal", "color": "primary",
+                "prepend-icon": "mdi-play", "class": "ma-1"},
+             "text": "立即辅种",
+             "events": {"click": {"api": f"plugin/{pid}/run", "method": "post"}}},
+            {"component": "VBtn", "props": {
+                "variant": "tonal", "prepend-icon": "mdi-account-check", "class": "ma-1"},
+             "text": "检测 Cookie",
+             "events": {"click": {"api": f"plugin/{pid}/check", "method": "post"}}},
+            {"component": "VBtn", "props": {
+                "variant": "tonal", "color": "warning",
+                "prepend-icon": "mdi-delete-sweep", "class": "ma-1"},
+             "text": "清空缓存",
+             "events": {"click": {"api": f"plugin/{pid}/clear_cache", "method": "post"}}},
         ]
-        if not self._cookie:
-            content.append({"component": "VAlert", "props": {
-                "type": "error", "variant": "tonal", "class": "mt-2",
-                "text": "未配置站点 Cookie，无法访问 HDWinG。"}})
-        if not history:
-            content.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "class": "mt-2",
-                "text": "暂无运行记录，点击「立即辅种」或等待定时任务执行。"}})
-            return content
-        shown = history[:_PAGE_HISTORY]
-        headers = ("时间", "下载器", "任务 / 站点", "结果", "说明")
-        rows = []
-        for item in shown:
-            state = item.get("state", "")
-            rows.append({
-                "component": "tr",
-                "content": [
-                    {"component": "td", "props": {"class": "text-caption text-no-wrap"},
-                     "text": _clip(item.get("time", ""), 16)},
-                    {"component": "td", "props": {"class": "text-caption"},
-                     "text": _clip(item.get("downloader", ""), 12)},
-                    {"component": "td", "props": {"class": "text-caption", "style": "max-width:260px"},
-                     "content": [
-                         {"component": "div", "props": {"class": "text-truncate"},
-                          "text": _clip(item.get("local", ""), 42)},
-                         {"component": "div", "props": {"class": "text-truncate text-medium-emphasis"},
-                          "text": "→ " + _clip(item.get("site", "-"), 32)},
-                     ]},
-                    {"component": "td", "content": [
-                        {"component": "VChip", "props": {
-                            "size": "x-small", "variant": "tonal",
-                            "color": _STATE_COLORS.get(state, "grey")},
-                         "text": _STATE_TEXT.get(state, state or "-")}]},
-                    {"component": "td", "props": {"class": "text-caption", "style": "max-width:220px"},
-                     "content": [
-                         {"component": "div", "props": {"class": "text-truncate"},
-                          "text": _clip(item.get("message", ""), 48)}]},
-                ],
-            })
-        content.append({
-            "component": "VCard",
-            "props": {"variant": "tonal", "class": "mt-3"},
-            "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": f"最近记录（共 {len(history)} 条，仅显示最近 {len(shown)} 条）"},
-                {"component": "VTable", "props": {"density": "compact", "hover": True},
-                 "content": [
-                     {"component": "thead", "content": [
-                         {"component": "tr", "content": [
-                             {"component": "th", "text": text} for text in headers]}]},
-                     {"component": "tbody", "content": rows},
-                 ]},
-                {"component": "VCardText", "props": {"class": "text-caption text-medium-emphasis"},
-                 "text": "完整记录保存在插件数据中；长名称与说明在此仅显示摘要。"},
-            ],
-        })
-        return content
-
-    def _stat_card(self, title: str, value: str, icon: str) -> dict:
-        return {
-            "component": "VCol",
-            "props": {"cols": 6, "md": 3},
-            "content": [
-                {"component": "VCard", "props": {"variant": "tonal"}, "content": [
-                    {"component": "VCardText", "props": {"class": "d-flex align-center"}, "content": [
-                        {"component": "VIcon", "props": {"icon": icon, "size": 30,
-                                                         "color": "primary", "class": "me-3"}},
-                        {"component": "div", "content": [
-                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                             "text": title},
-                            {"component": "div", "props": {"class": "text-h6 font-weight-bold"},
-                             "text": value},
-                        ]},
-                    ]},
-                ]},
-            ],
-        }
-
-    # ------------------------------------------------------------------
-    # API
-    # ------------------------------------------------------------------
+        status = (f"上次运行：{stats.get('last_run_text', '尚未运行')}"
+                  f"｜新增 {stats.get('last_added', 0)}｜失败 {stats.get('last_failed', 0)}"
+                  f"｜待重试 {_to_int(stats.get('pending_retry'), 0)}")
+        if not self._enabled:
+            status = "插件没开｜" + status
+        return [
+            {"component": "div", "content": buttons},
+            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
+             "text": status},
+        ]
 
     def get_api(self) -> List[Dict[str, Any]]:
         """注册插件接口。"""
