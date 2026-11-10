@@ -35,19 +35,13 @@ except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
 try:
-    from app import schemas
-
-    Response = schemas.Response
+    from schemas import Response
 except Exception:  # noqa: BLE001
-    from pydantic import BaseModel
-
-    class Response(BaseModel):  # type: ignore
-        """宿主不可用时的三字段 envelope 降级实现。"""
-
-        success: bool = True
-        message: str = ""
-        data: Any = None
-
+    class Response:  # type: ignore
+        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
+            self.success = success
+            self.message = message
+            self.data = data
 
 try:
     _PLUGIN_MTYPE = MessageType.Plugin
@@ -129,13 +123,11 @@ def _ts_text(ts: Optional[float]) -> str:
         return str(ts)
 
 
-
-from . import roslink
 class RouterOSConfigGuard(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.3.1"
+    plugin_version = "1.1.0"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "routerosconfigguard_"
@@ -158,20 +150,13 @@ class RouterOSConfigGuard(_PluginBase):
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
-
-        # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持原配置不变
-        _ccfg = dict(config or {})
-        _rcc, _rcc_note = roslink.connection_overrides(_ccfg.get("ros_connection"), "std")
-        _ccfg.update(_rcc)
-        if _rcc_note:
-            (logger.info if _rcc else logger.warning)(f"RouterOS 连接中心：{_rcc_note}")
         self._enabled = bool(config.get("enabled"))
 
-        self._address = str(_ccfg.get("router_address") or "").strip()
-        self._port = int(_ccfg.get("router_port") or 443)
-        self._use_ssl = bool(_ccfg.get("router_ssl", True))
-        self._username = str(_ccfg.get("router_username") or "").strip()
-        self._password = str(_ccfg.get("router_password") or "")
+        self._address = str(config.get("router_address") or "").strip()
+        self._port = int(config.get("router_port") or 443)
+        self._use_ssl = bool(config.get("router_ssl", True))
+        self._username = str(config.get("router_username") or "").strip()
+        self._password = str(config.get("router_password") or "")
 
         selected_sections = config.get("sections")
         if isinstance(selected_sections, str):
@@ -244,7 +229,9 @@ class RouterOSConfigGuard(_PluginBase):
             "name": "RouterOS 配置备份与漂移检测",
             "trigger": trigger,
             "func": self.start_run,
-            "kwargs": {"trigger": "定时轮询", "prefer_thread": True},
+            # kwargs 是展开给 APScheduler.add_job 的调度参数，绝不能含 trigger；
+            # 插件 func 由 MP 无参调用，触发来源/线程偏好放在 func 默认值里。
+            "kwargs": {},
         }]
 
     # ------------------------------------------------------------------
@@ -256,7 +243,6 @@ class RouterOSConfigGuard(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "router_address": "",
-            "ros_connection": "",
             "router_port": 443,
             "router_ssl": True,
             "router_username": "",
@@ -291,28 +277,10 @@ class RouterOSConfigGuard(_PluginBase):
             return {"component": "VTextField", "props": p}
 
         content: List[dict] = [
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心"},
-                {"component": "VCardText", "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "ros_connection",
-                        "label": "已保存的路由器",
-                        "items": roslink.connection_items(),
-                        "clearable": True,
-                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
-                        "persistentHint": True}},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉是空的就直接手填，不影响使用。"},
-                ]},
-            ]},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-3"},
-             "content": {"text": "只存 MP 会生成结构化快照，方便对比和回滚；存 RouterOS 本机则是 .backup + .rsc。"
-                                 "两处都存就各留一份。漂移基线始终留在 MP 里。"}},
-            {"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3"},
-             "content": {"text": "账号要有 read/write/api 权限。.backup 含账号和证书，记得开加密、存好密码。"
-                                 "换设备或首次启用后去详情页点「最近设为基线」，不然每次都会报漂移。"
-                                 "第一次先开「试运行」看看。"}},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
+             "content": {"text": "备份位置可选：仅存 MP 插件目录（结构化快照，可对比/回滚）、仅存 RouterOS 本机"
+                                 "（系统备份 .backup + 配置导出 .rsc），或两处都存。漂移检测所需的基线是轻量"
+                                 "「检测状态」，无论哪种落点都会留在 MP。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时备份"}}]},
@@ -322,7 +290,6 @@ class RouterOSConfigGuard(_PluginBase):
                     {"component": "VSwitch", "props": {"model": "auto_baseline", "label": "首次自动设基线", "hint": "无基线时把首份快照设为基线"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "RouterOS 连接"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址",
@@ -337,12 +304,10 @@ class RouterOSConfigGuard(_PluginBase):
                     fld("router_password", "密码", {"type": "password"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "备份分区"},
             {"component": "VRow", "content": [
                 sel("sections", "备份分区（可多选）", section_items(), "默认勾选常用分区；敏感分区漂移将高亮告警"),
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "备份位置与加密"},
             {"component": "VLabel", "text": "备份位置"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -359,22 +324,22 @@ class RouterOSConfigGuard(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VSwitch", "props": {
                         "model": "backup_encrypt", "label": "加密 RouterOS 备份",
-                        "hint": "仅 routeros/both；.backup 不加密会带上账号和密码"}}]},
+                        "hint": "仅 routeros/both；强烈建议开启（.backup 未加密含敏感信息）"}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     fld("backup_password", "备份加密密码", {"type": "password",
                         "placeholder": "加密 .backup 用；留空则不加密"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "调度与高级"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "备份周期(cron)", {"placeholder": "0 3 * * *  每天 03:00"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    fld("keep", "保留份数", {"type": "number",
-                        "hint": "同时控制 MP 快照与 RouterOS 本机备份的轮转，超出的最旧一份会被删除",
-                        "persistent-hint": True})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                    fld("keep", "保留份数(MP快照/RouterOS备份组)", {"type": "number"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                     fld("timeout", "请求超时(秒)", {"type": "number"})]},
+                {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                    {"component": "VAlert", "props": {"type": "warning", "variant": "text"},
+                     "content": {"text": "keep 同时控制两端轮转"}}]},
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
@@ -392,7 +357,7 @@ class RouterOSConfigGuard(_PluginBase):
     # 执行控制
     # ------------------------------------------------------------------
 
-    def start_run(self, trigger: str = "手动", prefer_thread: bool = False) -> bool:
+    def start_run(self, trigger: str = "定时轮询", prefer_thread: bool = True) -> bool:
         with self._state_lock:
             if self._running:
                 return False
@@ -774,63 +739,102 @@ class RouterOSConfigGuard(_PluginBase):
     # 详情页
     # ------------------------------------------------------------------
 
-    def _action_button(self, label: str, api: str, *, confirm: bool = False,
-                       color: str = "", icon: str = "", variant: str = "tonal",
-                       method: str = "post") -> dict:
-        """详情页按钮：文字放组件级 text，带颜色/图标，避免出现灰色空按钮。"""
-        props: Dict[str, Any] = {"variant": variant, "size": "small", "class": "ma-1"}
-        if color:
-            props["color"] = color
-        if icon:
-            props["prepend-icon"] = icon
-        return {"component": "VBtn", "props": props, "text": label,
-                "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}",
-                                     "method": method, "params": {}, "confirm": confirm}}}
-
     def get_page(self) -> List[dict]:
-        """主界面只留按钮和一行状态，快照清单与检测明细看插件日志。"""
         status = self.current_status()
-        last = dict(status.get("last") or {})
-        diff = dict(last.get("diff") or {})
-        drift = "有漂移" if diff.get("has_drift") else ("无漂移" if last else "还没检测")
-        buttons = [
-            self._action_button("立即备份并检测", "run", color="primary",
-                                icon="mdi-backup-restore", variant="flat"),
-            self._action_button("测试连接", "test", color="info", icon="mdi-lan-connect"),
-            self._action_button("最近设为基线", "baseline", icon="mdi-flag-outline", confirm=True),
-            self._action_button("重载快照列表", "snapshots", icon="mdi-refresh", method="get"),
-            self._action_button("刷新 ROS 备份", "rosbackups", icon="mdi-file-refresh-outline"),
-            self._action_button("清空快照", "clear", color="error",
-                                icon="mdi-delete-outline", confirm=True),
-            self._action_button("停止", "stop", color="error",
-                                icon="mdi-stop-circle-outline", confirm=True),
-        ]
-        summary = (f"备份位置：{status.get('backup_target_label') or '-'}"
-                   f"｜MP 快照 {status.get('snapshots', 0)} 份"
-                   f"｜本机备份 {len(status.get('ros_files') or [])} 个"
-                   f"｜{drift}"
-                   f"｜上次 {last.get('time') or last.get('ts') or '-'}")
-        return [
-            {"component": "VCard", "props": {"variant": "tonal"}, "content": [
-                {"component": "VCardText", "content": [
-                    {"component": "div", "content": buttons},
-                ]},
+        index = self.snapshot_list()
+        ros_files = self.ros_file_list()
+        logs = list(self.get_data(_KEY_LOGS) or [])
+        last = status.get("last") or {}
+        diff = last.get("diff") or {}
+        target_label = BACKUP_TARGET_LABELS.get(self._backup_target, self._backup_target)
+
+        # 快照清单（MP 插件目录）
+        snap_lines = [f"{it.get('id')}｜{_ts_text(it.get('ts'))}｜{it.get('rows', 0)} 行｜"
+                      f"{'⚠ ' + it.get('drift', '') if it.get('has_drift') else '无漂移'}"
+                      for it in index[:12]] or ["暂无 MP 快照（当前备份位置可能不含 MP）"]
+
+        # RouterOS 本机备份清单
+        ros_lines = [f"{f.get('name')}｜{f.get('size', '')}｜{f.get('created', '')}"
+                     for f in ros_files[:12]] or ["暂无 RouterOS 本机备份文件"]
+
+        # 漂移明细
+        if diff.get("has_drift"):
+            drift_text = format_diff(diff, max_rows=8)
+        else:
+            drift_text = "无漂移" if last else "尚未执行检测"
+
+        buttons = []
+        for label, api in (("立即备份并检测", "run"), ("测试连接", "test"),
+                           ("最近设为基线", "baseline"), ("重载列表", "snapshots"),
+                           ("刷新ROS备份", "rosbackups"),
+                           ("清空快照", "clear"), ("停止", "stop")):
+            buttons.append({
+                "component": "VBtn", "props": {"variant": "tonal", "size": "small", "text": label},
+                "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
+                                     "params": {}, "confirm": label in ("清空快照", "停止")}},
+            })
+
+        def kv(label: str, value: str, md: int = 4) -> dict:
+            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
+                {"component": "VLabel", "text": label},
+                {"component": "div", "text": md_safe(value), "props": {"style": "white-space:pre-wrap"}},
+            ]}
+
+        # 所有动态文本统一经 md_safe 转义，避免 [x][y] 被当 Markdown 参考式链接
+        # 渲染成空药丸（截图红框问题的根因）。
+        def text_row(value: str, size: int = 12) -> dict:
+            return {"component": "div", "text": md_safe(value),
+                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
+
+        content_nodes: List[dict] = [
+            {"component": "VRow", "content": [
+                kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
+                kv("当前任务", "运行中" if status.get("running") else "待命"),
+                kv("备份位置", target_label),
+                kv("备份周期", self._cron),
+                kv("监控分区", f"{len(self._sections)} 个：{basename_from_types(self._sections)}"),
+                kv("基线时间", _ts_text(status.get("baseline_ts"))),
+                kv("MP 快照份数", str(status.get("snapshots", 0))),
+                kv("ROS 备份文件", str(len(ros_files))),
             ]},
-            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-             "text": md_safe(summary)},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "最近检测结果"},
+            text_row(drift_text, 13),
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "快照清单 · MP 插件目录（最近 12 份）"},
+            *[text_row(line) for line in snap_lines],
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "备份清单 · RouterOS 本机（.backup 系统备份 + .rsc 配置导出）"},
+            *[text_row(line) for line in ros_lines],
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"},
+            *[text_row(format_log_line(l.get("time", ""), l.get("level", ""), l.get("message", "")))
+              for l in logs[:20]],
+            {"component": "VRow", "props": {"class": "mt-4"}, "content": [
+                {"component": "VCol", "content": buttons}]},
         ]
+
+        return [{
+            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
+                "component": "VCardText", "content": content_nodes,
+            }],
+        }]
+
+    # ------------------------------------------------------------------
+    # API
+    # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
-        # path 为相对路径：宿主自动补齐 /api/v1/plugin/<PluginID> 前缀
+        base = f"/plugin/{PLUGIN_NAME}"
         return [
-            {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
-            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": "/baseline", "auth": "bear", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
-            {"path": "/snapshots", "auth": "bear", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
-            {"path": "/rosbackups", "auth": "bear", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
-            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/clear", "auth": "bear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
-            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": f"{base}/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
+            {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": f"{base}/baseline", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
+            {"path": f"{base}/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
+            {"path": f"{base}/rosbackups", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
+            {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": f"{base}/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
+            {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
         ]
 
     def api_run(self, _=None) -> Response:
