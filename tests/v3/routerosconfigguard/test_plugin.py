@@ -5,17 +5,22 @@ from __future__ import annotations
 import asyncio
 import time
 
-from app.plugins.routerosconfigguard import RouterOSConfigGuard, _KEY_BASELINE, _KEY_INDEX, _KEY_HEALTH
+from app.plugins.routerosconfigguard import (
+    RouterOSConfigGuard, _KEY_BASELINE, _KEY_INDEX, _KEY_ROS_FILES, _KEY_LAST_SNAP,
+)
 from app.plugins.routerosconfigguard.core import (
     DEFAULT_SECTIONS,
     SECTIONS,
+    backup_basename,
     diff_snapshots,
     format_diff,
+    format_log_line,
+    is_our_backup,
     make_snapshot,
     mask_secrets,
-    merge_names,
+    md_safe,
     normalize_row,
-    parse_extra_names,
+    prune_routeros_files,
     prune_snapshots,
     row_fingerprint,
     section_items,
@@ -23,7 +28,6 @@ from app.plugins.routerosconfigguard.core import (
     validate_cron,
 )
 from app.plugins.routerosconfigguard.clients import (
-    ServiceMonitorHelper,
     normalize_base_url,
 )
 
@@ -67,10 +71,20 @@ def test_validate_cron():
     assert validate_cron("* * * *")[0] is False       # 段数不足
 
 
-def test_parse_extra_names_and_merge():
-    assert parse_extra_names("QB, TR备用；客厅;Plex\nEmby") == ["QB", "TR备用", "客厅", "Plex", "Emby"]
-    assert parse_extra_names("") == []
-    assert merge_names(["A", "B"], ["B", "C"]) == ["A", "B", "C"]
+def test_md_safe_prevents_markdown_link_rendering():
+    """详情页 text 里的 [a][b] 会被当参考式链接渲染成空药丸，必须转义。"""
+    raw = "[2026-11-10 11:57:58][INFO] 备份完成 [防火墙]"
+    safe = md_safe(raw)
+    assert "[" not in safe and "]" not in safe
+    assert "［" in safe and "］" in safe
+    assert "2026-11-10" in safe and "备份完成" in safe
+
+
+def test_format_log_line_uses_fullwidth_separator():
+    line = format_log_line("2026-11-10 11:57:58", "INFO", "快照[完成]")
+    assert "｜" in line
+    assert "[" not in line and "]" not in line
+    assert "INFO" in line
 
 
 def test_mask_secrets():
@@ -183,32 +197,29 @@ def test_normalize_base_url():
     assert normalize_base_url("http://192.168.1.1:8080") == "http://192.168.1.1:8080"
 
 
-def test_downloader_options_from_mp():
-    opts = ServiceMonitorHelper.downloader_options()
-    values = [o["value"] for o in opts]
-    assert "QB家庭" in values and "TR备用" in values
-    assert "已禁用QB" not in values     # enabled=False 被过滤
-    assert "其它类型" not in values     # 非 qB/TR 被过滤
-    assert all("title" in o for o in opts)
+def test_backup_basename_and_filter():
+    base = backup_basename("rosguard", "20261110_115758_123")
+    assert base == "rosguard_20261110_115758_123"
+    assert is_our_backup(f"{base}.backup", "rosguard") is True
+    assert is_our_backup(f"{base}.rsc", "rosguard") is True
+    assert is_our_backup("other_20261110.rsc", "rosguard") is False
+    assert is_our_backup("rosguard_20261110_115758_123.txt", "rosguard") is False
 
 
-def test_media_options_from_mp():
-    opts = ServiceMonitorHelper.media_options()
-    values = [o["value"] for o in opts]
-    assert "客厅Emby" in values and "书房Plex" in values and "Jellyfin测试" in values
-    assert "其它媒体" not in values
-
-
-def test_service_health_online_offline():
-    health = ServiceMonitorHelper.check(["QB家庭", "TR备用"], ["客厅Emby", "不存在媒体"])
-    by = {h.name: h for h in health}
-    assert by["QB家庭"].online is True
-    assert by["TR备用"].online is False
-    assert by["客厅Emby"].online is True
-    assert by["不存在媒体"].online is False
-    assert "手动补充" in by["不存在媒体"].detail
-    # 序列化形态供详情页/通知使用
-    assert by["QB家庭"].to_dict()["online"] is True
+def test_prune_routeros_files_keeps_recent_pairs():
+    files = []
+    for sid in ("20261108_000000_000", "20261109_000000_000", "20261110_000000_000"):
+        files.append({".id": f"*b{sid}", "name": f"rosguard_{sid}.backup"})
+        files.append({".id": f"*r{sid}", "name": f"rosguard_{sid}.rsc"})
+    files.append({".id": "*9", "name": "unrelated.txt"})  # 非备份文件应保留不删
+    kept, removed = prune_routeros_files(files, "rosguard", keep_pairs=2)
+    kept_names = {f["name"] for f in kept}
+    removed_names = {f["name"] for f in removed}
+    assert "rosguard_20261110_000000_000.backup" in kept_names
+    assert "rosguard_20261109_000000_000.rsc" in kept_names
+    assert "rosguard_20261108_000000_000.backup" in removed_names
+    assert "rosguard_20261108_000000_000.rsc" in removed_names
+    assert "unrelated.txt" in kept_names  # 不碰非插件文件
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +228,7 @@ def test_service_health_online_offline():
 
 def test_contract_attributes():
     assert RouterOSConfigGuard.plugin_name == "RouterOSConfigGuard"
-    assert RouterOSConfigGuard.plugin_version == "1.0.0"
+    assert RouterOSConfigGuard.plugin_version == "1.1.0"
     assert RouterOSConfigGuard.plugin_author == "BackspaceM"
     assert RouterOSConfigGuard.plugin_desc
     assert RouterOSConfigGuard.plugin_icon.startswith("https://")
@@ -231,13 +242,30 @@ def test_init_and_state():
     assert p.get_state() is True
     assert p._address == "192.168.1.1"
     assert p._sections == DEFAULT_SECTIONS
+    assert p._backup_target == "mp"           # 默认备份位置是 MP
+    assert p._backup_prefix == "rosguard"
 
 
-def test_get_form_returns_tuple_with_dynamic_dropdowns():
+def test_init_backup_target_options():
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4", "backup_target": "both",
+                   "backup_prefix": "my router!", "backup_encrypt": True,
+                   "backup_password": "BkpSecret9"})
+    assert p._backup_target == "both"
+    assert p._backup_prefix == "myrouter"      # 非法字符被清洗
+    assert p._backup_password == "BkpSecret9"
+    # 非法目标回退 mp
+    p2 = _fresh_plugin()
+    p2.init_plugin({"enabled": True, "router_address": "1.2.3.4", "backup_target": "cloud"})
+    assert p2._backup_target == "mp"
+    # 密码脱敏同时覆盖路由密码与备份密码
+    assert "BkpSecret9" not in mask_secrets("pwd=BkpSecret9", p._secrets())
+
+
+def test_get_form_returns_tuple_with_backup_target_select():
     p = _fresh_plugin()
     form, defaults = p.get_form()
     assert isinstance(form, list) and isinstance(defaults, dict)
-    # 收集所有 VSelect 的 model -> items
     selects = {}
     def walk(nodes):
         for node in nodes or []:
@@ -245,27 +273,19 @@ def test_get_form_returns_tuple_with_dynamic_dropdowns():
                 selects[node["props"]["model"]] = node["props"].get("items", [])
             walk(node.get("content") if isinstance(node.get("content"), list) else None)
     walk(form)
-    assert "downloaders" in selects and "mediaservers" in selects and "sections" in selects
-    dl_values = [i["value"] for i in selects["downloaders"]]
-    assert "QB家庭" in dl_values and "TR备用" in dl_values
-    ms_values = [i["value"] for i in selects["mediaservers"]]
-    assert "客厅Emby" in ms_values
-    # 预留手动补充框存在
-    assert "downloaders_extra" in defaults and "mediaservers_extra" in defaults
-    # 默认值齐全
-    for key in ("enabled", "router_address", "cron", "keep", "notify_mode", "sections"):
+    # 备份位置下拉存在，含 mp/routeros/both 三选项
+    assert "backup_target" in selects
+    tgt_values = [i["value"] for i in selects["backup_target"]]
+    assert tgt_values == ["mp", "routeros", "both"]
+    assert "sections" in selects
+    # 不应再有下载器/媒体服务器下拉
+    assert "downloaders" not in selects and "mediaservers" not in selects
+    # 默认值齐全（含备份位置相关，且无监控字段）
+    for key in ("enabled", "router_address", "cron", "keep", "notify_mode", "sections",
+                "backup_target", "backup_prefix", "backup_encrypt", "backup_password"):
         assert key in defaults
-
-
-def test_init_merges_dropdown_and_extra():
-    p = _fresh_plugin()
-    p.init_plugin({
-        "enabled": True, "router_address": "192.168.1.1",
-        "downloaders": ["QB家庭"], "downloaders_extra": "外部QB, TR备用",
-        "mediaservers": ["客厅Emby"], "mediaservers_extra": "外部Plex",
-    })
-    assert p._downloaders == ["QB家庭", "外部QB", "TR备用"]
-    assert p._mediaservers == ["客厅Emby", "外部Plex"]
+    for key in ("downloaders", "mediaservers", "downloaders_extra", "mediaservers_extra", "check_services"):
+        assert key not in defaults
 
 
 def test_get_service_disabled_and_enabled():
@@ -283,18 +303,29 @@ def test_get_api_and_command():
     assert f"/plugin/RouterOSConfigGuard/run" in apis
     assert f"/plugin/RouterOSConfigGuard/baseline" in apis
     assert f"/plugin/RouterOSConfigGuard/status" in apis
+    assert f"/plugin/RouterOSConfigGuard/rosbackups" in apis
     cmds = {c["cmd"] for c in p.get_command()}
     assert "/rosguard_run" in cmds and "/rosguard_status" in cmds
 
 
-def test_get_page_renders():
+def test_get_page_renders_without_markdown_artifacts():
     p = _fresh_plugin()
     p.init_plugin({"enabled": True, "router_address": "1.2.3.4"})
+    # 塞入一条带方括号的日志（模拟曾经渲染成空药丸的输入）
+    p.save_data("rosguard_logs", [
+        {"time": "2026-11-10 11:57:58", "level": "INFO", "message": "快照[完成] 检测到[防火墙]变更"},
+    ])
     page = p.get_page()
     assert isinstance(page, list) and page[0]["component"] == "VCard"
     text = str(page)
-    for label in ("立即备份并检测", "测试连接", "最近设为基线", "清空快照"):
+    for label in ("立即备份并检测", "测试连接", "最近设为基线", "清空快照", "刷新ROS备份"):
         assert label in text
+    assert "备份位置" in text
+    # 关键：详情页里不应残留成对半角方括号（会被前端当 Markdown 参考式链接）
+    assert "[完成]" not in text and "[防火墙]" not in text
+    assert "［完成］" in text
+    # 不应再出现关联服务区块
+    assert "关联服务在线状态" not in text
 
 
 def test_onlyonce_reset_flips_config():
@@ -323,11 +354,14 @@ _DEFAULT_ROWS = {
 }
 
 
-def _seed_responses(sections, identity_name="ROS-Test", overrides=None):
+def _seed_responses(sections, identity_name="ROS-Test", overrides=None, *,
+                    backup_target="mp", ros_files=None, deletable_ids=()):
     """按 _async_run 的真实请求顺序注入响应：
 
     1) check():  GET /system/identity
     2) fetch():  GET /system/identity（元信息）  然后按 sections 顺序逐个 GET
+    3) 若 backup_target∈{routeros,both}：
+       POST /system/backup/save → POST /export → GET /file →（按需 DELETE /file/{id}）
     返回对象按队列顺序被消费，故顺序必须与插件一致。
     """
     overrides = overrides or {}
@@ -338,6 +372,12 @@ def _seed_responses(sections, identity_name="ROS-Test", overrides=None):
         assert sec is not None, f"未知分区 {key}"
         payload = overrides.get(key, _DEFAULT_ROWS.get(key, []))
         responses.append(FakeResponse(200, payload))
+    if backup_target in ("routeros", "both"):
+        responses.append(FakeResponse(200, {}))                 # backup/save
+        responses.append(FakeResponse(200, {}))                 # export
+        responses.append(FakeResponse(200, list(ros_files or [])))  # GET /file
+        for _fid in deletable_ids:
+            responses.append(FakeResponse(200, {}))            # DELETE /file
     return responses
 
 
@@ -347,8 +387,7 @@ def test_end_to_end_baseline_then_drift(monkeypatch=None):
         "enabled": True, "router_address": "192.168.1.1",
         "router_username": "admin", "router_password": "S3cretPass",
         "sections": ["ip_dns_static", "firewall_filter"],
-        "downloaders": ["QB家庭", "TR备用"], "mediaservers": ["客厅Emby"],
-        "auto_baseline": True, "notify_mode": "drift",
+        "backup_target": "mp", "auto_baseline": True, "notify_mode": "drift",
     })
 
     # 第 1 轮：建立基线
@@ -367,9 +406,7 @@ def test_end_to_end_baseline_then_drift(monkeypatch=None):
     snap1_id = r1["snapshot_id"]
     assert snap1_id
     assert len(p.get_data(_KEY_INDEX)) == 1
-    assert p.get_data(_KEY_HEALTH), "应记录关联服务健康"
-    by = {h["name"]: h for h in p.get_data(_KEY_HEALTH)}
-    assert by["QB家庭"]["online"] is True and by["TR备用"]["online"] is False
+    assert p.get_data(_KEY_LAST_SNAP), "应保存最近快照用于 routeros 模式设基线"
 
     # 第 2 轮：DNS 改动 + 防火墙新增一条 → 应检测漂移
     AsyncRequestUtils.responses = _seed_responses(
@@ -404,6 +441,70 @@ def test_end_to_end_baseline_then_drift(monkeypatch=None):
     p._notify_mode = "none"
     p._notify_result(r2, "测试-静默")
     assert not _PluginBase.POSTED
+
+
+def test_end_to_end_routeros_backup_only():
+    """仅存 RouterOS：不写 MP 快照文件，但生成 .backup/.rsc，基线仍留 MP。"""
+    AsyncRequestUtils.calls.clear()
+    p = _fresh_plugin()
+    p.init_plugin({
+        "enabled": True, "router_address": "192.168.1.1",
+        "backup_target": "routeros", "backup_prefix": "rosguard",
+        "backup_encrypt": True, "backup_password": "BkpSecret9",
+        "sections": ["ip_dns_static"], "auto_baseline": True, "keep": 2,
+    })
+    ros_files = [
+        {".id": "*a", "name": "rosguard_20261110_115758_123.backup", "size": "15KiB", "creation-time": "nov/10/2026 11:57:58"},
+        {".id": "*b", "name": "rosguard_20261110_115758_123.rsc", "size": "3KiB", "creation-time": "nov/10/2026 11:57:58"},
+    ]
+    AsyncRequestUtils.responses = _seed_responses(
+        ["ip_dns_static"], backup_target="routeros", ros_files=ros_files,
+    )
+    r = asyncio.run(p._async_run("ROS备份"))
+    assert r["ok"] is True
+    assert r["backup_target"] == "routeros"
+    assert r["ros_backup"]["done"] is True
+    base = r["ros_backup"]["basename"]
+    assert base.startswith("rosguard_")
+    assert f"{base}.backup" in r["ros_backup"]["files"]
+    assert f"{base}.rsc" in r["ros_backup"]["files"]
+    assert r["snapshot_id"] == ""          # 仅 ROS 模式不写 MP 快照文件
+    assert p.snapshot_list() == []
+    assert p.get_data(_KEY_BASELINE) is not None   # 基线始终留 MP
+    assert p.get_data(_KEY_ROS_FILES), "应记录 RouterOS 本机备份清单"
+    # backup/save 的 json body 含加密密码
+    save_calls = [c for c in AsyncRequestUtils.calls if c[1].endswith("/system/backup/save")]
+    assert save_calls and save_calls[-1][2].get("json", {}).get("password") == "BkpSecret9"
+
+
+def test_end_to_end_both_targets_with_rotation():
+    """两处都存：MP 写快照，ROS 生成备份并按 keep 轮转删除旧组。"""
+    AsyncRequestUtils.calls.clear()
+    p = _fresh_plugin()
+    p.init_plugin({
+        "enabled": True, "router_address": "192.168.1.1",
+        "backup_target": "both", "backup_prefix": "rosguard",
+        "backup_encrypt": False, "sections": ["ip_dns_static"],
+        "auto_baseline": True, "keep": 1,
+    })
+    ros_files = [
+        {".id": "*new", "name": "rosguard_20261110_000000_000.backup"},
+        {".id": "*newr", "name": "rosguard_20261110_000000_000.rsc"},
+        {".id": "*old", "name": "rosguard_20261101_000000_000.backup"},
+        {".id": "*oldr", "name": "rosguard_20261101_000000_000.rsc"},
+    ]
+    # 新快照 sid 取当前时间，字典序一定大于 20261110（除非跨到更早，测试内即时生成不会）
+    AsyncRequestUtils.responses = _seed_responses(
+        ["ip_dns_static"], backup_target="both", ros_files=ros_files,
+        deletable_ids=("*old", "*oldr"),
+    )
+    r = asyncio.run(p._async_run("双份"))
+    assert r["ok"] is True and r["ros_backup"]["done"] is True
+    assert r["snapshot_id"], "both 模式应写 MP 快照"
+    assert len(p.get_data(_KEY_INDEX)) == 1
+    assert r["ros_backup"]["removed"] == 2, "应删除旧的一组 .backup+.rsc"
+    del_calls = [c for c in AsyncRequestUtils.calls if c[0] == "DELETE"]
+    assert len(del_calls) == 2
 
 
 def test_end_to_end_no_drift(monkeypatch=None):
