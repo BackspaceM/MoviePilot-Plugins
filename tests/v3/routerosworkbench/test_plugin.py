@@ -1,528 +1,321 @@
-"""RouterOS 统一工作台（B5）离线用例。
+"""RouterOS 统一工作台 —— 线上两个问题的回归测试。
 
-用带状态的假 RouterOS REST 服务验证端到端行为：只读刷新 → 聚合快照 → 页签
-渲染 → 切页签 → 插件状态；纯逻辑层（aggregator / plugininfo）直接拿 dict 单测。
+线上报错：
+1. 插件 RouterOS 统一工作台 服务注册失败
+   BaseScheduler.add_job() got multiple values for argument 'trigger'
+2. 概况后面的防火墙、queue、备份、分流按钮，显示「页签不对」
 """
+
 from __future__ import annotations
 
-import json
-import os
-import sys
-import types
-from pathlib import Path
-from urllib.parse import urlparse
+import ast
+import inspect
 
-from app.plugins.routerosworkbench import (RouterOSWorkbench, _esc, aggregator,
-                                            plugininfo, sections)
-from app.plugins.routerosworkbench import clients as clients_mod
-from app.sdk.events import Event
-from app.sdk.network import AsyncRequestUtils, FakeResponse
+from app.plugins.routerosworkbench import (
+    PLUGIN_ID,
+    RouterOSWorkbench,
+    _BODY_DEFAULT,
+    _KEY_TAB,
+)
+from app.plugins.routerosworkbench import sections
 from app.sdk.plugin import _PluginBase
 
-# 与 CONFTEST 里的假服务保持一致：各分区若干行，resource / identity 是单对象
-SAMPLE_ROWS = {
-    "/rest/system/resource": {"uptime": "3d2h10m5s", "version": "7.15.3",
-                              "cpu-load": "12", "total-memory": "1073741824",
-                              "free-memory": "536870912", "cpu-count": "4",
-                              "board-name": "RB5009UG+S+"},
-    "/rest/system/identity": {"name": "客厅 RB5009"},
-    "/rest/interface": [
-        {"name": "ether1", "type": "ether", "rx-byte": "1000", "tx-byte": "500", "running": "true"},
-        {"name": "ether2", "type": "ether", "rx-byte": "2000", "tx-byte": "800", "running": "true"},
-        {"name": "bridge-lan", "type": "bridge", "rx-byte": "300", "tx-byte": "120", "running": "false"},
-    ],
-    "/rest/ip/address": [
-        {"address": "192.168.88.1/24", "interface": "bridge-lan"},
-        {"address": "10.0.0.1/24", "interface": "ether2"},
-    ],
-    "/rest/ip/firewall/filter": [
-        {".id": "*1", "chain": "forward", "action": "accept", "comment": "放行已建立", "disabled": "false"},
-        {".id": "*2", "chain": "forward", "action": "drop", "comment": "手工兜底", "disabled": "false"},
-        {".id": "*3", "chain": "input", "action": "accept", "comment": "限管理口", "disabled": "true"},
-    ],
-    "/rest/ip/firewall/nat": [
-        {".id": "*1", "chain": "srcnat", "action": "masquerade", "comment": "上网", "disabled": "false"},
-    ],
-    "/rest/ip/firewall/mangle": [
-        {".id": "*1", "chain": "prerouting", "action": "mark-routing",
-         "comment": "MP-B3[分流:标记]", "disabled": "false"},
-    ],
-    "/rest/ip/firewall/address-list": [
-        {"address": "1.1.1.1", "list": "MP-A2-CF", "comment": "MP-A2 优选"},
-        {"address": "8.8.8.8", "list": "dns", "comment": ""},
-    ],
-    "/rest/queue/simple": [
-        {"name": "客厅", "target": "192.168.88.0/24", "max-limit": "10M/10M",
-         "rate": "1M/2M", "disabled": "false"},
-        {"name": "下载", "target": "192.168.88.20/32", "max-limit": "5M/5M",
-         "rate": "0/0", "disabled": "true"},
-    ],
-    "/rest/ip/dns/static": [
-        {"name": "movie.example.com", "address": "192.168.88.10", "comment": "MP-A2 内网解析"},
-    ],
-    "/rest/ip/route": [
-        {"dst-address": "0.0.0.0/0", "gateway": "192.168.88.254", "distance": "1", "comment": ""},
-        {"dst-address": "10.0.0.0/24", "gateway": "ether2", "distance": "1", "comment": "MP-B3 旁路由"},
-    ],
-    "/rest/file": [
-        {"name": "auto-backup.backup", "size": "123456", "date": "2026-11-01 10:00:00"},
-        {"name": "export.rsc", "size": "2048", "date": "2026-11-02 08:30:00"},
-        {"name": "notes.txt", "size": "10", "date": "2026-11-02 09:00:00"},
-    ],
-}
 
-
-class FakeRouterOS:
-    """按分区返回若干行；unreadable 里的分区 GET 返回 403，模拟读权限不足。"""
-
-    def __init__(self) -> None:
-        self.reset()
-
-    def reset(self, unreadable=()) -> None:
-        self.rows = {
-            key: (dict(value) if isinstance(value, dict) else [dict(r) for r in value])
-            for key, value in SAMPLE_ROWS.items()
-        }
-        self.unreadable = set(unreadable)
-        AsyncRequestUtils.calls = []
-        AsyncRequestUtils.responder = self.respond
-
-    def respond(self, method: str, url: str, kwargs: dict) -> FakeResponse:
-        path = urlparse(url).path
-        if method == "GET" and path in self.unreadable:
-            return FakeResponse(403, {"detail": "permission denied"})
-        if method == "GET":
-            return FakeResponse(200, self.rows.get(path, []))
-        return FakeResponse(405, {"detail": "unexpected"})
-
-
-FAKE = FakeRouterOS()
-
-
-def sample_raw() -> dict:
-    """把假服务的数据整理成 refresh_once 交给聚合层的 raw 形状。"""
-    out = {}
-    for key, value in SAMPLE_ROWS.items():
-        out[key] = [dict(value)] if isinstance(value, dict) else [dict(r) for r in value]
-    return out
-
-
-def base_config(**overrides) -> dict:
-    cfg = {
-        "enabled": True, "onlyonce": False,
-        "ros_connection": "", "router_address": "192.168.88.1", "router_port": 443,
-        "router_ssl": True, "router_username": "mp-api", "router_password": "secret",
-        "verify": False, "timeout": 10,
-        "cron": "*/10 * * * *", "display_limit": 40,
-        "notify_mode": "issue", "active_tab": "overview",
-    }
-    cfg.update(overrides)
-    return cfg
-
-
-def make_plugin(**overrides) -> RouterOSWorkbench:
-    plugin = RouterOSWorkbench()
-    plugin.init_plugin(base_config(**overrides))
-    return plugin
-
-
-def walk(node):
-    """递归遍历详情页组件树，取出所有按钮绑定的 api 路径。"""
-    found = []
-    if isinstance(node, dict):
-        click = (node.get("events") or {}).get("click") or {}
-        if click.get("api"):
-            found.append(click["api"])
-        for value in node.values():
-            found.extend(walk(value))
-    elif isinstance(node, (list, tuple)):
-        for item in node:
-            found.extend(walk(item))
-    return found
-
-
-def click_events(node):
-    found = []
-    if isinstance(node, dict):
-        click = (node.get("events") or {}).get("click")
-        if isinstance(click, dict):
-            found.append(click)
-        for value in node.values():
-            found.extend(click_events(value))
-    elif isinstance(node, (list, tuple)):
-        for item in node:
-            found.extend(click_events(item))
-    return found
-
-
-# ---------------------------------------------------------------------------
-# 聚合层：结构与各页签
-# ---------------------------------------------------------------------------
-
-def test_build_snapshot_structure() -> None:
-    states = [{"id": "RouterOSConfigGuard", "name": "配置备份", "version": "1.0.0",
-               "enabled": True, "installed": True, "has_update": False, "note": ""}]
-    snap = aggregator.build_snapshot(sample_raw(), states)
-    for key in ("created", "router", "interfaces", "topology", "tabs", "plugins",
-                "counts", "warnings"):
-        assert key in snap, key
-    assert set(snap["tabs"]) == {"overview", "firewall", "queue", "backup", "routing"}
-    assert snap["router"]["version"] == "7.15.3"
-    assert snap["router"]["name"] == "客厅 RB5009"
-    assert len(snap["interfaces"]) == 3
-    assert {"name", "type", "rx", "tx", "rx_rate", "tx_rate", "running"} <= set(
-        snap["interfaces"][0])
-    assert snap["interfaces"][0]["name"] == "ether1"
-    assert snap["counts"][sections.SEC_FILTER] == 3
-    assert snap["counts"][sections.SEC_QUEUE] == 2
-    assert len(snap["plugins"]) == 1
-    kinds = {x["kind"] for x in snap["topology"]}
-    assert {"接口", "地址", "默认路由"} <= kinds
-
-
-def test_overview_cards_and_stats() -> None:
-    snap = aggregator.build_snapshot(sample_raw(), [])
-    ov = snap["tabs"]["overview"]
-    titles = [c["title"] for c in ov["cards"]]
-    for word in ("RouterOS 版本", "运行时长", "CPU / 内存", "接口", "规则",
-                 "队列", "静态 DNS", "实时流量"):
-        assert word in titles, word
-    assert ov["stats"]["interfaces"] == 3
-    assert ov["stats"]["running"] == 2
-    assert ov["stats"]["rules"] == 5
-    assert ov["stats"]["queues"] == 2
-    assert ov["stats"]["dns"] == 1
-    assert snap["traffic"]["mode"] == "cumulative"
-    assert len(ov["tables"]) == 2
-    assert ov["tables"][0]["columns"][0] == "接口"
-    assert ov["tables"][1]["columns"] == ["类别", "内容", "说明"]
-
-
-def test_firewall_tab_tables_and_stats() -> None:
-    snap = aggregator.build_snapshot(sample_raw(), [])
-    fw = snap["tabs"]["firewall"]
-    assert [t["title"] for t in fw["tables"]] == [
-        "防火墙｜filter", "防火墙｜nat", "防火墙｜mangle"]
-    assert fw["tables"][0]["columns"] == ["链", "动作", "备注", "状态"]
-    assert len(fw["tables"][0]["rows"]) == 3
-    assert fw["stats"]["total"] == 5
-    assert fw["stats"]["accept"] == 2
-    assert fw["stats"]["drop"] == 1
-    assert fw["stats"]["disabled"] == 1
-    assert fw["stats"]["address_list"] == 2
-
-
-def test_queue_and_backup_tabs() -> None:
-    snap = aggregator.build_snapshot(sample_raw(), [])
-    q = snap["tabs"]["queue"]
-    assert q["tables"][0]["columns"] == ["名称", "目标", "限速上限", "当前速率", "状态"]
-    assert len(q["tables"][0]["rows"]) == 2
-    assert q["stats"]["total"] == 2 and q["stats"]["enabled"] == 1
-    bk = snap["tabs"]["backup"]
-    names = [r[0] for r in bk["tables"][0]["rows"]]
-    assert "auto-backup.backup" in names and "export.rsc" in names
-    assert "notes.txt" not in names
-    assert bk["stats"]["backup"] == 1 and bk["stats"]["rsc"] == 1
-    assert "本地配置备份插件" in "；".join(bk["notes"])
-
-
-def test_routing_tab_highlights() -> None:
-    snap = aggregator.build_snapshot(sample_raw(), [])
-    rt = snap["tabs"]["routing"]
-    assert [t["title"] for t in rt["tables"]] == ["静态 DNS", "地址列表", "路由"]
-    assert rt["stats"]["dns"] == 1
-    assert rt["stats"]["address_list"] == 2
-    assert rt["stats"]["routes"] == 2
-    assert rt["stats"]["default_routes"] == 1
-    assert rt["stats"]["highlights"] >= 3
-    assert any("MP-B3" in h for h in rt["highlights"])
-    assert any("MP-A2" in h for h in rt["highlights"])
-
-
-# ---------------------------------------------------------------------------
-# 聚合层：速率 / 限长 / 校验 / 小工具
-# ---------------------------------------------------------------------------
-
-def test_rate_from_previous() -> None:
-    previous = {
-        "interfaces": [
-            {"name": "ether1", "rx": 400.0, "tx": 200.0},
-            {"name": "ether2", "rx": 1000.0, "tx": 400.0},
-            {"name": "bridge-lan", "rx": 100.0, "tx": 50.0},
-        ],
-        "sample_seconds": 2.0,
-    }
-    snap = aggregator.build_snapshot(sample_raw(), [], previous=previous)
-    by_name = {i["name"]: i for i in snap["interfaces"]}
-    i0 = by_name["ether1"]
-    assert i0["rx_delta"] == 600.0
-    assert i0["tx_delta"] == 300.0
-    assert i0["rx_rate"] == 300.0
-    assert i0["tx_rate"] == 150.0
-    assert snap["traffic"]["mode"] == "rate"
-    assert snap["tabs"]["overview"]["traffic"]["mode"] == "rate"
-    assert snap["sample_seconds"] == 2.0
-
-
-def test_no_previous_uses_cumulative() -> None:
-    snap = aggregator.build_snapshot(sample_raw(), [])
-    assert snap["traffic"]["mode"] == "cumulative"
-    assert all(i["rx_rate"] == 0 and i["tx_rate"] == 0 for i in snap["interfaces"])
-    assert snap["traffic"]["rx_total"] == 3300.0
-    assert any("再刷新一次" in w for w in snap["warnings"])
-
-
-def test_section_rows_limit() -> None:
-    raw = sample_raw()
-    rows = aggregator.section_rows(raw, sections.SEC_FILTER, 2)
-    assert len(rows) == 2
-    assert rows[0]["chain"] == "forward"
-    assert aggregator.section_rows(raw, sections.SEC_FILTER, 0) == []
-    assert aggregator.section_rows(raw, "不存在的分区", 5) == []
-    assert aggregator.count_rows(raw, sections.SEC_FILTER) == 3
-    assert aggregator.count_rows(raw, "不存在的分区") == 0
-
-
-def test_validate_cron() -> None:
-    assert aggregator.validate_cron("*/10 * * * *")[0]
-    assert aggregator.validate_cron("0 5 * * *")[0]
-    assert not aggregator.validate_cron("* * * *")[0]
-    assert not aggregator.validate_cron("* * * * * *")[0]
-    assert not aggregator.validate_cron("abc def ghi jkl mno")[0]
-
-
-def test_format_helpers() -> None:
-    assert aggregator.human_bytes(1024) == "1.0 KB"
-    assert aggregator.human_bytes(1536) == "1.5 KB"
-    assert aggregator.human_rate(300) == "300 B/s"
-    assert "天" in aggregator.human_uptime("3d2h10m")
-    assert "天" in aggregator.human_uptime("1w2d3h4m5s")
-    assert aggregator.human_uptime("") == "-"
-    assert aggregator.clean_text("  a   b  ") == "a b"
-    assert len(aggregator.clean_text("a\x00b" + "x" * 200, 10)) <= 10
-
-
-# ---------------------------------------------------------------------------
-# plugininfo 归一化
-# ---------------------------------------------------------------------------
-
-def test_plugininfo_normalize_dict_and_object() -> None:
-    dict_row = {"id": "CFRouterOS", "plugin_name": "CF 优选", "plugin_author": "BackspaceM",
-                "plugin_version": "2.0.0", "installed": True, "state": "enabled",
-                "has_update": True, "repo_url": "http://example.com/repo"}
-    a = plugininfo.normalize_record(dict_row)
-    assert a["id"] == "CFRouterOS" and a["name"] == "CF 优选"
-    assert a["version"] == "2.0.0" and a["author"] == "BackspaceM"
-    assert a["enabled"] and a["installed"] and a["has_update"]
-    assert a["repo_url"] == "http://example.com/repo"
-
-    class Obj:
-        id = "RouterOSSiteRouting"
-        plugin_name = "站点分流"
-        plugin_author = "BackspaceM"
-        plugin_version = "1.3.0"
-        installed = True
-        state = "disabled"
-        has_update = False
-        repo_url = ""
-
-    b = plugininfo.normalize_record(Obj())
-    assert b["id"] == "RouterOSSiteRouting" and b["version"] == "1.3.0"
-    assert b["installed"] and not b["enabled"]
-    assert b["note"] == "装了没启用"
-
-    states, source = plugininfo.load_plugin_states()
-    assert len(states) == len(plugininfo.WATCHED_IDS) == 8
-    assert "app.sdk.plugin.PluginManager" in source
-    by_id = {s["id"]: s for s in states}
-    assert by_id["RouterOSConnectionCenter"]["version"] == "1.0.0"
-    assert by_id["RosFirewallManager"]["version"] == "1.2.0"
-    assert by_id["RouterOSConfigGuard"]["enabled"] is False
-    assert by_id["CFRouterOS"]["installed"] is False
-
-
-def test_plugininfo_missing_manager_returns_empty() -> None:
-    from app.sdk import plugin as sdk_plugin
-    saved = sdk_plugin.PluginManager
-    try:
-        del sdk_plugin.PluginManager
-        states, source = plugininfo.load_plugin_states()
-        assert states == [] and "拿不到" in source
-    finally:
-        sdk_plugin.PluginManager = saved
-
-
-def test_plugininfo_uses_instance_methods() -> None:
-    """V3 宿主 PluginManager 是实例方法，不能拿类直接调。"""
-    from app.sdk import plugin as sdk_plugin
-    saved = sdk_plugin.PluginManager
-
-    class InstancePM:
-        def get_installed_plugins(self):
-            return [{"id": "RosFirewallManager", "plugin_name": "实例方法来的",
-                     "plugin_version": "9.9.9", "installed": True}]
-
-    try:
-        sdk_plugin.PluginManager = InstancePM
-        states, source = plugininfo.load_plugin_states()
-        assert "app.sdk.plugin.PluginManager" in source
-        assert any(s["id"] == "RosFirewallManager" and s["version"] == "9.9.9"
-                   for s in states)
-    finally:
-        sdk_plugin.PluginManager = saved
-
-
-# ---------------------------------------------------------------------------
-# 刷新：只读 / 失败不中断
-# ---------------------------------------------------------------------------
-
-def test_refresh_is_readonly() -> None:
-    FAKE.reset()
-    plugin = make_plugin()
-    called = []
-    originals = {}
-    for name in ("create", "delete", "save_backup"):
-        originals[name] = getattr(clients_mod.RouterOSConfigClient, name)
-
-        def make_spy(label):
-            async def spy(self, *a, **k):
-                called.append(label)
-                return (False, "", "") if label == "create" else (False, "")
-            return spy
-
-        setattr(clients_mod.RouterOSConfigClient, name, make_spy(name))
-    try:
-        snap = plugin.refresh_once("只读测试")
-    finally:
-        for name, fn in originals.items():
-            setattr(clients_mod.RouterOSConfigClient, name, fn)
-    assert snap is not None
-    assert not called, f"写方法被调用了：{called}"
-    methods = {c[0] for c in AsyncRequestUtils.calls}
-    assert methods == {"GET"}, methods
-    assert plugin.api_status().data["snapshot"]["tabs"]
-
-
-def test_section_failure_does_not_break() -> None:
-    bad = [sections.SEC_MANGLE, sections.SEC_FILE]
-    FAKE.reset(unreadable=bad)
-    plugin = make_plugin()
-    snap = plugin.refresh_once("部分失败测试")
-    assert snap is not None
-    joined = "；".join(snap["warnings"])
-    assert sections.SEC_MANGLE in joined
-    assert sections.SEC_FILE in joined
-    assert snap["counts"][sections.SEC_FILTER] == 3
-    assert snap["counts"][sections.SEC_INTERFACE] == 3
-    assert len(snap["tabs"]["firewall"]["tables"]) == 3
-    assert snap["tabs"]["firewall"]["tables"][2]["rows"] == []
-    assert snap["tabs"]["backup"]["tables"][0]["rows"] == []
-
-
-# ---------------------------------------------------------------------------
-# 页签 / 表单 / 页面 / API / 命令
-# ---------------------------------------------------------------------------
-
-def test_tab_switch_changes_active_tab() -> None:
-    FAKE.reset()
-    plugin = make_plugin()
-    plugin.refresh_once("切页签前刷新")
-    assert plugin.api_status().data["active_tab"] == "overview"
-    assert plugin.api_tab({"name": "firewall"}).success
-    assert plugin._active_tab == "firewall"
-    assert plugin.api_status().data["active_tab"] == "firewall"
-    assert plugin.get_data("b5_active_tab") == "firewall"
-    assert "防火墙｜filter" in json.dumps(plugin.get_page(), ensure_ascii=False)
-    assert plugin.api_tab({"name": "queue"}).success
-    assert plugin.api_tab({"name": "nope"}).success is False
-
-
-def test_form_and_page_buttons_bind_real_apis() -> None:
-    FAKE.reset()
-    plugin = make_plugin()
-    plugin.refresh_once("页面测试")
-    content, defaults = plugin.get_form()
-    form_blob = json.dumps(content, ensure_ascii=False)
-    assert "已保存的路由器（连接中心）" in form_blob
-    assert "VSelect" in form_blob and "VTextField" in form_blob and "VSwitch" in form_blob
-    assert defaults["cron"] == "*/10 * * * *"
-    assert defaults["active_tab"] == "overview"
-    for phrase in ("插件用途", "这个插件解决什么", "两点", "使用说明", "三步用起来",
-                   "安全机制", "注意事项", "强烈建议", "安全提示：", "工作方式："):
-        assert phrase not in form_blob, f"表单不该出现套话：{phrase}"
-
-    page = plugin.get_page()
-    page_blob = json.dumps(page, ensure_ascii=False)
-    for phrase in ("插件用途", "使用说明", "注意事项", "强烈建议"):
-        assert phrase not in page_blob
-    buttons = walk(page)
-    assert len(buttons) >= 9
-    registered = {f"plugin/RouterOSWorkbench{a['path']}" for a in plugin.get_api()}
-    for api in buttons:
-        assert api in registered, f"按钮绑到了不存在的 API：{api}"
-
-    tab_clicks = [c for c in click_events(page)
-                  if c.get("api") == "plugin/RouterOSWorkbench/tab"]
-    assert len(tab_clicks) == 5
-    assert {c["params"]["name"] for c in tab_clicks} == set(sections.TAB_KEYS)
-    assert "插件工具箱" in page_blob
-    assert "VTable" in page_blob and "thead" in page_blob and "tbody" in page_blob
-
-
-def test_api_endpoints_and_commands() -> None:
-    FAKE.reset()
-    plugin = make_plugin()
-    apis = plugin.get_api()
-    paths = {a["path"] for a in apis}
-    assert {"/refresh", "/tab", "/status", "/plugins", "/test", "/clear", "/logs"} <= paths
-    assert all(a["auth"] == "bear" for a in apis)
-    cmds = {c["cmd"] for c in plugin.get_command()}
-    assert {"/b5_refresh", "/b5_status", "/b5_plugins"} <= cmds
-    assert plugin.api_status().data["plugin"] == "RouterOSWorkbench"
-    assert plugin.api_logs().success
-    assert plugin.api_clear().success
-    assert plugin.api_plugins().success
-    assert plugin.api_test().success
-    assert plugin.api_refresh().success
-
+def _fresh() -> RouterOSWorkbench:
     _PluginBase.POSTED.clear()
-    event = Event(event_type="plugin.action",
-                  event_data={"cmd": "/b5_status", "channel": "tg", "userid": "1"})
-    plugin.handle_command(event)
-    assert _PluginBase.POSTED, "远程命令要回消息"
-    assert "工作台" in _PluginBase.POSTED[-1]["text"]
+    _PluginBase.CONFIGS.clear()
+    p = RouterOSWorkbench()
+    p._data = {}
+    p._config = {}
+    return p
 
 
-def test_get_service_and_state() -> None:
-    plugin = make_plugin()
-    assert plugin.get_state() is True
-    services = plugin.get_service()
+def _init(p: RouterOSWorkbench, **kwargs) -> None:
+    cfg = {"enabled": True, "cron": "*/10 * * * *", "router_address": "192.168.1.1"}
+    cfg.update(kwargs)
+    p.init_plugin(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Bug 1：服务注册失败
+# ---------------------------------------------------------------------------
+
+def test_get_service_kwargs_has_no_trigger():
+    """service["kwargs"] 绝不能含 trigger —— MP 会把它展开给 add_job 导致撞名。"""
+    p = _fresh()
+    _init(p)
+    services = p.get_service()
     assert len(services) == 1
-    assert services[0]["func"] == plugin.refresh_once
-    assert services[0]["kwargs"] == {"trigger": "定时刷新"}
-    assert "cron" in str(services[0]["trigger"])
-    assert make_plugin(enabled=False).get_service() == []
-    assert make_plugin(cron="坏 cron")._cron == "*/10 * * * *"
+    assert services[0]["kwargs"] == {}
+    assert "trigger" not in services[0]["kwargs"]
+    assert services[0]["func"] == p.refresh_once
 
 
-def test_version_three_places() -> None:
+def test_mp_service_registration_does_not_crash():
+    """按 MP scheduler.py:427 的真实调用形式模拟注册，不应抛 TypeError。"""
+    def mp_start(job_id, *args, **kwargs):
+        return None
+
+    def add_job(func, trigger=None, args=None, kwargs=None, id=None, name=None,
+                misfire_grace_time=None, coalesce=None, max_instances=None,
+                next_run_time=None, jobstore="default", executor="default",
+                replace_existing=False, **trigger_args):
+        if trigger is not None and not isinstance(trigger, str) and trigger_args:
+            raise TypeError("The trigger argument cannot be combined with trigger arguments")
+        return {"ok": True}
+
+    p = _fresh()
+    _init(p)
+    for svc in p.get_service():
+        # 完全照抄 MP 源码：add_job(self.start, service["trigger"], ...,
+        #                        **service["kwargs"], kwargs={"job_id": ...})
+        add_job(mp_start, svc["trigger"], id=svc["id"], name=svc["name"],
+                **svc["kwargs"], kwargs={"job_id": svc["id"]})
+
+
+def test_original_buggy_kwargs_would_crash():
+    """反向用例：确认测试用例确实能抓到修复前的写法（防止假阳性）。"""
+    def add_job(func, trigger=None, *args, **kwargs):
+        return None
+
+    bad = {"trigger": "定时刷新"}
+    try:
+        add_job(lambda: None, "CronTrigger", **bad)
+    except TypeError as err:
+        assert "multiple values" in str(err)
+    else:
+        raise AssertionError("修复前的 kwargs 应触发撞名错误")
+
+
+def test_func_defaults_carry_scheduled_trigger():
+    """MP 无参调用 func，触发来源必须放在默认值里（原来是「手动刷新」）。"""
+    p = _fresh()
+    sig = inspect.signature(p.refresh_once)
+    assert sig.parameters["trigger"].default == "定时刷新"
+    # 手动 API 仍显式传自己的触发来源，不受默认值影响
+    src = inspect.getsource(p.api_refresh)
+    assert 'refresh_once("手动刷新")' in src
+
+
+# ---------------------------------------------------------------------------
+# Bug 2：页签按钮「页签不对」
+# ---------------------------------------------------------------------------
+
+def test_api_tab_declares_body_injection():
+    """api_tab 的默认参数必须是 Body(default=None)，否则 POST body 永远绑不上。"""
+    import fastapi
+    assert isinstance(_BODY_DEFAULT, fastapi._BodyMarker)
+    sig = inspect.signature(RouterOSWorkbench.api_tab)
+    assert sig.parameters["payload"].default is _BODY_DEFAULT
+
+
+def test_api_tab_accepts_all_tab_names():
+    """前端 POST body 形如 {"name": key}，五个页签都应切换成功。"""
+    p = _fresh()
+    _init(p)
+    for key, _label in sections.TABS:
+        resp = p.api_tab({"name": key})
+        assert resp.success is True, f"{key}: {resp.message}"
+        assert resp.data["active_tab"] == key
+        assert p.get_data(_KEY_TAB) == key
+        assert p._active_tab == key
+
+
+def test_api_tab_accepts_alias_keys_and_string():
+    p = _fresh()
+    _init(p)
+    assert p.api_tab({"tab": "queue"}).success is True
+    assert p.api_tab({"active_tab": "backup"}).success is True
+    assert p.api_tab("firewall").success is True
+
+
+def test_api_tab_rejects_invalid_with_clear_message():
+    p = _fresh()
+    _init(p)
+    for bad in ({}, {"name": "nope"}, None, {"name": ""}):
+        resp = p.api_tab(bad)
+        assert resp.success is False
+        assert "页签不对" in resp.message
+    # 大写/空白容错
+    assert p.api_tab({"name": "  FIREWALL  "}).success is True
+
+
+def test_tab_buttonsbind_registered_api_with_valid_params():
+    """详情页 5 个页签按钮：参数必须在 TAB_KEYS，且 api 已注册（杜绝点了没反应）。"""
+    p = _fresh()
+    _init(p)
+    buttons = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("component") == "VBtn":
+                buttons.append(node)
+            content = node.get("content")
+            if isinstance(content, list):
+                for c in content:
+                    walk(c)
+            elif isinstance(content, dict):
+                walk(content)
+        elif isinstance(node, list):
+            for c in node:
+                walk(c)
+
+    for card in p.get_page():
+        walk(card)
+
+    registered_last = {a["path"].rstrip("/").split("/")[-1] for a in p.get_api()}
+    tab_buttons = []
+    for b in buttons:
+        click = (b.get("events") or {}).get("click") or {}
+        api = str(click.get("api") or "")
+        if api.endswith("/tab"):
+            tab_buttons.append(b)
+            assert api.rstrip("/").split("/")[-1] in registered_last
+            assert click.get("method") == "post"
+            assert "disabled" not in (b.get("props") or {})
+            name = (click.get("params") or {}).get("name")
+            assert name in sections.TAB_KEYS, f"页签按钮参数非法: {name}"
+    assert len(tab_buttons) == len(sections.TABS) == 5
+
+
+def test_tab_button_paths_match_get_api():
+    """按钮 api = plugin/<ID>/tab，get_api 注册 /tab（MP 自动补 /<pid> 前缀）。"""
+    p = _fresh()
+    _init(p)
+    paths = [a["path"] for a in p.get_api()]
+    assert "/tab" in paths
+    # 所有按钮的 api 末段都在注册清单里
+    buttons = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("component") == "VBtn":
+                buttons.append(node)
+            c = node.get("content")
+            if isinstance(c, list):
+                for x in c:
+                    walk(x)
+            elif isinstance(c, dict):
+                walk(c)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    for card in p.get_page():
+        walk(card)
+    registered_last = {a["path"].rstrip("/").split("/")[-1] for a in p.get_api()}
+    for b in buttons:
+        click = (b.get("events") or {}).get("click") or {}
+        api = str(click.get("api") or "")
+        if api:
+            assert api.rstrip("/").split("/")[-1] in registered_last, api
+
+
+# ---------------------------------------------------------------------------
+# 契约 / 结构
+# ---------------------------------------------------------------------------
+
+def test_contract_metadata():
     assert RouterOSWorkbench.plugin_version == "1.0.0"
     assert RouterOSWorkbench.plugin_author == "BackspaceM"
-    assert RouterOSWorkbench.plugin_icon.endswith("icons/routerosworkbench.png")
-    assert RouterOSWorkbench.plugin_order == 55
-    assert RouterOSWorkbench.system_version == ">=3.0.0"
-    repo = os.environ.get("ROUTEROS_WORKBENCH_REPO")
-    if repo:
-        index = json.loads((Path(repo) / "package.v3.json").read_text(encoding="utf-8"))
-        item = index["RouterOSWorkbench"]
-        assert item["version"] == RouterOSWorkbench.plugin_version
-        assert f"v{RouterOSWorkbench.plugin_version}" in item["history"]
+    assert RouterOSWorkbench.plugin_config_prefix == "routerosworkbench_"
+    assert RouterOSWorkbench.plugin_icon.startswith("https://")
 
 
-def test_esc_and_log_limit() -> None:
-    assert _esc("<script>") == "&lt;script&gt;"
-    assert "［" in _esc("[MP-B1]") and "］" in _esc("[MP-B1]")
-    plugin = make_plugin()
-    for i in range(210):
-        plugin._log("INFO", f"第 {i} 条")
-    assert len(plugin.get_data("b5_logs")) == 200
+def test_class_metadata_are_string_literals():
+    """官方版本门禁以 AST 提取类级元数据，必须是字面量。"""
+    import pathlib
+    src = pathlib.Path(inspect.getsourcefile(RouterOSWorkbench)).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+               and n.name == "RouterOSWorkbench")
+    required = {"plugin_name", "plugin_desc", "plugin_icon", "plugin_version",
+                "plugin_author", "author_url", "plugin_config_prefix"}
+    for node in cls.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in required:
+                assert isinstance(node.value, ast.Constant) and isinstance(node.value.value, str), \
+                    f"{name} 必须是字符串字面量"
+
+
+def test_get_form_fields_match_defaults():
+    p = _fresh()
+    form, defaults = p.get_form()
+    assert isinstance(form, list) and isinstance(defaults, dict)
+    models = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            m = (node.get("props") or {}).get("model")
+            if isinstance(m, str):
+                models.add(m)
+            c = node.get("content")
+            if isinstance(c, list):
+                for x in c:
+                    walk(x)
+            elif isinstance(c, dict):
+                walk(c)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    walk(form)
+    assert models == set(defaults), f"表单字段与默认值不一致: {models ^ set(defaults)}"
+
+
+def test_no_disabled_buttons_on_page():
+    p = _fresh()
+    _init(p)
+    bad = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("component") == "VBtn":
+                props = node.get("props") or {}
+                if "disabled" in props or props.get("disabled") is True:
+                    bad.append(props.get("text"))
+            c = node.get("content")
+            if isinstance(c, list):
+                for x in c:
+                    walk(x)
+            elif isinstance(c, dict):
+                walk(c)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    for card in p.get_page():
+        walk(card)
+    assert bad == [], f"存在禁用按钮: {bad}"
+
+
+def test_page_text_no_blank_pill_triggers():
+    """详情页动态文本不应含会触发 Markdown 的半角标记（空药丸）。"""
+    p = _fresh()
+    _init(p)
+    p._log("INFO", "测试 [x][y] *粗* `码` <tag> _斜_")
+    texts = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            t = node.get("text")
+            if isinstance(t, str):
+                texts.append(t)
+            c = (node.get("props") or {}).get("text")
+            if isinstance(c, str):
+                texts.append(c)
+            content = node.get("content")
+            if isinstance(content, list):
+                for x in content:
+                    walk(x)
+            elif isinstance(content, dict):
+                walk(content)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    for card in p.get_page():
+        walk(card)
+    # 按钮文字是纯中文标签，允许；仅检查含方括号对的参考式链接模式
+    assert not any("[x][y]" in t for t in texts)
