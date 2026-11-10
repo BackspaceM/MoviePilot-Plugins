@@ -27,14 +27,7 @@ try:
 except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
-try:
-    from app.sdk.services import DownloaderHelper, MediaServerHelper
-except Exception:  # noqa: BLE001
-    DownloaderHelper = None  # type: ignore
-    MediaServerHelper = None  # type: ignore
-
 from .core import (
-    DEFAULT_LIMITS,
     Downloader,
     MediaServer,
     Session,
@@ -84,59 +77,15 @@ _LAST_KEY = "playback_last"
 _LOG_KEY = "playback_logs"
 _HISTORY_KEY = "playback_history"
 
-# 状态 -> (展示名, 说明, 下载限速字段, 上传限速字段)
-_LIMIT_FIELDS = (
-    (STATE_IDLE, "空闲", "无人在看，通常不限速", "limit_idle_dl", "limit_idle_up"),
-    (STATE_DIRECTPLAY, "原画直连", "内网原画播放", "limit_directplay_dl", "limit_directplay_up"),
-    (STATE_TRANSCODE, "本地转码", "内网转码播放", "limit_transcode_dl", "limit_transcode_up"),
-    (STATE_REMOTE_TRANSCODE, "远程转码", "外网转码播放", "limit_remote_dl", "limit_remote_up"),
-)
-
-
-def _cfg_attr(cfg: Any, *names: str) -> Any:
-    """兼容 dict / 对象两种配置载体读取字段。"""
-    for name in names:
-        value = cfg.get(name) if isinstance(cfg, dict) else getattr(cfg, name, None)
-        if value not in (None, ""):
-            return value
-    return None
-
-
-def _to_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _drop_duplicate_names(auto_lines: List[str], manual_text: str) -> List[str]:
-    """手动框中已写同名实例的，跳过自动生成的配置行。"""
-    manual_names = set()
-    for raw in str(manual_text or "").splitlines():
-        line = raw.strip()
-        if line.startswith("#") or line.count("|") < 3:
-            continue
-        parts = line.split("|")
-        if len(parts) > 1 and parts[1].strip():
-            manual_names.add(parts[1].strip())
-    return [line for line in auto_lines if line.split("|")[1].strip() not in manual_names]
-
-
 # MP 不可用时降级
 try:
-    from app import schemas
-
-    Response = schemas.Response
+    from schemas import Response
 except Exception:  # noqa: BLE001
-    from pydantic import BaseModel
-
-    class Response(BaseModel):  # type: ignore
-        """宿主不可用时的三字段 envelope 降级实现。"""
-
-        success: bool = True
-        message: str = ""
-        data: Any = None
-
+    class Response:  # type: ignore
+        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
+            self.success = success
+            self.message = message
+            self.data = data
 
 try:
     _PLUGIN_MTYPE = MessageType.Plugin
@@ -152,7 +101,7 @@ class PlaybackScheduler(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.1.1"
+    plugin_version = "1.0.0"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "playbackscheduler_"
@@ -172,14 +121,14 @@ class PlaybackScheduler(_PluginBase):
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._run_started = 0.0
-        self._source_errors: List[str] = []
 
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
         self._enabled = bool(config.get("enabled"))
+        self._mediaservers_text = str(config.get("mediaservers") or "")
+        self._downloaders_text = str(config.get("downloaders") or "")
         self._limits_text = str(config.get("limits") or "")
-        self._mediaservers_text, self._downloaders_text = self._merge_sources(config)
         self._router_enabled = bool(config.get("router_enabled"))
         self._router_address = str(config.get("router_address") or "").strip()
         self._router_username = str(config.get("router_username") or "").strip()
@@ -198,7 +147,7 @@ class PlaybackScheduler(_PluginBase):
 
         self._servers: List[MediaServer] = []
         self._downloaders: List[Downloader] = []
-        self._limits = self._parse_limits_config(config)
+        self._limits = parse_limits(self._limits_text)
         self._parse_sources()
 
         # 立即执行一次
@@ -220,8 +169,6 @@ class PlaybackScheduler(_PluginBase):
         self._servers = [s for s in servers if s.enabled]
         downloaders, _ = parse_downloaders(self._downloaders_text)
         self._downloaders = [d for d in downloaders if d.enabled]
-        for err in self._source_errors[:5]:
-            logger.warning(f"{_LOG_PREFIX}：{err}")
 
     def _secrets(self) -> List[str]:
         out: List[str] = [s.apikey for s in self._servers if s.apikey]
@@ -259,110 +206,87 @@ class PlaybackScheduler(_PluginBase):
             "name": "播放感知调度轮询",
             "trigger": trigger,
             "func": self.start_run,
-            "kwargs": {"trigger": "定时轮询", "prefer_thread": True},
+            # kwargs 是展开给 APScheduler.add_job 的调度参数，绝不能含 trigger；
+            # 插件 func 由 MP 无参调用，触发来源/线程偏好放在 func 默认值里。
+            "kwargs": {},
         }]
-
-    # ------------------------------------------------------------------
-    # 已连接实例（MoviePilot 服务门面）与配置合并
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _connected_configs(kind: str) -> Dict[str, Any]:
-        cls = MediaServerHelper if kind == "media" else DownloaderHelper
-        if cls is None:
-            return {}
-        try:
-            configs = cls().get_configs() or {}
-        except Exception as err:  # noqa: BLE001
-            logger.warning(f"{_LOG_PREFIX}：读取已连接 {kind} 实例失败：{err}")
-            return {}
-        return configs if isinstance(configs, dict) else {}
-
-    def _connected_items(self, kind: str) -> List[Dict[str, str]]:
-        """生成配置页下拉项（媒体服务器 / 下载器）。"""
-        items: List[Dict[str, str]] = []
-        for name, cfg in self._connected_configs(kind).items():
-            if kind == "media":
-                stype = str(_cfg_attr(cfg, "type", "server_type") or "").lower()
-                if stype not in ("emby", "jellyfin", "plex"):
-                    continue
-                title = f"{name}（{stype}）"
-            else:
-                stype = str(_cfg_attr(cfg, "type", "downloader", "module") or "").lower()
-                title = f"{name}（{stype or '下载器'}）"
-            items.append({"title": title, "value": str(name)})
-        return items
-
-    def _selected_lines(self, selected: Any, kind: str) -> Tuple[List[str], List[str]]:
-        """把下拉勾选的已连接实例转成 parse_servers / parse_downloaders 配置行。"""
-        lines: List[str] = []
-        errors: List[str] = []
-        configs = self._connected_configs(kind)
-        raw = selected if isinstance(selected, (list, tuple, set)) else (
-            [selected] if isinstance(selected, str) and selected.strip() else [])
-        for name in [str(n) for n in raw if str(n).strip()]:
-            cfg = configs.get(name)
-            if cfg is None:
-                errors.append(f"已连接实例「{name}」当前不存在，请重新勾选或用手动补充框填写")
-                continue
-            if kind == "media":
-                stype = str(_cfg_attr(cfg, "type", "server_type") or "").lower()
-                url = _cfg_attr(cfg, "url", "address", "host", "base_url")
-                key = _cfg_attr(cfg, "apikey", "api_key", "token", "access_token")
-                if not url or not key:
-                    errors.append(f"媒体服务器「{name}」未暴露地址或密钥，请在手动补充框补全")
-                    continue
-                lines.append(f"{stype}|{name}|{url}|{key}||1")
-            else:
-                dtype = str(_cfg_attr(cfg, "type", "downloader", "module") or "").lower()
-                url = _cfg_attr(cfg, "url", "host", "address", "base_url")
-                user = str(_cfg_attr(cfg, "username", "user", "qb_username") or "")
-                pwd = str(_cfg_attr(cfg, "password", "passwd", "qb_password") or "")
-                if not url or dtype not in ("qbittorrent", "transmission"):
-                    errors.append(f"下载器「{name}」未暴露地址或类型不受支持，请在手动补充框补全")
-                    continue
-                lines.append(f"{dtype}|{name}|{url}|{user}|{pwd}|1")
-        return lines, errors
-
-    def _merge_sources(self, config: Dict[str, Any]) -> Tuple[str, str]:
-        """下拉勾选 + 手动补充合并成两份清单文本；手动同名配置优先。"""
-        media_auto, media_err = self._selected_lines(config.get("media_servers"), "media")
-        dl_auto, dl_err = self._selected_lines(config.get("downloader_servers"), "downloader")
-        self._source_errors = media_err + dl_err
-        manual_media = str(config.get("mediaservers") or "")
-        manual_dl = str(config.get("downloaders") or "")
-        media_lines = _drop_duplicate_names(media_auto, manual_media)
-        dl_lines = _drop_duplicate_names(dl_auto, manual_dl)
-        return ((manual_media + "\n" + "\n".join(media_lines)).strip(),
-                (manual_dl + "\n" + "\n".join(dl_lines)).strip())
-
-    def _parse_limits_config(self, config: Dict[str, Any]) -> Dict[str, Tuple[float, float]]:
-        """结构化速度输入优先；老版本 limits 文本作为兜底。"""
-        limits = parse_limits(self._limits_text)
-        keys = [key for _, _, _, dl, up in _LIMIT_FIELDS for key in (dl, up)]
-        if not any(key in config for key in keys):
-            return limits
-        out = dict(limits)
-        for state, _, _, dl_key, up_key in _LIMIT_FIELDS:
-            dl_default, up_default = out.get(state, (0.0, 0.0))
-            out[state] = (_to_float(config.get(dl_key), dl_default),
-                          _to_float(config.get(up_key), up_default))
-        return out
 
     # ------------------------------------------------------------------
     # 配置表单
     # ------------------------------------------------------------------
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """配置页：下拉选已连接实例、按状态填速度、分区排版。"""
+        content: List[dict] = [{
+            "component": "VRow",
+            "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再轮询与限速"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VSwitch", "props": {"model": "onlyonce", "label": "立即执行一次", "hint": "保存后触发一轮检查并自动复位"}}]},
+            ],
+        }, {
+            "component": "VRow",
+            "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VTextarea", "props": {"model": "mediasservers", "label": "媒体服务器",
+                     "rows": 4, "placeholder": "emby|客厅Emby|http://192.168.1.10:8096|APIKEY|/media::/volume1/emby|1"}}]},
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VTextarea", "props": {"model": "downloaders", "label": "下载器",
+                     "rows": 3, "placeholder": "qbittorrent|QB|http://192.168.1.20:8080|admin|pass|1"}}]},
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VTextarea", "props": {"model": "limits", "label": "各状态限速(Mbps，下载,上传)",
+                     "rows": 4, "placeholder": "idle:0,0\ndirectplay:0,50\ntranscode:0,30\nremote_transcode:0,15"}}]},
+            ],
+        }, {
+            "component": "VRow",
+            "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VSwitch", "props": {"model": "router_enabled", "label": "联动 RouterOS 队列"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VTextField", "props": {"model": "router_queue_max", "label": "RouterOS 队列上限",
+                     "placeholder": "留空按上传限速推导，如 50M/500M"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "router_username", "label": "用户名"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "router_password", "type": "password", "label": "密码"}}]},
+            ],
+        }, {
+            "component": "VRow",
+            "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "protect_playing", "label": "保护在播文件（打标签）"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "protect_tag", "label": "保护标签名"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "auto_cleanup", "label": "观影后自动删种"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "cleanup_days", "label": "保留天数", "type": "number"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "cleanup_ratio", "label": "最小做种率", "type": "number"}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "cleanup_tag", "label": "删种候选标签"}}]},
+            ],
+        }, {
+            "component": "VRow",
+            "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VTextField", "props": {"model": "cron", "label": "轮询周期(cron)", "placeholder": _DEFAULT_CRON}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSelect", "props": {"model": "notify_mode", "label": "通知方式",
+                     "items": [{"title": "全部通知", "value": "all"}, {"title": "仅异常", "value": "error"}, {"title": "关闭", "value": "none"}]}}]},
+                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VSwitch", "props": {"model": "dry_run", "label": "试运行（不实际修改）"}}]},
+            ],
+        }]
+
         defaults: Dict[str, Any] = {
             "enabled": False,
             "onlyonce": False,
-            "media_servers": [],
-            "downloader_servers": [],
             "mediaservers": "",
             "downloaders": "",
-            "limits": "",
+            "limits": "idle:0,0\ndirectplay:0,50\ntranscode:0,30\nremote_transcode:0,15",
             "router_enabled": False,
             "router_queue_max": "",
             "router_address": "",
@@ -374,139 +298,17 @@ class PlaybackScheduler(_PluginBase):
             "cleanup_days": 7,
             "cleanup_ratio": 1.0,
             "cleanup_tag": "watch-cleanup",
-            "cron": _DEFAULT_CRON,
+            "cron": "*/5 * * * *",
             "notify_mode": "all",
             "dry_run": False,
         }
-        for state, _, _, dl_key, up_key in _LIMIT_FIELDS:
-            dl, up = DEFAULT_LIMITS.get(state, (0.0, 0.0))
-            defaults[dl_key] = dl
-            defaults[up_key] = up
-
-        def col(md: int, content: List[dict]) -> dict:
-            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": content}
-
-        def field(model: str, label: str, props: Optional[dict] = None) -> dict:
-            p: Dict[str, Any] = {"model": model, "label": label}
-            if props:
-                p.update(props)
-            return {"component": "VTextField", "props": p}
-
-        def switch(model: str, label: str, hint: str = "") -> dict:
-            p: Dict[str, Any] = {"model": model, "label": label}
-            if hint:
-                p.update({"hint": hint, "persistent-hint": True})
-            return {"component": "VSwitch", "props": p}
-
-        def section(title: str, subtitle: str = "") -> dict:
-            return {"component": "div",
-                    "props": {"class": "text-subtitle-2 font-weight-bold mt-5 mb-1"},
-                    "text": title + (f"　—　{subtitle}" if subtitle else "")}
-
-        # 四个播放状态各一张速度卡：只需填数字，不再写 "状态:下载,上传"
-        limit_cards: List[dict] = []
-        for state, name, note, dl_key, up_key in _LIMIT_FIELDS:
-            card = {
-                "component": "VCard",
-                "props": {"variant": "tonal", "class": "h-100"},
-                "content": [{
-                    "component": "VCardText",
-                    "content": [
-                        {"component": "div",
-                         "props": {"class": "text-subtitle-2 font-weight-bold"},
-                         "text": name},
-                        {"component": "div",
-                         "props": {"class": "text-caption text-medium-emphasis mb-2"},
-                         "text": note},
-                        field(dl_key, "下载 Mbps", {"type": "number", "density": "compact",
-                                                   "hint": "0 = 不限速"}),
-                        field(up_key, "上传 Mbps", {"type": "number", "density": "compact",
-                                                   "hint": "0 = 不限速"}),
-                    ],
-                }],
-            }
-            limit_cards.append(col(3, [card]))
-
-        notify_items = [
-            {"title": "全部通知", "value": "all"},
-            {"title": "仅异常", "value": "error"},
-            {"title": "关闭", "value": "none"},
-        ]
-
-        content: List[dict] = [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "看媒体服务器有没有人在看片，自动给下载器限速。"
-                                 "媒体服务器和下载器从 MoviePilot 已连接的实例里选，限速填 Mbps 数字就行，0 是不限。"}},
-            section("开关"),
-            {"component": "VRow", "content": [
-                col(4, [switch("enabled", "启用插件", "关闭后不再轮询与限速")]),
-                col(4, [switch("onlyonce", "立即执行一次", "保存后触发一轮检查并自动复位")]),
-                col(4, [{"component": "VSelect", "props": {
-                    "model": "notify_mode", "label": "通知方式", "items": notify_items}}]),
-            ]},
-            section("数据源", "从 MoviePilot 已连接实例中勾选"),
-            {"component": "VRow", "content": [
-                col(6, [{"component": "VSelect", "props": {
-                    "model": "media_servers", "label": "媒体服务器（可多选）",
-                    "items": self._connected_items("media"), "multiple": True, "chips": True,
-                    "clearable": True, "persistent-hint": True,
-                    "hint": "已连接的 Emby / Jellyfin / Plex，地址与密钥自动带入"}}]),
-                col(6, [{"component": "VSelect", "props": {
-                    "model": "downloader_servers", "label": "下载器（可多选）",
-                    "items": self._connected_items("downloader"), "multiple": True, "chips": True,
-                    "clearable": True, "persistent-hint": True,
-                    "hint": "已连接的 qBittorrent / Transmission"}}]),
-            ]},
-            {"component": "VRow", "content": [
-                col(6, [{"component": "VTextarea", "props": {
-                    "model": "mediaservers", "label": "手动补充媒体服务器（可选）", "rows": 2,
-                    "auto-grow": True, "persistent-hint": True,
-                    "hint": "每行：类型|名称|地址|密钥|路径映射|启用；同名行会覆盖上面的下拉项",
-                    "placeholder": "emby|客厅Emby|http://192.168.1.10:8096|APIKEY|/media::/volume1/emby|1"}}]),
-                col(6, [{"component": "VTextarea", "props": {
-                    "model": "downloaders", "label": "手动补充下载器（可选）", "rows": 2,
-                    "auto-grow": True, "persistent-hint": True,
-                    "hint": "每行：类型|名称|地址|用户名|密码|启用；同名行会覆盖上面的下拉项",
-                    "placeholder": "qbittorrent|QB|http://192.168.1.20:8080|admin|pass|1"}}]),
-            ]},
-            section("各状态限速", "单位 Mbps，0 = 不限速；一般只需压上传"),
-            {"component": "VRow", "content": limit_cards},
-            {"component": "VRow", "content": [
-                col(12, [{"component": "VTextarea", "props": {
-                    "model": "limits", "label": "限速文本（高级，可选）", "rows": 2,
-                    "auto-grow": True, "persistent-hint": True,
-                    "hint": "留空则以上方数字输入为准；需要批量定义时按「状态:下载,上传」每行一条填写",
-                    "placeholder": "idle:0,0\ndirectplay:0,50\ntranscode:0,30\nremote_transcode:0,15"}}]),
-            ]},
-            section("RouterOS 联动（可选）"),
-            {"component": "VRow", "content": [
-                col(4, [switch("router_enabled", "联动 RouterOS 队列")]),
-                col(4, [field("router_queue_max", "RouterOS 队列上限",
-                              {"placeholder": "留空按上传限速推导，如 50M/500M"})]),
-                col(4, [field("router_address", "RouterOS 地址")]),
-                col(4, [field("router_username", "用户名")]),
-                col(4, [field("router_password", "密码", {"type": "password"})]),
-                col(4, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                         "text": "不启用联动时以上信息可留空"}]),
-            ]},
-            section("在播保护与清理"),
-            {"component": "VRow", "content": [
-                col(4, [switch("protect_playing", "保护在播文件（打标签）")]),
-                col(4, [field("protect_tag", "保护标签名")]),
-                col(4, [switch("auto_cleanup", "观影后自动删种")]),
-                col(4, [field("cleanup_days", "保留天数", {"type": "number"})]),
-                col(4, [field("cleanup_ratio", "最小做种率", {"type": "number"})]),
-                col(4, [field("cleanup_tag", "删种候选标签")]),
-            ]},
-            section("调度与调试"),
-            {"component": "VRow", "content": [
-                col(6, [field("cron", "轮询周期(cron)", {"placeholder": _DEFAULT_CRON})]),
-                col(6, [switch("dry_run", "试运行（不实际修改）")]),
-            ]},
-        ]
         return content, defaults
 
-    def start_run(self, trigger: str = "手动", prefer_thread: bool = False) -> bool:
+    # ------------------------------------------------------------------
+    # 执行控制
+    # ------------------------------------------------------------------
+
+    def start_run(self, trigger: str = "定时轮询", prefer_thread: bool = True) -> bool:
         with self._state_lock:
             if self._running:
                 return False
@@ -740,103 +542,85 @@ class PlaybackScheduler(_PluginBase):
     # 详情页
     # ------------------------------------------------------------------
 
-    def _action_button(self, label: str, api: str, *, color: str = "", icon: str = "",
-                       confirm: bool = False, variant: str = "tonal",
-                       method: str = "post") -> dict:
-        """详情页按钮：文字放组件级 text，带颜色/图标，避免出现灰色空按钮。"""
-        props: Dict[str, Any] = {"variant": variant, "size": "small", "class": "ma-1"}
-        if color:
-            props["color"] = color
-        if icon:
-            props["prepend-icon"] = icon
-        return {"component": "VBtn", "props": props, "text": label,
-                "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}",
-                                     "method": method, "params": {}, "confirm": confirm}}}
-
     def get_page(self) -> List[dict]:
-        """详情页：卡片分区 + 分组彩色按钮，所有按钮指向已注册的真实 API。"""
         live = dict(self.get_data(_LIVE_KEY) or {})
+        last = dict(self.get_data(_LAST_KEY) or {})
+        logs = list(self.get_data(_LOG_KEY) or [])
+        history = list(self.get_data(_HISTORY_KEY) or [])
         state = live.get("state", STATE_IDLE)
         sessions = [Session(**s) for s in (live.get("sessions") or [])]
         playing = [s for s in sessions if s.is_playing]
-        limits = compute_limits(state, self._limits)
 
-        def kv(label: str, value: Any, md: int = 3) -> dict:
-            return {"component": "VCol", "props": {"cols": 6, "md": md}, "content": [
-                {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                 "text": label},
-                {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"},
-                 "text": str(value)},
-            ]}
+        session_lines = []
+        for s in playing:
+            session_lines.append(f"{s.user}@{s.server}｜{s.title}｜"
+                                 f"{'远程' if s.is_remote else '内网'}/"
+                                 f"{'转码' if s.is_transcoding else '原画'}/"
+                                 f"{int(s.progress*100)}%")
+        if not session_lines:
+            session_lines = ["当前无播放中会话"]
 
-        def text_row(value: str, size: int = 12) -> dict:
-            return {"component": "div", "text": str(value),
-                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
+        buttons = []
+        for label, api in (("立即检查并应用", "run"), ("恢复默认限速", "reset"),
+                           ("查看当前状态", "status"), ("清空观看历史", "clear_history"),
+                           ("停止", "stop")):
+            buttons.append({
+                "component": "VBtn", "props": {"variant": "tonal", "size": "small", "text": label},
+                "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
+                                     "params": {}, "confirm": label in ("停止", "清空观看历史")}},
+            })
 
-        session_lines = [
-            f"{s.user}@{s.server}｜{s.title}｜{'远程' if s.is_remote else '内网'}"
-            f"/{'转码' if s.is_transcoding else '原画'}/{int(s.progress * 100)}%"
-            for s in playing
-        ] or ["当前无播放中会话"]
-
-        state_color = {
-            STATE_IDLE: "success", STATE_DIRECTPLAY: "primary",
-            STATE_TRANSCODE: "warning", STATE_REMOTE_TRANSCODE: "error",
-        }.get(state, "info")
-
-        primary = [
-            self._action_button("立即检查并应用", "run", color="primary",
-                                icon="mdi-play", variant="flat"),
-            self._action_button("查看当前状态", "status", color="info",
-                                icon="mdi-information-outline", method="get"),
-        ]
-        secondary = [
-            self._action_button("恢复默认限速", "reset", icon="mdi-restore"),
-            self._action_button("清空观看历史", "clear_history", color="warning",
-                                icon="mdi-delete-outline", confirm=True),
-            self._action_button("停止", "stop", color="error",
-                                icon="mdi-stop-circle-outline", confirm=True),
-        ]
-
-        return [
-            {"component": "VAlert", "props": {
-                "type": state_color, "variant": "tonal", "class": "mb-3",
-                "title": "当前播放状态"},
-             "content": {"text": f"{state_label(state)}　|　下载 {limits['dl_mbps']:g} Mbps / "
-                                 f"上传 {limits['up_mbps']:g} Mbps　|　在播 {len(playing)} 路"}},
-            {"component": "VCard", "props": {"variant": "outlined"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "操作"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": "主要操作"},
-                    {"component": "div", "content": primary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "维护与清理"},
-                    {"component": "div", "content": secondary},
+        return [{
+            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
+                "component": "VCardText", "content": [
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 6}, "content": [
+                            {"component": "VLabel", "text": "当前播放状态"},
+                            {"component": "div", "text": state_label(state)}]},
+                        {"component": "VCol", "props": {"cols": 6}, "content": [
+                            {"component": "VLabel", "text": "观看历史条目"},
+                            {"component": "div", "text": str(len(history))}]},
+                    ]},
+                    {"component": "VDivider"},
+                    {"component": "VLabel", "text": "在播会话"},
+                    *[{"component": "div", "text": line, "props": {"style": "white-space:pre-wrap"}} for line in session_lines],
+                    {"component": "VDivider"},
+                    {"component": "VLabel", "text": "最近状态"},
+                    {"component": "div", "text": last.get("message") or "尚未执行", "props": {"style": "white-space:pre-wrap"}},
+                    {"component": "VDivider"},
+                    {"component": "VLabel", "text": "运行日志（最近 20 条）"},
+                    *[{"component": "div",
+                       "text": f"[{l['time']}][{l['level']}] {l['message']}",
+                       "props": {"style": "white-space:pre-wrap;font-size:12px"}} for l in logs[:20]],
+                    {"component": "VRow", "content": [{"component": "VCol", "content": buttons}]},
                 ]},
-            ]}
+            ]},
         ]
+
+    # ------------------------------------------------------------------
+    # API
+    # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [{
-            "path": "/run",
-            "auth": "bear", "endpoint": self.api_run, "methods": ["POST"],
+            "path": f"/plugin/{PLUGIN_NAME}/run",
+            "endpoint": self.api_run, "methods": ["POST"],
             "summary": "立即执行一轮播放感知检查",
         }, {
-            "path": "/reset",
-            "auth": "bear", "endpoint": self.api_reset, "methods": ["POST"],
+            "path": f"/plugin/{PLUGIN_NAME}/reset",
+            "endpoint": self.api_reset, "methods": ["POST"],
             "summary": "恢复下载器与 RouterOS 默认限速",
         }, {
-            "path": "/status",
-            "auth": "bear", "endpoint": self.api_status, "methods": ["GET"],
+            "path": f"/plugin/{PLUGIN_NAME}/status",
+            "endpoint": self.api_status, "methods": ["GET"],
             "summary": "获取当前播放与限速状态",
         }, {
-            "path": "/stop",
-            "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"],
+            "path": f"/plugin/{PLUGIN_NAME}/stop",
+            "endpoint": self.api_stop, "methods": ["POST"],
             "summary": "停止当前任务",
         }, {
-            "path": "/clear_history",
-            "auth": "bear", "endpoint": self.api_clear, "methods": ["POST"],
+            "path": f"/plugin/{PLUGIN_NAME}/clear_history",
+            "endpoint": self.api_clear, "methods": ["POST"],
             "summary": "清空观看历史",
         }]
 
