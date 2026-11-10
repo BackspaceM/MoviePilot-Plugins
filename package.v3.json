@@ -46,6 +46,22 @@
       "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、HDWinG 检索匹配、严格文件级校验、自动辅种与去重缓存。"
     }
   },
+  "PlaybackScheduler": {
+    "name": "播放感知调度",
+    "description": "读取 Emby/Jellyfin/Plex 的活动播放会话，按「是否转码 / 是否远程」判定播放状态，对下载器（qBittorrent / Transmission）施加对应限速并可选联动 RouterOS 简单队列；支持在播文件保护标签、观影后自动删种、定时轮询与立即检查、MP 通知与 INFO 级 SSE 实时日志。",
+    "labels": "媒体库,Emby,Plex,Jellyfin,限速,RouterOS,播放,带宽",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/playbackscheduler.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：读取 Emby/Jellyfin/Plex 在播会话（支持多服务器、路径映射），按 directplay/transcode/remote_transcode/idle 四态用 Mbps 限速换算为下载器所需单位（qB 字节/秒、TR KB/秒）并实时下发；可选联动 RouterOS 简单队列（idle 自动移除、播放时按上传限速推导 max-limit）；在播文件打保护标签、观影后按保留天数与做种率自动删种；cron 定时轮询、配置页与远程命令立即检查、MP 通知分级、INFO 级 SSE 实时日志与详情页按钮。"
+    }
+  },
   "MediaLibraryRefresh": {
     "name": "媒体库精准刷新",
     "description": "监听整理入库/字幕/删除事件，按文件级增量刷新 Emby/Jellyfin 与 Plex（不做全库扫描）；支持多服务器、路径映射、合并窗口去重、分级回退与失败重试、定时对账、试运行、MP 通知与 SSE 实时日志。",
