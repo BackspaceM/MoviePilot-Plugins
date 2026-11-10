@@ -92,7 +92,7 @@ _KEY_ACTIVE = "vwr_active"
 _MEDIA_TYPES = ("emby", "plex", "jellyfin")
 
 _NOTIFY_LABELS = {
-    "all": "周报 + 诊断",
+    "all": "周报 + 诊断（推荐）",
     "report": "仅周报",
     "none": "仅站内查看，不推送",
 }
@@ -102,19 +102,13 @@ _WEEK_START_LABELS = {
 }
 
 try:
-    from app import schemas
-
-    Response = schemas.Response
+    from schemas import Response
 except Exception:  # noqa: BLE001
-    from pydantic import BaseModel
-
-    class Response(BaseModel):  # type: ignore
-        """宿主不可用时的三字段 envelope 降级实现。"""
-
-        success: bool = True
-        message: str = ""
-        data: Any = None
-
+    class Response:  # type: ignore
+        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
+            self.success = success
+            self.message = message
+            self.data = data
 
 try:
     _PLUGIN_MTYPE = MessageType.Plugin
@@ -156,7 +150,7 @@ class ViewingWeeklyReport(_PluginBase):
                    "电影剧集占比、热门影片），并按规则引擎扫描转码记录给出硬件加速、音频直通、"
                    "字幕烧录、远程码率等可执行诊断建议。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/viewingweeklyreport.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.0.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "viewingweeklyreport_"
@@ -265,7 +259,9 @@ class ViewingWeeklyReport(_PluginBase):
             "name": "观影周报 / 转码诊断",
             "trigger": trigger,
             "func": self.start_run,
-            "kwargs": {"trigger": "定时周报", "mode": "full", "prefer_thread": True},
+            # kwargs 是展开给 APScheduler.add_job 的调度参数，绝不能含 trigger；
+            # 插件 func 由 MP 无参调用，触发来源/模式/线程偏好放在 func 默认值里。
+            "kwargs": {},
         }]
 
     # ------------------------------------------------------------------
@@ -366,15 +362,10 @@ class ViewingWeeklyReport(_PluginBase):
         connected_items = self._connected_items()
 
         content: List[dict] = [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                              "class": "mb-4"},
-             "content": {"text": "读媒体服务器的播放历史，生成周报，顺带查转码。"
-                                "下面的下拉直接选 MoviePilot 里配好的实例，地址密钥自动带入；"
-                                "不在 MP 里的在「手动补充」按格式加一行。"}},
-            {"component": "VAlert", "props": {"type": "warning", "variant": "text",
-                                              "class": "mb-3"},
-             "content": {"text": "第一次可以勾「立即生成一次周报」看数据对不对。转码诊断依赖服务器 API，"
-                                "Emby / Jellyfin / Plex 支持程度不一样。本地记录清空后就没了。"}},
+            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
+             "content": {"text": "从媒体服务器读取近期播放历史，生成观影周报并扫描转码问题。"
+                                "数据源优先从下方「已连接媒体服务器」下拉勾选（MoviePilot 里已配好的 Emby/Plex/Jellyfin），"
+                                "不在 MP 内或多套实例请在「手动补充」框按格式追加。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时推送"}}]},
@@ -383,7 +374,6 @@ class ViewingWeeklyReport(_PluginBase):
                                                        "hint": "保存后按当前配置采集并分析，随后自动复位"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "数据源"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": [
                     {"component": "VSelect", "props": {
@@ -406,7 +396,6 @@ class ViewingWeeklyReport(_PluginBase):
                                        "plex|书房Plex|http://192.168.1.11:32400|PTOKEN||1"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "统计口径"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSelect", "props": {
@@ -425,7 +414,6 @@ class ViewingWeeklyReport(_PluginBase):
                         "hint": "运行时读取当前在播会话的转码现场"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "推送与通知"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "推送周期(cron)", {"placeholder": "0 9 * * 1  每周一 09:00"})]},
@@ -443,8 +431,8 @@ class ViewingWeeklyReport(_PluginBase):
     # 执行控制
     # ------------------------------------------------------------------
 
-    def start_run(self, trigger: str = "手动", mode: str = "full",
-                  prefer_thread: bool = False) -> bool:
+    def start_run(self, trigger: str = "定时周报", mode: str = "full",
+                  prefer_thread: bool = True) -> bool:
         """mode: full=采集+聚合+诊断(+通知)；collect=仅采集；diagnose=实时转码诊断。"""
         with self._state_lock:
             if self._running:
@@ -654,78 +642,127 @@ class ViewingWeeklyReport(_PluginBase):
 
     def _action_button(self, label: str, api: str, *, params: Optional[dict] = None,
                        confirm: bool = False, variant: str = "tonal",
-                       color: Optional[str] = None, icon: str = "",
-                       method: str = "post", size: str = "small") -> dict:
-        """详情页按钮：文字放组件级 text，带颜色/图标，避免出现灰色空按钮。
-
-        所有按钮都指向 get_api() 中已注册的真实 endpoint，不使用 disabled。
-        """
-        props: Dict[str, Any] = {"variant": variant, "size": size, "class": "ma-1"}
+                       color: Optional[str] = None) -> dict:
+        props: Dict[str, Any] = {"variant": variant, "size": "small", "text": label}
         if color:
             props["color"] = color
-        if icon:
-            props["prepend-icon"] = icon
         event: Dict[str, Any] = {
-            "api": f"plugin/{PLUGIN_NAME}/{api}", "method": method,
+            "api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
             "params": params or {}, "confirm": confirm,
         }
-        return {"component": "VBtn", "props": props, "text": label,
-                "events": {"click": event}}
+        return {"component": "VBtn", "props": props, "events": {"click": event}}
 
     def get_page(self) -> List[dict]:
-        """主界面只留状态、周报和按钮，日志与历史看插件日志。"""
         live = dict(self.get_data(_KEY_LIVE) or {})
+        last = dict(self.get_data(_KEY_LAST) or {})
         report = dict(self.get_data(_KEY_REPORT) or {})
+        findings_raw = list(self.get_data(_KEY_FINDINGS) or [])
+        active = list(self.get_data(_KEY_ACTIVE) or [])
+        logs = list(self.get_data(_KEY_LOGS) or [])
+
         report_text = format_report_text(report)
+        findings_text = format_findings_text([Finding.from_dict(f) for f in findings_raw])
         level, level_note = health_level(report)
+
+        def kv(label: str, value: str, md: int = 4) -> dict:
+            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
+                {"component": "VLabel", "text": label},
+                {"component": "div", "text": md_safe(value),
+                 "props": {"style": "white-space:pre-wrap"}},
+            ]}
 
         def text_row(value: str, size: int = 12) -> dict:
             return {"component": "div", "text": md_safe(value),
                     "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
 
-        buttons = [
-            self._action_button("生成周报", "run", color="primary", icon="mdi-chart-box-outline",
-                                variant="flat"),
-            self._action_button("转码诊断", "diagnose", color="info", icon="mdi-stethoscope"),
-            self._action_button("采集近期历史", "collect", icon="mdi-history"),
-            self._action_button("立即推送", "push", icon="mdi-send-outline"),
-            self._action_button("测试连接", "test", icon="mdi-lan-connect"),
-            self._action_button("清空本地记录", "clear", color="error",
-                                icon="mdi-delete-outline", confirm=True),
-            self._action_button("停止", "stop", color="error",
-                                icon="mdi-stop-circle-outline", confirm=True),
+        servers, _ = self._resolve_servers()
+        active_lines: List[str] = []
+        if active:
+            for r in active:
+                flag = "转码" if r.get("is_transcode") else "原画"
+                zone = "远程" if r.get("is_remote") else "内网"
+                active_lines.append(
+                    f"• {r.get('user', '未知')} ｜ {r.get('title', '')} ｜ {zone}/{flag} ｜ "
+                    f"{r.get('video_codec', '')} {r.get('resolution', '')}"
+                )
+        else:
+            active_lines.append("当前无在播会话（运行「转码诊断」可刷新实时现场）")
+
+        # 日志区：空时给出明确占位，避免空白药丸；每行用全角 ｜ 分隔并经 md_safe。
+        log_nodes = [text_row(format_log_line(l.get("time", ""), l.get("level", ""), l.get("message", "")))
+                     for l in logs[:20]]
+        if not log_nodes:
+            log_nodes = [text_row("暂无运行日志，点击「生成周报」或「转码诊断」后将在此实时显示。", 12)]
+
+        op_buttons = [
+            self._action_button("生成周报", "run", variant="flat", color="primary"),
+            self._action_button("转码诊断", "diagnose"),
+            self._action_button("采集近期历史", "collect"),
+            self._action_button("立即推送", "push"),
+            self._action_button("测试连接", "test"),
+            self._action_button("清空本地记录", "clear", confirm=True),
+            self._action_button("停止", "stop", confirm=True),
         ]
 
-        return [
+        content_nodes: List[dict] = [
             {"component": "VAlert", "props": {
                 "type": "warning" if level in ("中", "差") else "success",
-                "variant": "tonal", "class": "mb-3", "title": "播放健康度"},
-             "content": {"text": md_safe(f"{level}（{level_note}），查到 "
-                                        f"{live.get('findings_count', 0)} 条可优化项。")}},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "观影周报"},
-                {"component": "VCardText", "content": [text_row(report_text, 13)]},
+                "variant": "tonal", "class": "mb-4"},
+             "content": {"text": md_safe(f"播放健康度：{level}（{level_note}）。"
+                                        f"建议数：{live.get('findings_count', 0)} 条。")}},
+            {"component": "VRow", "content": [
+                kv("插件状态", "已启用" if live.get("enabled") else "未启用"),
+                kv("当前任务", "运行中" if live.get("running") else "待命"),
+                kv("统计周期", WEEK_MODE_LABELS.get(self._week_mode, self._week_mode)),
+                kv("推送周期", self._cron),
+                kv("数据源", f"{len(servers)} 个媒体服务器"),
+                kv("本周播放", f"{live.get('total_plays', 0)} 次"),
+                kv("观看时长", format_duration(live.get("watch_seconds", 0))),
+                kv("转码占比", f"{live.get('transcode_ratio', 0)}%"),
+                kv("健康等级", level),
+                kv("本地记录", f"{live.get('record_count', 0)} 条"),
+                kv("最近运行", _ts_text(live.get("last_run"))),
+                kv("上次触发", last.get("trigger", "—")),
             ]},
-            {"component": "VCard", "props": {"variant": "outlined"}, "content": [
-                {"component": "VCardText", "content": [
-                    {"component": "div", "content": buttons},
-                ]},
-            ]},
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "观影周报"},
+            text_row(report_text, 13),
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "转码诊断与优化建议"},
+            text_row(findings_text, 12),
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "实时在播会话（转码现场）"},
+            *[text_row(line) for line in active_lines],
+            {"component": "VDivider", "props": {"class": "my-3"}},
+            {"component": "VLabel", "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"},
+            *log_nodes,
+            {"component": "VRow", "props": {"class": "mt-4"}, "content": [
+                {"component": "VCol", "content": op_buttons}]},
         ]
 
+        return [{
+            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
+                "component": "VCardText", "content": content_nodes,
+            }],
+        }]
+
+    # ------------------------------------------------------------------
+    # API（与详情页按钮一一对应）
+    # ------------------------------------------------------------------
+
     def get_api(self) -> List[Dict[str, Any]]:
-        # path 为相对路径：宿主自动补齐 /api/v1/plugin/<PluginID> 前缀
+        base = f"/plugin/{PLUGIN_NAME}"
         return [
-            {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "采集历史并生成周报与诊断"},
-            {"path": "/diagnose", "auth": "bear", "endpoint": self.api_diagnose, "methods": ["POST"], "summary": "读取在播会话做实时转码诊断"},
-            {"path": "/collect", "auth": "bear", "endpoint": self.api_collect, "methods": ["POST"], "summary": "仅采集近期播放历史"},
-            {"path": "/push", "auth": "bear", "endpoint": self.api_push, "methods": ["POST"], "summary": "按当前数据推送周报与诊断"},
-            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试各媒体服务器连接"},
-            {"path": "/clear", "auth": "bear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空本地播放记录与周报缓存"},
-            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/report", "auth": "bear", "endpoint": self.api_report, "methods": ["GET"], "summary": "获取当前周报"},
-            {"path": "/findings", "auth": "bear", "endpoint": self.api_findings, "methods": ["GET"], "summary": "获取转码诊断建议"},
+            {"path": f"{base}/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "采集历史并生成周报与诊断"},
+            {"path": f"{base}/diagnose", "endpoint": self.api_diagnose, "methods": ["POST"], "summary": "读取在播会话做实时转码诊断"},
+            {"path": f"{base}/collect", "endpoint": self.api_collect, "methods": ["POST"], "summary": "仅采集近期播放历史"},
+            {"path": f"{base}/push", "endpoint": self.api_push, "methods": ["POST"], "summary": "按当前数据推送周报与诊断"},
+            {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试各媒体服务器连接"},
+            {"path": f"{base}/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空本地播放记录与周报缓存"},
+            {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": f"{base}/report", "endpoint": self.api_report, "methods": ["GET"], "summary": "获取当前周报"},
+            {"path": f"{base}/findings", "endpoint": self.api_findings, "methods": ["GET"], "summary": "获取转码诊断建议"},
         ]
 
     def api_run(self, _=None) -> Response:
