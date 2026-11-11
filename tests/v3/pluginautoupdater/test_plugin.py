@@ -182,12 +182,62 @@ def test_filter_targets_all_when_unselected() -> None:
     assert any("未勾选" in n for n in notes)
 
 
-def test_filter_targets_selected_intersection() -> None:
+def test_filter_targets_union_instead_of_intersection() -> None:
+    """固定作者的全部插件 + 额外指定插件 = 并集，别的作者的插件不再被排除。"""
     plugins = sample_plugins()
-    targets, _ = updater.filter_targets(
+    targets, notes = updater.filter_targets(
         plugins, "jxxghp", ["DownloaderHelper", "MediaLibraryRefresh"],
         skip_self_id="PluginAutoUpdater")
-    assert {p.id for p in targets} == {"DownloaderHelper"}, "要和作者过滤取交集"
+    assert {p.id for p in targets} == {
+        "DownloaderHelper", "SiteSpider", "MediaLibraryRefresh"}
+    assert any("并集" in n for n in notes)
+
+
+def test_filter_targets_author_only_covers_all_their_plugins() -> None:
+    """固定作者时自动覆盖其名下所有已安装插件，不用逐个勾。"""
+    plugins = sample_plugins()
+    targets, _ = updater.filter_targets(
+        plugins, ["BackspaceM"], [], skip_self_id="PluginAutoUpdater")
+    assert {p.id for p in targets} == {"MediaLibraryRefresh", "ViewingWeeklyReport"}
+
+
+def test_manual_extra_filters_merge_into_config() -> None:
+    """下拉勾选 + 手动补充框合并；运行时仍按并集生效。"""
+    reset()
+    plugin = make_plugin(
+        author_filters=["jxxghp"], target_plugins=["ViewingWeeklyReport"],
+        author_manual="BackspaceM、SomeoneElse",
+        plugin_manual="AutoSignIn, NotInstalledPlugin",
+    )
+    assert plugin._author_filters == ["jxxghp", "BackspaceM", "SomeoneElse"]
+    assert plugin._target_plugins == [
+        "ViewingWeeklyReport", "AutoSignIn", "NotInstalledPlugin"]
+    targets, notes = updater.filter_targets(
+        sample_plugins(), plugin._author_filters, plugin._target_plugins,
+        skip_self_id="PluginAutoUpdater")
+    ids = {p.id for p in targets}
+    assert {"DownloaderHelper", "SiteSpider", "MediaLibraryRefresh",
+            "ViewingWeeklyReport", "AutoSignIn"} <= ids
+    assert any("未找到" in n for n in notes), "清单里没有的 ID 要给出提示"
+    host.set_test_hooks(None, None)
+
+
+def test_get_form_has_manual_fields_and_defaults() -> None:
+    reset()
+    plugin = make_plugin(author_manual="BackspaceM", plugin_manual="AutoSignIn")
+    content, defaults = plugin.get_form()
+    models = set()
+    for node in _nodes(content):
+        model = (node.get("props") or {}).get("model")
+        if model:
+            models.add(model)
+            assert model in defaults, f"表单字段 {model} 缺默认值"
+    assert {"author_filters", "target_plugins",
+            "author_manual", "plugin_manual"} <= models
+    assert defaults["author_manual"] == "BackspaceM"
+    assert defaults["plugin_manual"] == "AutoSignIn"
+    assert "并集" in json.dumps(content, ensure_ascii=False)
+    host.set_test_hooks(None, None)
 
 
 def test_filter_targets_excludes_self() -> None:
@@ -521,7 +571,11 @@ def test_onlyonce_and_get_service() -> None:
     service = plugin.get_service()
     assert len(service) == 1
     assert service[0]["func"] == plugin.run_once
-    assert service[0]["kwargs"]["trigger"] == "定时"
+    # MP scheduler.py 用 **service["kwargs"] 展开给 APScheduler.add_job()，
+    # 塞 trigger 会与第 2 个位置参数撞名，导致服务注册失败。
+    assert service[0]["kwargs"] == {}
+    import inspect
+    assert inspect.signature(plugin.run_once).parameters["trigger"].default == "定时"
     assert service[0]["trigger"] == ("cron", "0 5 * * *")
     assert plugin.get_state() is True
     disabled = make_plugin(enabled=False)
@@ -617,3 +671,42 @@ def test_host_scan_async_all_plugins_fallback() -> None:
     finally:
         _SDK_PLUGIN.PluginManager = saved_pm
         _STUB.all_plugins = saved_all
+
+
+def test_union_scope_end_to_end_installs_correct_ids() -> None:
+    """固定作者 BackspaceM 的全部有更新插件 + 额外指定 jxxghp 的插件，都要装到。"""
+    reset()
+    plugin = make_plugin(
+        author_filters=["BackspaceM"], target_plugins=["DownloaderHelper"],
+        notify_mode="none", force_reinstall=False)
+    report = plugin.run_once(trigger="测试")
+    installed = {call["plugin_id"] for call in _STUB.INSTALL_CALLS}
+    assert {"MediaLibraryRefresh", "ViewingWeeklyReport"} <= installed, \
+        "固定作者名下所有有更新的插件都应更新"
+    assert "DownloaderHelper" in installed, \
+        "额外指定的插件即使不属于所选作者也必须更新"
+    assert "SiteSpider" not in installed, "未勾选、无更新的插件不该被装"
+    assert report["ok"] is True
+
+
+def test_v3_page_and_form_contract() -> None:
+    """按钮文字在顶层、API 带 auth、表单无孤立标签或 content 字典。"""
+    reset()
+    plugin = make_plugin()
+    plugin.api_scan()
+    registered = {f"plugin/PluginAutoUpdater{a['path']}" for a in plugin.get_api()}
+    for api in plugin.get_api():
+        assert api["path"].startswith("/") and not api["path"].startswith("/plugin/")
+        assert api.get("auth") == "bear", "缺 auth 会导致按钮 Not Found"
+    for node in _nodes(plugin.get_page()):
+        if node.get("component") == "VBtn":
+            assert isinstance(node.get("text"), str) and node["text"].strip()
+            assert "text" not in (node.get("props") or {}), "props.text 会造成空白按钮"
+            assert not (node.get("props") or {}).get("disabled")
+            assert node["events"]["click"]["api"] in registered
+        assert not isinstance(node.get("content"), dict)
+    content, _ = plugin.get_form()
+    for node in _nodes(content):
+        assert not isinstance(node.get("content"), dict)
+        assert node.get("component") not in ("VAlert", "VLabel"), "不要只有图标没有说明的元素"
+    host.set_test_hooks(None, None)
