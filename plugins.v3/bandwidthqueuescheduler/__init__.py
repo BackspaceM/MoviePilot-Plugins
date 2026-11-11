@@ -135,15 +135,15 @@ def _ts_text(ts: Optional[float]) -> str:
 
 
 class BandwidthQueueScheduler(_PluginBase):
-    plugin_name = PLUGIN_NAME
-    plugin_desc = PLUGIN_DESCRIPTION
-    plugin_icon = PLUGIN_ICON
-    plugin_version = "1.0.0"
-    plugin_author = PLUGIN_AUTHORS
-    author_url = AUTHOR_URL
+    plugin_name = 'BandwidthQueueScheduler'
+    plugin_desc = '在 RouterOS 上按带宽方案智能编排简单队列：内置均衡/观影/下载/夜间四套方案，支持时段自动切换、一键手动切换、实时速率监控与 FastTrack 失效诊断，统一管理前缀不误伤手工队列。'
+    plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/bandwidthqueuescheduler.png'
+    plugin_version = "1.2.3"
+    plugin_author = 'BackspaceM'
+    author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "bandwidthqueuescheduler_"
-    plugin_color = PLUGIN_COLOR
-    system_version = SYSTEM_VERSION
+    plugin_color = '#3498DB'
+    system_version = '>=3.0.0'
     plugin_order = 55
 
     # ------------------------------------------------------------------
@@ -607,14 +607,15 @@ class BandwidthQueueScheduler(_PluginBase):
     def _action_button(self, label: str, api: str, *, params: Optional[dict] = None,
                        confirm: bool = False, variant: str = "tonal",
                        color: Optional[str] = None) -> dict:
-        props: Dict[str, Any] = {"variant": variant, "size": "small", "text": label}
+        props: Dict[str, Any] = {"variant": variant, "size": "small"}
         if color:
             props["color"] = color
         event: Dict[str, Any] = {
             "api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
             "params": params or {}, "confirm": confirm,
         }
-        return {"component": "VBtn", "props": props, "events": {"click": event}}
+        return {"component": "VBtn", "props": props, "text": label,
+                "events": {"click": event}}
 
     def get_page(self) -> List[dict]:
         """精简主界面：状态行 + 一行摘要 + 操作按钮。
@@ -683,15 +684,15 @@ class BandwidthQueueScheduler(_PluginBase):
         # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
         # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": "/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "按当前规则立即调度"},
-            {"path": "/apply_profile", "endpoint": self.api_apply_profile, "methods": ["POST"], "summary": "手动切换带宽方案"},
-            {"path": "/refresh", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新队列实时速率"},
-            {"path": "/fasttrack", "endpoint": self.api_fasttrack, "methods": ["POST"], "summary": "诊断 FastTrack 是否绕过 Queue"},
-            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": "/clear_queues", "endpoint": self.api_clear_queues, "methods": ["POST"], "summary": "删除本插件创建的全部队列"},
-            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/profiles", "endpoint": self.api_profiles, "methods": ["GET"], "summary": "获取可用带宽方案"},
+            {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "按当前规则立即调度"},
+            {"path": "/apply_profile", "auth": "bear", "endpoint": self.api_apply_profile, "methods": ["POST"], "summary": "手动切换带宽方案"},
+            {"path": "/refresh", "auth": "bear", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新队列实时速率"},
+            {"path": "/fasttrack", "auth": "bear", "endpoint": self.api_fasttrack, "methods": ["POST"], "summary": "诊断 FastTrack 是否绕过 Queue"},
+            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": "/clear_queues", "auth": "bear", "endpoint": self.api_clear_queues, "methods": ["POST"], "summary": "删除本插件创建的全部队列"},
+            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/profiles", "auth": "bear", "endpoint": self.api_profiles, "methods": ["GET"], "summary": "获取可用带宽方案"},
         ]
 
     def api_run(self, _=None) -> Response:

@@ -90,7 +90,7 @@ class RouterOSSiteRouting(_PluginBase):
                    "地址列表、mangle 标记与策略路由，配合 CF 优选 IP；站点增删按标签增量"
                    "同步，预览中文含义后批量写入，只新增带 MP-B3 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerossiterouting.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerossiterouting_"
@@ -620,9 +620,9 @@ class RouterOSSiteRouting(_PluginBase):
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
-             "content": {"text": "读 MP 站点管理里已配好的站点和 Tracker 域名，自动写 static DNS "
+             "text": "读 MP 站点管理里已配好的站点和 Tracker 域名，自动写 static DNS "
                                  "和地址列表，配合 CF 优选 IP 一起用。只加带 MP-B3 标签的条目，"
-                                 "写之前会留备份，中途失败自动回滚。"}},
+                                 "写之前会留备份，中途失败自动回滚。"},
             self._section_title("目标路由器"),
             {"component": "VRow", "content": [
                 self._col(4, [self._sel("ros_connection", "已保存的路由器（连接中心）",
@@ -698,12 +698,12 @@ class RouterOSSiteRouting(_PluginBase):
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
                                               "class": "mt-3"},
-             "content": {"text": "保存后到详情页点「生成 / 刷新预览」，核对完再点「确认一键部署」。"
-                                 "开了 mangle 或策略路由，还要勾「允许高风险动作」，网关别写错。"}},
+             "text": "保存后到详情页点「生成 / 刷新预览」，核对完再点「确认一键部署」。"
+                                 "开了 mangle 或策略路由，还要勾「允许高风险动作」，网关别写错。"},
             {"component": "VAlert", "props": {"type": "secondary", "variant": "text",
                                               "class": "mt-2"},
-             "content": {"text": "RouterOS v6 没有 REST，这里只认 v7。规则顺序以设备上现有链为准，"
-                                 "跟 CF 优选 IP 插件共用 static DNS 时，同域名不会重复新增。"}},
+             "text": "RouterOS v6 没有 REST，这里只认 v7。规则顺序以设备上现有链为准，"
+                                 "跟 CF 优选 IP 插件共用 static DNS 时，同域名不会重复新增。"},
         ]
         defaults: Dict[str, Any] = {
             "enabled": True, "onlyonce": False,
@@ -807,24 +807,24 @@ class RouterOSSiteRouting(_PluginBase):
         if plan.get("errors"):
             content.append({"component": "VAlert", "props": {
                 "type": "error", "variant": "tonal", "class": "mt-3",
-                "title": "参数有问题，先改再部署"},
-                "content": {"text": "；".join(_esc(e) for e in (plan.get("errors") or [])[:8])}})
+                "title": "部署前需处理以下问题（详见下方说明）"},
+                "text": "；".join(_esc(e) for e in (plan.get("errors") or [])[:8])})
         if plan.get("warnings"):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "text", "class": "mt-2"},
-                "content": {"text": "；".join(_esc(e) for e in (plan.get("warnings") or [])[:5])}})
+                "text": "；".join(_esc(e) for e in (plan.get("warnings") or [])[:5])})
         if plan.get("unreadable"):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "text", "class": "mt-2",
                 "title": "有几个分区读不到"},
-                "content": {"text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
-                                    + _esc("、".join(str(s) for s in plan["unreadable"]))}})
+                "text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
+                                    + _esc("、".join(str(s) for s in plan["unreadable"]))})
         if stale:
             content.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "mt-2",
                 "title": "有失效标签"},
-                "content": {"text": f"设备上还有 {len(stale)} 个带 {_esc(self._prefix)} 标签、"
-                                    f"但当前站点清单里没有的条目。要清掉先在设置页打开清理开关。"}})
+                "text": f"设备上还有 {len(stale)} 个带 {_esc(self._prefix)} 标签、"
+                                    f"但当前站点清单里没有的条目。要清掉先在设置页打开清理开关。"})
 
 
         rows = []
@@ -869,7 +869,7 @@ class RouterOSSiteRouting(_PluginBase):
         else:
             plan_body.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "title": "还没有预览计划"},
-                "content": {"text": "在设置页选好站点保存，回来点「生成 / 刷新预览」。"}})
+                "text": "在设置页选好站点保存，回来点「生成 / 刷新预览」。"})
         content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
                         "content": [{"component": "VCardTitle", "text": "待确认的计划"},
                                     {"component": "VCardText", "content": plan_body}]})

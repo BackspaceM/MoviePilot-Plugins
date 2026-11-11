@@ -191,7 +191,7 @@ class HDWinGCrossSeed(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
     )
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_label = "站点,辅种,HDWinG"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -499,9 +499,8 @@ class HDWinGCrossSeed(_PluginBase):
                 "component": "VRow",
                 "content": [
                     self._col(12, 12, [{"component": "VAlert", "props": {
-                        "type": "info", "variant": "tonal",
-                        "text": "只对 info_hash 一致，或跨站时文件清单完全一致的种子辅种，"
-                                "免得版本不同导致校验失败。站点请求按间隔串行发，撞上频率限制会自动退避。"}}]),
+                        "type": "info", "variant": "tonal"}, "text": "只对 info_hash 一致，或跨站时文件清单完全一致的种子辅种，"
+                                "免得版本不同导致校验失败。站点请求按间隔串行发，撞上频率限制会自动退避。"}]),
                 ],
             },
         ]

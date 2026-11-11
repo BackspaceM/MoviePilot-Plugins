@@ -150,7 +150,7 @@ class ViewingWeeklyReport(_PluginBase):
                    "电影剧集占比、热门影片），并按规则引擎扫描转码记录给出硬件加速、音频直通、"
                    "字幕烧录、远程码率等可执行诊断建议。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/viewingweeklyreport.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "viewingweeklyreport_"
@@ -639,14 +639,15 @@ class ViewingWeeklyReport(_PluginBase):
     def _action_button(self, label: str, api: str, *, params: Optional[dict] = None,
                        confirm: bool = False, variant: str = "tonal",
                        color: Optional[str] = None) -> dict:
-        props: Dict[str, Any] = {"variant": variant, "size": "small", "text": label}
+        props: Dict[str, Any] = {"variant": variant, "size": "small"}
         if color:
             props["color"] = color
         event: Dict[str, Any] = {
             "api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
             "params": params or {}, "confirm": confirm,
         }
-        return {"component": "VBtn", "props": props, "events": {"click": event}}
+        return {"component": "VBtn", "props": props, "text": label,
+                "events": {"click": event}}
 
     def get_page(self) -> List[dict]:
         """精简主界面：状态行 + 一行摘要 + 操作按钮。
@@ -701,16 +702,16 @@ class ViewingWeeklyReport(_PluginBase):
         # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
         # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": "/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "采集历史并生成周报与诊断"},
-            {"path": "/diagnose", "endpoint": self.api_diagnose, "methods": ["POST"], "summary": "读取在播会话做实时转码诊断"},
-            {"path": "/collect", "endpoint": self.api_collect, "methods": ["POST"], "summary": "仅采集近期播放历史"},
-            {"path": "/push", "endpoint": self.api_push, "methods": ["POST"], "summary": "按当前数据推送周报与诊断"},
-            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试各媒体服务器连接"},
-            {"path": "/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空本地播放记录与周报缓存"},
-            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/report", "endpoint": self.api_report, "methods": ["GET"], "summary": "获取当前周报"},
-            {"path": "/findings", "endpoint": self.api_findings, "methods": ["GET"], "summary": "获取转码诊断建议"},
+            {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "采集历史并生成周报与诊断"},
+            {"path": "/diagnose", "auth": "bear", "endpoint": self.api_diagnose, "methods": ["POST"], "summary": "读取在播会话做实时转码诊断"},
+            {"path": "/collect", "auth": "bear", "endpoint": self.api_collect, "methods": ["POST"], "summary": "仅采集近期播放历史"},
+            {"path": "/push", "auth": "bear", "endpoint": self.api_push, "methods": ["POST"], "summary": "按当前数据推送周报与诊断"},
+            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试各媒体服务器连接"},
+            {"path": "/clear", "auth": "bear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空本地播放记录与周报缓存"},
+            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/report", "auth": "bear", "endpoint": self.api_report, "methods": ["GET"], "summary": "获取当前周报"},
+            {"path": "/findings", "auth": "bear", "endpoint": self.api_findings, "methods": ["GET"], "summary": "获取转码诊断建议"},
         ]
 
     def api_run(self, _=None) -> Response:

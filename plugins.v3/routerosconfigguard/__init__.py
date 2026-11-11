@@ -124,15 +124,15 @@ def _ts_text(ts: Optional[float]) -> str:
 
 
 class RouterOSConfigGuard(_PluginBase):
-    plugin_name = PLUGIN_NAME
-    plugin_desc = PLUGIN_DESCRIPTION
-    plugin_icon = PLUGIN_ICON
-    plugin_version = "1.1.0"
-    plugin_author = PLUGIN_AUTHORS
-    author_url = AUTHOR_URL
+    plugin_name = 'RouterOSConfigGuard'
+    plugin_desc = '定时备份 RouterOS 配置并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录、RouterOS 本机（.backup+.rsc）或双份；漂移即时通知。'
+    plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png'
+    plugin_version = "1.3.3"
+    plugin_author = 'BackspaceM'
+    author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "routerosconfigguard_"
-    plugin_color = PLUGIN_COLOR
-    system_version = SYSTEM_VERSION
+    plugin_color = '#E67E22'
+    system_version = '>=3.0.0'
     plugin_order = 60
 
     # ------------------------------------------------------------------
@@ -748,10 +748,11 @@ class RouterOSConfigGuard(_PluginBase):
         buttons = []
         for label, api in (("立即备份并检测", "run"), ("测试连接", "test"),
                            ("最近设为基线", "baseline"), ("重载列表", "snapshots"),
-                           ("刷新ROS备份", "rosbackups"),
+                           ("刷新 ROS 备份", "rosbackups"),
                            ("清空快照", "clear"), ("停止", "stop")):
             buttons.append({
-                "component": "VBtn", "props": {"variant": "tonal", "size": "small", "text": label},
+                "component": "VBtn", "text": label,
+                              "props": {"variant": "tonal", "size": "small"},
                 "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
                                      "params": {}, "confirm": label in ("清空快照", "停止")}},
             })
@@ -786,14 +787,14 @@ class RouterOSConfigGuard(_PluginBase):
         # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
         # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": "/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
-            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": "/baseline", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
-            {"path": "/snapshots", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
-            {"path": "/rosbackups", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
-            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/clear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
-            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
+            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": "/baseline", "auth": "bear", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
+            {"path": "/snapshots", "auth": "bear", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
+            {"path": "/rosbackups", "auth": "bear", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
+            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/clear", "auth": "bear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
+            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
         ]
 
     def api_run(self, _=None) -> Response:

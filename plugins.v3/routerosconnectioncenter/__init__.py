@@ -69,7 +69,7 @@ class RouterOSConnectionCenter(_PluginBase):
                    "不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查端口、REST、权限与版本，"
                    "失败时给出可直接复制到 RouterOS 终端执行的修复命令。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosconnectioncenter_"
@@ -156,11 +156,11 @@ class RouterOSConnectionCenter(_PluginBase):
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
-             "content": {"text": "路由器的地址、账号、密码在这里填一次，其他 RouterOS 插件就能直接选。"
-                                 "连不上时点详情页的「一键体检」，会告诉你要开哪个服务、该执行哪条命令。"}},
+             "text": "路由器的地址、账号、密码在这里填一次，其他 RouterOS 插件就能直接选。"
+                                 "连不上时点详情页的「一键体检」，会告诉你要开哪个服务、该执行哪条命令。"},
             {"component": "VAlert", "props": {"type": "success" if self._broadcast_ok else "warning",
                                               "variant": "tonal", "class": "mb-4", "title": "广播状态"},
-             "content": {"text": status}},
+             "text": status},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
              "text": "路由器清单"},
@@ -173,7 +173,7 @@ class RouterOSConnectionCenter(_PluginBase):
                     "persistentHint": True}}]),
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "text", "class": "mb-2"},
-             "content": {"text": "密码是明文存的，别用 admin 主账号，单独建个最小权限的 API 账号。"}},
+             "text": "密码是明文存的，别用 admin 主账号，单独建个最小权限的 API 账号。"},
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
              "text": "体检与广播"},
@@ -194,7 +194,7 @@ class RouterOSConnectionCenter(_PluginBase):
             {"component": "VDivider", "props": {"class": "my-3"}},
             {"component": "VAlert", "props": {"type": "secondary", "variant": "tonal",
                                               "class": "mb-2"},
-             "content": {"text": "保存后去详情页点「一键体检」，再在其他插件里选中这台就行。"}},
+             "text": "保存后去详情页点「一键体检」，再在其他插件里选中这台就行。"},
         ]
         defaults: Dict[str, Any] = {
             "routers_text": "",
@@ -260,14 +260,14 @@ class RouterOSConnectionCenter(_PluginBase):
         if self._errors:
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal", "class": "mt-3", "title": "这几行填错了"},
-                "content": {"text": "；".join(_esc(e) for e in self._errors[:8])}})
+                "text": "；".join(_esc(e) for e in self._errors[:8])})
 
         if not self._routers:
             content.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "mt-3",
                 "title": "还没有路由器"},
-                "content": {"text": "到「设置」里按示例填一行：名称｜地址｜端口｜用户名｜密码｜1｜备注，"
-                                    "保存后回来点「一键体检」。"}})
+                "text": "到「设置」里按示例填一行：名称｜地址｜端口｜用户名｜密码｜1｜备注，"
+                                    "保存后回来点「一键体检」。"})
             return content
 
         # 每台路由器一张卡片

@@ -96,7 +96,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                    "dst-nat 映射 + 防火墙放行，预览「外网端口 → 内网服务」后批量写入；"
                    "带域名备注、连通性测试、自动备份与失败回滚，只新增带 MP-B1 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosremoteaccesswizard_"
@@ -408,8 +408,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
-             "content": {"text": "从 MoviePilot 已连接的服务里挑几个，一次生成 NAT 映射和防火墙放行。"
-                                 "只新增带 MP-B1 标签的规则；写之前会留备份，中途失败自动回滚。"}},
+             "text": "从 MoviePilot 已连接的服务里挑几个，一次生成 NAT 映射和防火墙放行。"
+                                 "只新增带 MP-B1 标签的规则；写之前会留备份，中途失败自动回滚。"},
             self._section_title("目标路由器"),
             {"component": "VRow", "content": [
                 self._col(4, [self._sel("ros_connection", "已保存的路由器（连接中心）",
@@ -482,12 +482,12 @@ class RouterOSRemoteAccessWizard(_PluginBase):
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
                                               "class": "mt-3"},
-             "content": {"text": "保存后到详情页点「生成 / 刷新预览」，核对完再点「确认一键部署」。"
-                                 "填了内网网段会多一条回环规则，内网设备才能用域名访问。"}},
+             "text": "保存后到详情页点「生成 / 刷新预览」，核对完再点「确认一键部署」。"
+                                 "填了内网网段会多一条回环规则，内网设备才能用域名访问。"},
             {"component": "VAlert", "props": {"type": "secondary", "variant": "text",
                                               "class": "mt-2"},
-             "content": {"text": "映射等于把这些服务放到公网，先确认有强密码或 HTTPS。"
-                                 "同一个端口别在「场景模板一键部署」里再配一次。"}},
+             "text": "映射等于把这些服务放到公网，先确认有强密码或 HTTPS。"
+                                 "同一个端口别在「场景模板一键部署」里再配一次。"},
         ]
         defaults: Dict[str, Any] = {
             "ros_connection": "", "router_address": "", "router_port": 443,
@@ -567,18 +567,18 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         if plan.get("errors"):
             content.append({"component": "VAlert", "props": {
                 "type": "error", "variant": "tonal", "class": "mt-3",
-                "title": "参数有问题，先改再部署"},
-                "content": {"text": "；".join(_esc(e) for e in (plan.get("errors") or [])[:8])}})
+                "title": "部署前需处理以下问题（详见下方说明）"},
+                "text": "；".join(_esc(e) for e in (plan.get("errors") or [])[:8])})
         if plan.get("warnings"):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "text", "class": "mt-2"},
-                "content": {"text": "；".join(_esc(e) for e in (plan.get("warnings") or [])[:5])}})
+                "text": "；".join(_esc(e) for e in (plan.get("warnings") or [])[:5])})
         if plan.get("unreadable"):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "text", "class": "mt-2",
                 "title": "有几个分区读不到"},
-                "content": {"text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
-                                    + _esc("、".join(str(s) for s in plan["unreadable"]))}})
+                "text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
+                                    + _esc("、".join(str(s) for s in plan["unreadable"]))})
 
         # 服务映射表：外网端口 → 内网服务
 
@@ -625,7 +625,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         else:
             plan_body.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "title": "还没有预览计划"},
-                "content": {"text": "在设置页选好服务保存，回来点「生成 / 刷新预览」。"}})
+                "text": "在设置页选好服务保存，回来点「生成 / 刷新预览」。"})
         content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
                         "content": [{"component": "VCardTitle", "text": "待确认的计划"},
                                     {"component": "VCardText", "content": plan_body}]})

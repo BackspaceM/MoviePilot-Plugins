@@ -98,7 +98,7 @@ class RouterOSWorkbench(_PluginBase):
     plugin_desc = ("一次配置连接，五个页签一起看 RouterOS 现状：概览、防火墙、Queue、备份、分流。"
                    "只读聚合，不改其它插件，也不往路由器写配置；顺带列出本地 RouterOS 插件的启用情况。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosworkbench.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosworkbench_"
@@ -407,8 +407,8 @@ class RouterOSWorkbench(_PluginBase):
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
-             "content": {"text": "地址账号填一次，五个页签就能一起看路由器现状。"
-                                 "这里只读，不会改路由器上的东西。"}},
+             "text": "地址账号填一次，五个页签就能一起看路由器现状。"
+                                 "这里只读，不会改路由器上的东西。"},
             {"component": "VRow", "content": [
                 self._col(3, [self._sw("enabled", "启用工作台", "关掉就不刷新，也不注册定时")]),
                 self._col(3, [self._sw("onlyonce", "立即刷新一次", "保存后读一遍，自动复位")]),
@@ -439,8 +439,8 @@ class RouterOSWorkbench(_PluginBase):
             ]},
             {"component": "VAlert", "props": {"type": "secondary", "variant": "tonal",
                                               "class": "mt-3"},
-             "content": {"text": "页签由服务端记着，点一下就切。备份页签列的是路由器上的文件，"
-                                 "本地配置备份插件装没装也一起看。"}},
+             "text": "页签由服务端记着，点一下就切。备份页签列的是路由器上的文件，"
+                                 "本地配置备份插件装没装也一起看。"},
         ]
         defaults: Dict[str, Any] = {
             "enabled": True, "onlyonce": False,
@@ -516,7 +516,7 @@ class RouterOSWorkbench(_PluginBase):
         else:
             nodes.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "my-2"},
-                "content": {"text": "这里暂时没有数据"}})
+                "text": "这里暂时没有数据"})
         if table.get("note"):
             nodes.append({"component": "div", "props": {
                 "class": "text-caption text-medium-emphasis mt-1"},
@@ -571,7 +571,7 @@ class RouterOSWorkbench(_PluginBase):
         if warnings:
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "tonal", "class": "mt-3"},
-                "content": {"text": "；".join(_esc(w) for w in warnings[:6])}})
+                "text": "；".join(_esc(w) for w in warnings[:6])})
 
         table_nodes: List[dict] = []
         for t in (tab.get("tables") or []):
@@ -580,7 +580,7 @@ class RouterOSWorkbench(_PluginBase):
         if not table_nodes:
             table_nodes.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "mt-3"},
-                "content": {"text": "还没刷新，点上面「一键刷新」读一次路由器现状。"}})
+                "text": "还没刷新，点上面「一键刷新」读一次路由器现状。"})
         content.append({"component": "VCard", "props": {"outlined": True, "class": "mt-3"},
                         "content": [
                             {"component": "VCardTitle", "text": _esc(sections.tab_label(active))},
@@ -591,7 +591,7 @@ class RouterOSWorkbench(_PluginBase):
         if highlights:
             content.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "class": "mt-3"},
-                "content": {"text": "；".join(_esc(h) for h in highlights[:8])}})
+                "text": "；".join(_esc(h) for h in highlights[:8])})
         notes = [str(n) for n in (tab.get("notes") or [])]
         if notes:
             content.append({"component": "div", "props": {

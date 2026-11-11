@@ -101,7 +101,7 @@ _ONCE_JOB_ID = "rfm_once"
 _MAX_LOGS = 200
 _DEFAULT_CRON = "0 9 * * 1"          # 每周一 09:00 扫描一次
 _DEFAULT_TABLES = ["filter", "nat"]
-_DEFAULT_LIMIT = 60
+_DEFAULT_LIMIT = 10
 
 # plugindata keys
 _KEY_RULES = "rfm_rules"
@@ -145,7 +145,7 @@ class RosFirewallManager(_PluginBase):
     plugin_desc = ("RouterOS 防火墙可视化管理器：表格化查看 filter/nat/mangle/raw 全部规则并检测影子规则·重复·缺失兜底，"
                    "逐条启停/上下移/删除或按表单新增（自动插到兜底 drop 前），操作前可留备份，定时扫描隐患并推送 MP 通知。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.2.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "rosfirewallmanager_"
@@ -691,14 +691,15 @@ class RosFirewallManager(_PluginBase):
     def _action_button(self, label: str, api: str, *, params: Optional[dict] = None,
                        confirm: bool = False, variant: str = "tonal",
                        color: Optional[str] = None, size: str = "small") -> dict:
-        props: Dict[str, Any] = {"variant": variant, "size": size, "text": label}
+        props: Dict[str, Any] = {"variant": variant, "size": size}
         if color:
             props["color"] = color
         event: Dict[str, Any] = {
             "api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
             "params": params or {}, "confirm": confirm,
         }
-        return {"component": "VBtn", "props": props, "events": {"click": event}}
+        return {"component": "VBtn", "props": props, "text": label,
+                "events": {"click": event}}
 
     def _rule_op_row(self, r: Rule) -> dict:
         """为单条规则生成一行：简述 + 启停/上移/下移/置顶/置底/删除按钮。"""
@@ -800,18 +801,18 @@ class RosFirewallManager(_PluginBase):
         # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
         # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": "/scan", "endpoint": self.api_scan, "methods": ["POST"], "summary": "立即扫描隐患"},
-            {"path": "/refresh", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新四表规则"},
-            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": "/toggle", "endpoint": self.api_toggle, "methods": ["POST"], "summary": "启用/禁用单条规则"},
-            {"path": "/move", "endpoint": self.api_move, "methods": ["POST"], "summary": "移动单条规则顺序"},
-            {"path": "/remove", "endpoint": self.api_remove, "methods": ["POST"], "summary": "删除单条规则"},
-            {"path": "/add_preview", "endpoint": self.api_add_preview, "methods": ["POST"], "summary": "预览新增规则命令"},
-            {"path": "/add", "endpoint": self.api_add, "methods": ["POST"], "summary": "按表单新增规则"},
-            {"path": "/backup", "endpoint": self.api_backup, "methods": ["POST"], "summary": "导出规则快照到 MP"},
-            {"path": "/router_backup", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
-            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/scan", "auth": "bear", "endpoint": self.api_scan, "methods": ["POST"], "summary": "立即扫描隐患"},
+            {"path": "/refresh", "auth": "bear", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新四表规则"},
+            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": "/toggle", "auth": "bear", "endpoint": self.api_toggle, "methods": ["POST"], "summary": "启用/禁用单条规则"},
+            {"path": "/move", "auth": "bear", "endpoint": self.api_move, "methods": ["POST"], "summary": "移动单条规则顺序"},
+            {"path": "/remove", "auth": "bear", "endpoint": self.api_remove, "methods": ["POST"], "summary": "删除单条规则"},
+            {"path": "/add_preview", "auth": "bear", "endpoint": self.api_add_preview, "methods": ["POST"], "summary": "预览新增规则命令"},
+            {"path": "/add", "auth": "bear", "endpoint": self.api_add, "methods": ["POST"], "summary": "按表单新增规则"},
+            {"path": "/backup", "auth": "bear", "endpoint": self.api_backup, "methods": ["POST"], "summary": "导出规则快照到 MP"},
+            {"path": "/router_backup", "auth": "bear", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
+            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
         ]
 
     def api_scan(self, _=None) -> Response:

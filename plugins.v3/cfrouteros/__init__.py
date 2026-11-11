@@ -71,6 +71,14 @@ from .cfopt import (
 from .routeros import RouterOSClient, normalize_base_url
 
 _STATS_KEY = "stats"
+
+
+def _md_safe(text: Any) -> str:
+    """详情页动态文本转义：半角符号转全角，避免被当 Markdown 参考式链接渲染成空药丸。"""
+    return str(text if text is not None else "").translate(str.maketrans({
+        "[": "［", "]": "］", "`": "ˋ", "*": "＊",
+        "<": "‹", ">": "›", "_": "＿",
+    }))
 _HISTORY_KEY = "history"
 _CIDR_KEY = "cidr_cache"
 _LOG_KEY = "run_logs"
@@ -150,7 +158,7 @@ class CFRouterOS(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png"
     )
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -841,63 +849,66 @@ class CFRouterOS(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """返回插件详情页；未启用时也保留操作入口。"""
-        stats = self.get_data(_STATS_KEY) or {}
+        """精简主界面：状态行 + 最近写入成功 + 操作按钮。
+        运行日志由 MP 插件卡片右上角三圆点的实时日志查看，不在此重复渲染。"""
+        stats = dict(self.get_data(_STATS_KEY) or {})
         last = stats.get("last_result") or {}
-        logs = list(self.get_data(_LOG_KEY) or [])
         history = list(self.get_data(_HISTORY_KEY) or [])
-        live = dict(self.get_data(_LIVE_KEY) or {})
-        pool = dict(self.get_data(_POOL_KEY) or {})
+        domains = list(stats.get("last_domains") or [])
+
+        def row(text: str, *, caption: bool = False) -> dict:
+            return {"component": "div", "text": _md_safe(text),
+                    "props": {"style": "white-space:pre-line;font-size:12px;"
+                                      + ("opacity:.8" if caption else "")}}
+
+        status = (f"上次运行：{stats.get('last_run_text', '尚未运行')}　"
+                  f"触发：{stats.get('last_trigger', '-')}　"
+                  f"域名 {last.get('domains_total', 0)} / 纳入 {last.get('domains_cf', 0)} / "
+                  f"候选 {last.get('probed', 0)} / 可用 {last.get('alive', 0)} / "
+                  f"写入 {last.get('written', 0)}"
+                  + (f"　{last.get('message')}" if last.get("message") else ""))
+
+        # 最近几次「写入成功」的运行记录 + 最近一次成功写入的域名明细
+        runs = [h for h in history if int(h.get("written") or 0) > 0][:5]
+        ok_domains = [d for d in domains if int(d.get("added") or 0) > 0][:5]
+        recent = ["最近写入成功："]
+        if runs:
+            for h in runs:
+                recent.append(f"  {h.get('time', '-')}｜{h.get('trigger', '-')}｜"
+                              f"写入 {h.get('written')} 条"
+                              + (f"｜{h.get('message')}" if h.get("message") else ""))
+        else:
+            recent.append("  暂无写入成功记录，点「立即执行」后可查看。")
+        if ok_domains:
+            recent.append("最近一次写入明细：")
+            for d in ok_domains:
+                recent.append(
+                    f"  {d.get('domain', '-')}｜"
+                    f"优选IP={format_ip_list(d.get('addresses') or d.get('best_ips') or [], 3)}｜"
+                    f"新增 {d.get('added')} 条")
+
+        buttons = [
+            self._action_button("立即执行", "mdi-play", "/run", "primary"),
+            self._action_button("刷新页面", "mdi-refresh", "/status", "secondary", "get"),
+            self._action_button("检测路由器", "mdi-lan-connect", "/check", "info"),
+            self._action_button("刷新 IP 池", "mdi-cloud-download", "/refresh_pool", "info"),
+            self._action_button("中止任务", "mdi-stop", "/stop", "warning"),
+            self._action_button("清空日志", "mdi-delete-sweep", "/clear_logs", "error"),
+        ]
         content: List[dict] = []
         if not self._enabled:
-            content.append({"component": "VAlert", "props": {
-                "type": "warning", "variant": "tonal", "class": "mb-2",
-                "text": "插件没开，下面的按钮照样能用。"}})
-        content.append({
-            "component": "VRow",
-            "content": [self._col(12, 12, [{"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "class": "mt-2",
-                "text": (f"上次运行：{stats.get('last_run_text', '尚未运行')}　"
-                         f"触发：{stats.get('last_trigger', '-')}　"
-                         f"域名 {last.get('domains_total', 0)} / 纳入 {last.get('domains_cf', 0)} / "
-                         f"候选 {last.get('probed', 0)} / 可用 {last.get('alive', 0)} / "
-                         f"写入 {last.get('written', 0)}"
-                         + (f"　{last.get('message')}" if last.get("message") else ""))}}])],
-        })
-        domain_lines = []
-        for item in (live.get("domains") or stats.get("last_domains") or [])[:60]:
-            domain_lines.append(
-                f"{item.get('domain')}｜{item.get('state', '-')}"
-                f"　原IP={format_ip_list(item.get('resolved') or [], 4)}"
-                f"　优选IP={format_ip_list(item.get('addresses') or item.get('best_ips') or [], 4)}"
-                f"　写入={'是' if item.get('added') else '否'}"
-                f"（新增 {item.get('added', 0)} / 清理 {item.get('deleted', 0)}）"
-                + (f"　{item.get('message') or item.get('reason')}" if (item.get("message") or item.get("reason")) else "")
-            )
-        pool_lines = [
-            f"{item.get('name')}｜{item.get('url') or '-'}｜"
-            f"{'成功' if item.get('ok') else '失败'}"
-            f"{'（缓存）' if item.get('cached') else ''}｜"
-            f"IP {item.get('ips', 0)} / 网段 {item.get('cidrs', 0)}"
-            + (f"｜{item.get('error')}" if item.get("error") else "")
-            for item in (pool.get("sources") or [])
-        ]
-        pool_lines.insert(0, f"更新：{pool.get('updated_text', '尚未加载')}　"
-                             f"来源模式：{pool.get('source_mode', '-')}　"
-                             f"官方段：{'在线' if pool.get('official_ok') else '内置兜底'}　"
-                             f"合并网段 {pool.get('network_count', 0)} 段 / 池 IP {pool.get('pool_count', 0)} 个")
-        content.append({
-            "component": "VRow",
-            "content": [self._col(12, 12, [
-                self._action_button("立即执行", "mdi-play", "/run", "primary"),
-                self._action_button("刷新页面", "mdi-refresh", "/status", "secondary", "get"),
-                self._action_button("检测路由器", "mdi-lan-connect", "/check", "info"),
-                self._action_button("刷新 IP 池", "mdi-cloud-download", "/refresh_pool", "info"),
-                self._action_button("中止任务", "mdi-stop", "/stop", "warning"),
-                self._action_button("清空日志", "mdi-delete-sweep", "/clear_logs", "error"),
-            ])],
-        })
+            content.append({"component": "VAlert",
+                            "props": {"type": "warning", "variant": "tonal", "class": "mb-2"},
+                            "text": "插件没开，下面的按钮照样能用。"})
+        content.append({"component": "VCard", "props": {"variant": "tonal"}, "content": [
+            {"component": "VCardText", "content": [
+                row(status),
+                row("\n".join(recent), caption=True),
+                {"component": "div", "props": {"class": "mt-3"}, "content": buttons},
+            ]},
+        ]})
         return content
+
 
     @staticmethod
     def _stat_card(title: str, value: str, icon: str) -> dict:

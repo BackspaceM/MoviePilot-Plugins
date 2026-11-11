@@ -99,15 +99,15 @@ def now_text() -> str:
 
 
 class PlaybackScheduler(_PluginBase):
-    plugin_name = PLUGIN_NAME
-    plugin_desc = PLUGIN_DESCRIPTION
-    plugin_icon = PLUGIN_ICON
-    plugin_version = "1.0.0"
-    plugin_author = PLUGIN_AUTHORS
-    author_url = AUTHOR_URL
+    plugin_name = 'PlaybackScheduler'
+    plugin_desc = '读取 Emby/Plex 在播会话，按转码/远程状态对下载器限速并可选联动 RouterOS，保护在播文件、观影后自动删种。'
+    plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/playbackscheduler.png'
+    plugin_version = "1.1.3"
+    plugin_author = 'BackspaceM'
+    author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "playbackscheduler_"
-    plugin_color = PLUGIN_COLOR
-    system_version = SYSTEM_VERSION
+    plugin_color = '#5DADE2'
+    system_version = '>=3.0.0'
     plugin_order = 50
 
     # ------------------------------------------------------------------
@@ -562,7 +562,8 @@ class PlaybackScheduler(_PluginBase):
                            ("查看当前状态", "status"), ("清空观看历史", "clear_history"),
                            ("停止", "stop")):
             buttons.append({
-                "component": "VBtn", "props": {"variant": "tonal", "size": "small", "text": label},
+                "component": "VBtn", "text": label,
+                              "props": {"variant": "tonal", "size": "small"},
                 "events": {"click": {"api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
                                      "params": {}, "confirm": label in ("停止", "清空观看历史")}},
             })
@@ -586,22 +587,27 @@ class PlaybackScheduler(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         return [{
             "path": "/run",
+            "auth": "bear",
             "endpoint": self.api_run, "methods": ["POST"],
             "summary": "立即执行一轮播放感知检查",
         }, {
             "path": "/reset",
+            "auth": "bear",
             "endpoint": self.api_reset, "methods": ["POST"],
             "summary": "恢复下载器与 RouterOS 默认限速",
         }, {
             "path": "/status",
+            "auth": "bear",
             "endpoint": self.api_status, "methods": ["GET"],
             "summary": "获取当前播放与限速状态",
         }, {
             "path": "/stop",
+            "auth": "bear",
             "endpoint": self.api_stop, "methods": ["POST"],
             "summary": "停止当前任务",
         }, {
             "path": "/clear_history",
+            "auth": "bear",
             "endpoint": self.api_clear, "methods": ["POST"],
             "summary": "清空观看历史",
         }]

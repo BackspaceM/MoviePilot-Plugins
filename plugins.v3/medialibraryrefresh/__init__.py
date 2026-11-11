@@ -123,7 +123,7 @@ class MediaLibraryRefresh(_PluginBase):
     plugin_name = "媒体库精准刷新"
     plugin_desc = "监听整理入库事件，按文件级增量刷新 Emby/Jellyfin/Plex，支持多服务器、路径映射、合并去重与分级回退"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/medialibraryrefresh.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_label = "媒体库,Emby,Plex,Jellyfin,刷新"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -470,9 +470,8 @@ class MediaLibraryRefresh(_PluginBase):
             ]},
             {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VAlert", "props": {
-                    "type": "info", "variant": "tonal",
-                    "text": "下方下拉直接选 MoviePilot 已连接的实例，地址密钥自动带入。"
-                            "要配路径映射或实例不在 MP 里，再在文本框补一行。"}}]),
+                    "type": "info", "variant": "tonal"}, "text": "下方下拉直接选 MoviePilot 已连接的实例，地址密钥自动带入。"
+                            "要配路径映射或实例不在 MP 里，再在文本框补一行。"}]),
             ]},
             {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VSelect", "props": {
@@ -618,18 +617,15 @@ class MediaLibraryRefresh(_PluginBase):
         content: List[dict] = []
         if not self._enabled:
             content.append({"component": "VAlert", "props": {
-                "type": "warning", "variant": "tonal", "class": "mb-2",
-                "text": "插件没开，下面的按钮照样能用。"}})
+                "type": "warning", "variant": "tonal", "class": "mb-2"}, "text": "插件没开，下面的按钮照样能用。"})
         if self._server_errors:
             content.append({"component": "VAlert", "props": {
-                "type": "warning", "variant": "tonal", "class": "mb-2",
-                "text": "服务器配置不对：" + "；".join(self._server_errors[:3])}})
+                "type": "warning", "variant": "tonal", "class": "mb-2"}, "text": "服务器配置不对：" + "；".join(self._server_errors[:3])})
         content.append({"component": "VRow", "content": [self._col(12, 12, [
             {"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "class": "mt-2",
-                "text": f"上次运行：{stats.get('last_run_text', '尚未运行')}　触发：{stats.get('last_trigger', '-')}　"
+                "type": "info", "variant": "tonal", "class": "mt-2"}, "text": f"上次运行：{stats.get('last_run_text', '尚未运行')}　触发：{stats.get('last_trigger', '-')}　"
                         f"文件 {last.get('files', 0)} / 服务器 {last.get('servers', 0)} / "
-                        f"成功 {last.get('servers_ok', 0)}　{last.get('message') or '-'}"}}])]})
+                        f"成功 {last.get('servers_ok', 0)}　{last.get('message') or '-'}"}])]})
         content.append({"component": "VRow", "content": [self._col(12, 12, [
             self._action_button("立即刷新", "mdi-refresh", "/run", "primary"),
             self._action_button("检测服务器", "mdi-lan-connect", "/check", "info"),

@@ -434,3 +434,11 @@ def format_sessions(sessions: List[Session]) -> str:
 def split_batches(items: List[Any], size: int) -> List[List[Any]]:
     size = max(1, size)
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def md_safe(text: Any) -> str:
+    """详情页动态文本转义：半角符号转全角，避免被前端当 Markdown 渲染成空药丸。"""
+    return str(text if text is not None else "").translate(str.maketrans({
+        "[": "［", "]": "］", "`": "ˋ", "*": "＊",
+        "<": "‹", ">": "›", "_": "＿",
+    }))

@@ -95,7 +95,7 @@ class RouterOSScenarioTemplates(_PluginBase):
                    "频场景做成模板：勾选→预览规则与中文含义→确认→批量下发，写入前自动"
                    "备份，失败按逆序自动回滚；只新增带 MP-A2 标签的条目，不改用户已有配置。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosscenariotemplates_"
@@ -363,8 +363,8 @@ class RouterOSScenarioTemplates(_PluginBase):
         content: List[dict] = [
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
-             "content": {"text": "勾选场景、核对每条的中文含义和风险，确认后一次性写入。"
-                                 "只新增带 MP-A2 标签的条目；写之前会在 RouterOS 留备份，中途失败自动回滚。"}},
+             "text": "勾选场景、核对每条的中文含义和风险，确认后一次性写入。"
+                                 "只新增带 MP-A2 标签的条目；写之前会在 RouterOS 留备份，中途失败自动回滚。"},
             self._section_title("目标路由器"),
             {"component": "VRow", "content": [
                 self._col(4, [self._sel("ros_connection", "已保存的路由器（连接中心）",
@@ -461,12 +461,12 @@ class RouterOSScenarioTemplates(_PluginBase):
             ]},
             {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
                                               "class": "mt-3"},
-             "content": {"text": "保存后到详情页点「生成 / 刷新预览」，核对完再点「确认一键部署」。"
-                                 "想撤销点「回滚最近一次部署」。"}},
+             "text": "保存后到详情页点「生成 / 刷新预览」，核对完再点「确认一键部署」。"
+                                 "想撤销点「回滚最近一次部署」。"},
             {"component": "VAlert", "props": {"type": "secondary", "variant": "text",
                                               "class": "mt-2"},
-             "content": {"text": "同一个端口别在「外网访问向导」里再配一次。IPv6、访客隔离有顺序要求，"
-                                 "部署后到防火墙管理器看一眼位置。"}},
+             "text": "同一个端口别在「外网访问向导」里再配一次。IPv6、访客隔离有顺序要求，"
+                                 "部署后到防火墙管理器看一眼位置。"},
         ])
 
         defaults: Dict[str, Any] = {
@@ -545,18 +545,18 @@ class RouterOSScenarioTemplates(_PluginBase):
         if plan.get("errors"):
             content.append({"component": "VAlert", "props": {
                 "type": "error", "variant": "tonal", "class": "mt-3",
-                "title": "参数有问题，先改再部署"},
-                "content": {"text": "；".join(_esc(e) for e in (plan.get("errors") or [])[:8])}})
+                "title": "部署前需处理以下问题（详见下方说明）"},
+                "text": "；".join(_esc(e) for e in (plan.get("errors") or [])[:8])})
         if plan.get("warnings"):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "text", "class": "mt-2"},
-                "content": {"text": "；".join(_esc(e) for e in (plan.get("warnings") or [])[:5])}})
+                "text": "；".join(_esc(e) for e in (plan.get("warnings") or [])[:5])})
         if plan.get("unreadable"):
             content.append({"component": "VAlert", "props": {
                 "type": "warning", "variant": "text", "class": "mt-2",
                 "title": "有几个分区读不到"},
-                "content": {"text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
-                                    + _esc("、".join(str(s) for s in plan["unreadable"]))}})
+                "text": "读不到就没法比对是否已存在，确认 API 账号有读权限："
+                                    + _esc("、".join(str(s) for s in plan["unreadable"]))})
 
 
         # 待确认计划表
@@ -602,7 +602,7 @@ class RouterOSScenarioTemplates(_PluginBase):
         else:
             plan_body.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal", "title": "还没有预览计划"},
-                "content": {"text": "在设置页勾选场景、填好参数保存，回来点「生成 / 刷新预览」。"}})
+                "text": "在设置页勾选场景、填好参数保存，回来点「生成 / 刷新预览」。"})
         content.append({"component": "VCard", "props": {"variant": "outlined", "class": "mt-3"},
                         "content": [{"component": "VCardTitle", "text": "待确认的计划"},
                                     {"component": "VCardText", "content": plan_body}]})

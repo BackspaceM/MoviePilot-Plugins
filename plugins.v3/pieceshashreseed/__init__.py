@@ -99,7 +99,7 @@ def _alert(text: str, kind: str = "info") -> dict:
     return _row({
         "component": "VCol",
         "props": {"cols": 12},
-        "content": [{"component": "VAlert", "props": {"type": kind, "variant": "tonal", "text": text}}],
+        "content": [{"component": "VAlert", "props": {"type": kind, "variant": "tonal"}, "text": text}],
     })
 
 
@@ -116,7 +116,7 @@ class PiecesHashReseed(_PluginBase):
     plugin_name = "Pieces Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed_A.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
