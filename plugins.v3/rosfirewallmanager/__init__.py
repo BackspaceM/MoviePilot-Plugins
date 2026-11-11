@@ -35,14 +35,23 @@ try:
 except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
-try:
-    from schemas import Response
-except Exception:  # noqa: BLE001
-    class Response:  # type: ignore
-        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
-            self.success = success
-            self.message = message
-            self.data = data
+# V3 宿主用 FastAPI 动态注册插件路由：endpoint 的返回注解必须是 Pydantic
+# 可识别的类型，普通类会导致 add_api_route 失败、路由被跳过、按钮 404。
+from pydantic import BaseModel
+
+
+class Response(BaseModel):
+    """插件 API 统一响应：success / message / data 三段式。
+
+    V3 宿主用 FastAPI 动态注册插件路由，endpoint 的返回注解必须是 Pydantic
+    可识别的类型。若降级成普通 Python 类，add_api_route 会抛 FastAPIError，
+    宿主捕获后跳过该路由，详情页按钮就会得到 404 Not Found。
+    自带模型可避免依赖宿主内部模块布局，离线测试同样能完成路由注册。
+    """
+
+    success: bool = True
+    message: str = ""
+    data: Any = None
 
 try:
     from fastapi import Body
@@ -115,17 +124,36 @@ _KEY_SNAPSHOT = "rfm_snapshot"
 _KEY_CONN = "rfm_conn"
 _KEY_IMPORT = "rfm_import"
 
-# 「上传文件」按钮：MP 前端会把 props.onclick 的字符串透传为 DOM onclick 执行
-# （官方 certmanager 用同样的 window.MoviePilotAPI.post 方式）。
+# 「上传文件」控件：原生 input + inline onchange。
+# Vue 会把 props.onclick 的字符串当 DOM property 赋值而不是函数，点击没有反应；
+# 因此改成 html 节点，由 onchange 直接执行语句。脚本内只用单引号且不含 & ，
+# 避免破坏双引号包裹的 HTML 属性解析。
 _UPLOAD_JS = (
-    "function(){var i=document.createElement('input');i.type='file';"
-    "i.accept='.rsc,.txt,.cfg,.conf,text/plain';"
-    "i.onchange=function(e){var f=e.target.files&&e.target.files[0];if(!f)return;"
-    "var r=new FileReader();r.onload=function(){window.MoviePilotAPI.post("
-    "'plugin/RosFirewallManager/import_text',{text:String(r.result||''),name:f.name})"
-    ".then(function(x){alert(x&&x.message?x.message:'已解析，请刷新页面')})"
-    ".catch(function(err){console.error(err);alert('上传解析失败，请查看日志')})};"
-    "r.readAsText(f)};i.click()}"
+    "var tip=document.getElementById('rfmUploadTip');"
+    "var f=this.files?this.files[0]:null;"
+    "if(!f)return;"
+    "var A=window.MoviePilotAPI;"
+    "tip.textContent='正在解析 '+f.name+' ...';"
+    "var rd=new FileReader();"
+    "rd.onload=function(){"
+    "A.post('plugin/RosFirewallManager/import_text',{text:String(rd.result||''),name:f.name})"
+    ".then(function(x){"
+    "var d=x?x.data:null;"
+    "tip.textContent=d?d.brief:(x?x.message:'已解析，请刷新页面');"
+    "})"
+    ".catch(function(err){tip.textContent='上传解析失败，请查看日志'})};"
+    "rd.readAsText(f);"
+)
+
+_UPLOAD_HTML = (
+    "<div style='padding:8px 0 4px 0'>"
+    "<div style='font-size:13px;font-weight:600;margin-bottom:6px'>上传 .rsc / 规则文件</div>"
+    "<input type=\"file\" accept='.rsc,.txt,.cfg,.conf,text/plain' onchange=\""
+    + _UPLOAD_JS
+    + "\">"
+    "<div id='rfmUploadTip' "
+    "style='white-space:pre-line;font-size:12px;line-height:1.6;margin-top:8px;opacity:.85'></div>"
+    "</div>"
 )
 
 _NOTIFY_LABELS = {
@@ -161,7 +189,7 @@ class RosFirewallManager(_PluginBase):
     plugin_desc = ("RouterOS 防火墙可视化管理器：表格化查看 filter/nat/mangle/raw 全部规则并检测影子规则·重复·缺失兜底，"
                    "逐条启停/上下移/删除或按表单新增（自动插到兜底 drop 前），操作前可留备份，定时扫描隐患并推送 MP 通知。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png"
-    plugin_version = "1.2.4"
+    plugin_version = "1.2.6"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "rosfirewallmanager_"
@@ -329,6 +357,8 @@ class RosFirewallManager(_PluginBase):
             "router_username": self._username,
             "router_password": self._password,
             "import_rules": "",
+            "import_file": "",
+            "import_file_path": "",
             "import_table": getattr(self, "_import_table", "filter"),
             "import_place": getattr(self, "_import_place", "before_drop"),
             "import_disabled": getattr(self, "_import_disabled", False),
@@ -392,6 +422,18 @@ class RosFirewallManager(_PluginBase):
                     "placeholder": "/ip firewall filter\n"
                                    "add chain=input action=accept protocol=tcp dst-port=8291\n"
                                    "add chain=input action=drop in-interface-list=WAN"}}]),
+            ]},
+            {"component": "VRow", "content": [
+                col(8, [{"component": "VFileInput", "props": {
+                    "model": "import_file", "label": "选一个 .rsc / 规则文件（可选）",
+                    "accept": ".rsc,.txt,.cfg,.conf,text/plain",
+                    "prepend-icon": "mdi-file-upload-outline",
+                    "hint": "选文件后由 onUpdate:modelValue 把内容转成 import_rules=String 文本，"
+                            "也可直接在主界面上传，或把文本粘贴到上面",
+                    "persistent-hint": True}}]),
+                col(4, [fld("import_file_path", "容器内文件路径（可选）",
+                            {"hint": "浏览器上传不可用时的兜底",
+                             "placeholder": "/config/firewall.rsc"})]),
             ]},
             {"component": "VRow", "content": [
                 col(4, [sel("import_table", "未标注表时的默认表", table_items)]),
@@ -781,16 +823,17 @@ class RosFirewallManager(_PluginBase):
         rule_count = len(preview.get("rules") or [])
         if preview:
             brief = importer.format_import_brief(preview, limit)
+            effect = importer.summarize_import_effect(
+                preview,
+                existing_count=int(status["summary"].get("total", 0) or 0),
+                dry_run=bool(self._dry_run),
+            )
         else:
             brief = ("还没有导入内容：在设置页粘贴 RouterOS 规则，"
-                     "或点下方「上传 .rsc 文件」，导入后每条规则都会翻成中文解释。")
+                     "或用下方「上传 .rsc / 规则文件」，导入后每条规则都会翻成中文解释。")
+            effect = ""
 
         import_buttons = [
-            {"component": "VBtn", "props": {
-                "variant": "flat", "size": "small", "color": "primary",
-                "class": "ma-1", "prepend-icon": "mdi-file-upload-outline",
-                "onclick": _UPLOAD_JS},
-             "text": "上传 .rsc / 规则文件"},
             self._action_button("确认批量导入", "import_apply",
                                 confirm=True, variant="flat", color="warning"),
             self._action_button("清空导入", "import_clear", confirm=True),
@@ -815,9 +858,13 @@ class RosFirewallManager(_PluginBase):
             ]},
             line(table_text or "尚未读取规则"),
             {"component": "div", "props": {
+                "style": "white-space:pre-line;font-size:12px;line-height:1.6;margin-top:8px"},
+             "text": md_safe(effect)},
+            {"component": "div", "props": {
                 "class": "mt-3",
                 "style": "white-space:pre-line;font-size:12px;line-height:1.65"},
              "text": brief},
+            {"component": "div", "props": {"class": "mt-2"}, "html": _UPLOAD_HTML},
             {"component": "VRow", "props": {"class": "mt-2"}, "content": [
                 {"component": "VCol", "content": import_buttons}]},
             {"component": "VRow", "content": [
@@ -984,11 +1031,17 @@ class RosFirewallManager(_PluginBase):
         self.save_data(_KEY_IMPORT, preview)
         self._log("INFO", f"导入解析｜{source}｜{len(preview['rules'])} 条｜"
                           f"提示 {len(preview['errors'])} 条")
+        try:
+            existing = int((self.current_status().get("summary") or {}).get("total", 0) or 0)
+        except Exception:  # noqa: BLE001
+            existing = 0
+        brief = importer.summarize_import_effect(
+            preview, existing_count=existing, dry_run=bool(self._dry_run))
         return Response(success=True,
                         message=(f"已解析 {len(preview['rules'])} 条规则，"
-                                 f"回主界面查看中文解释（刷新页面后可见）"),
+                                 f"下方已就地显示中文解释"),
                         data={"count": len(preview["rules"]),
-                              "errors": preview["errors"]})
+                              "errors": preview["errors"], "brief": brief})
 
     def api_import_apply(self) -> Any:
         """确认后把预览里的规则批量写入 RouterOS。"""

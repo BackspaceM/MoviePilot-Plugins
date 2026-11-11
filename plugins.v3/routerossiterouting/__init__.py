@@ -85,12 +85,12 @@ def _cmd_esc(value: Any) -> str:
 
 class RouterOSSiteRouting(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取，常量引用会被判为「未声明」
-    plugin_name = "RouterOS 站点智能分流 / DNS"
+    plugin_name = "站点分流"
     plugin_desc = ("从 MoviePilot 站点管理读出站点与 Tracker 域名，自动生成 static DNS、"
                    "地址列表、mangle 标记与策略路由，配合 CF 优选 IP；站点增删按标签增量"
                    "同步，预览中文含义后批量写入，只新增带 MP-B3 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerossiterouting.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerossiterouting_"

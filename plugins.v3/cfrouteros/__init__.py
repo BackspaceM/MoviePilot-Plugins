@@ -150,7 +150,7 @@ from . import roslink
 class CFRouterOS(_PluginBase):
     """Cloudflare 优选 IP 写入 RouterOS DNS static。"""
 
-    plugin_name = "Cloudflare 优选 IP → RouterOS"
+    plugin_name = "CF 优选 IP"
     plugin_desc = (
         "识别 Cloudflare CDN 站点，实测官方网段与第三方 IP 池内的 IP 延迟，"
         "取最优若干写入 RouterOS 的 /ip/dns/static，实现内网 DNS 优选解析。"
@@ -158,7 +158,7 @@ class CFRouterOS(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png"
     )
-    plugin_version = "1.3.2"
+    plugin_version = "1.3.3"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -361,7 +361,7 @@ class CFRouterOS(_PluginBase):
                 logger.warning(f"Cloudflare 优选：复位立即执行开关失败 {err}")
             if not self._enabled:
                 self._log("WARN", "插件未启用，已忽略「立即执行一次」")
-                self._send_message("Cloudflare 优选 IP → RouterOS", "插件未启用，请先启用后再执行")
+                self._send_message("CF 优选 IP", "插件未启用，请先启用后再执行")
             elif self.start_run(trigger="配置页", prefer_thread=True):
                 # 配置保存常伴随插件重载，独立线程可避免一次性调度任务被 stop_service 取消
                 self._log("INFO", "配置页触发「立即执行一次」（独立线程）")
@@ -401,7 +401,7 @@ class CFRouterOS(_PluginBase):
         return [
             {
                 "id": "CFRouterOS",
-                "name": "Cloudflare 优选 IP → RouterOS",
+                "name": "CF 优选 IP",
                 "trigger": trigger,
                 "func": self.run_scheduled,
                 "kwargs": {},
@@ -458,7 +458,7 @@ class CFRouterOS(_PluginBase):
         if target and target != self.__class__.__name__:
             return
         channel, userid = data.get("channel"), data.get("user")
-        title = "Cloudflare 优选 IP → RouterOS"
+        title = "CF 优选 IP"
         if action == _CMD_STOP_ACTION:
             self._stop_event.set()
             self._log("WARN", "远程命令请求中止当前任务")
@@ -979,7 +979,7 @@ class CFRouterOS(_PluginBase):
             return schemas.Response(success=False, message="未配置 RouterOS 地址")
         ok, message = self._check_router_sync()
         self._log("INFO" if ok else "WARN", f"检测路由器：{message}")
-        self._send_message("Cloudflare 优选 IP → RouterOS", f"路由器检测：{message}")
+        self._send_message("CF 优选 IP", f"路由器检测：{message}")
         return schemas.Response(success=ok, message=message)
 
     def api_status(self) -> schemas.Response:

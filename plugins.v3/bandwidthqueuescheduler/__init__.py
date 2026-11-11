@@ -31,14 +31,23 @@ try:
 except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
-try:
-    from schemas import Response
-except Exception:  # noqa: BLE001
-    class Response:  # type: ignore
-        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
-            self.success = success
-            self.message = message
-            self.data = data
+# V3 宿主用 FastAPI 动态注册插件路由：endpoint 的返回注解必须是 Pydantic
+# 可识别的类型，普通类会导致 add_api_route 失败、路由被跳过、按钮 404。
+from pydantic import BaseModel
+
+
+class Response(BaseModel):
+    """插件 API 统一响应：success / message / data 三段式。
+
+    V3 宿主用 FastAPI 动态注册插件路由，endpoint 的返回注解必须是 Pydantic
+    可识别的类型。若降级成普通 Python 类，add_api_route 会抛 FastAPIError，
+    宿主捕获后跳过该路由，详情页按钮就会得到 404 Not Found。
+    自带模型可避免依赖宿主内部模块布局，离线测试同样能完成路由注册。
+    """
+
+    success: bool = True
+    message: str = ""
+    data: Any = None
 
 # 带参按钮的 POST body 由 FastAPI 注入；离线测试环境降级为 None。
 try:
@@ -138,7 +147,7 @@ class BandwidthQueueScheduler(_PluginBase):
     plugin_name = 'BandwidthQueueScheduler'
     plugin_desc = '在 RouterOS 上按带宽方案智能编排简单队列：内置均衡/观影/下载/夜间四套方案，支持时段自动切换、一键手动切换、实时速率监控与 FastTrack 失效诊断，统一管理前缀不误伤手工队列。'
     plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/bandwidthqueuescheduler.png'
-    plugin_version = "1.2.3"
+    plugin_version = "1.2.4"
     plugin_author = 'BackspaceM'
     author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "bandwidthqueuescheduler_"
@@ -251,7 +260,7 @@ class BandwidthQueueScheduler(_PluginBase):
             trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
         return [{
             "id": PLUGIN_NAME,
-            "name": "带宽/Queue 智能调度",
+            "name": "带宽调度",
             "trigger": trigger,
             "func": self.start_run,
             # MP scheduler.py 以 add_job(self.start, service["trigger"], ..., **service["kwargs"],

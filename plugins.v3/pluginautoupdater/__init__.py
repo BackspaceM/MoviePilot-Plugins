@@ -64,7 +64,7 @@ except Exception:  # noqa: BLE001 - 离线桩环境没有 fastapi
 from . import host, updater
 
 PLUGIN_ID = "PluginAutoUpdater"
-_LOG_PREFIX = "插件自动更新"
+_LOG_PREFIX = "插件更新"
 _DEFAULT_CRON = "0 5 * * *"
 _ONCE_JOB_ID = "pau_once"
 _MAX_LOGS = 200
@@ -119,11 +119,11 @@ def _now_text() -> str:
 
 class PluginAutoUpdater(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取
-    plugin_name = "插件自动更新"
+    plugin_name = "插件更新"
     plugin_desc = ("扫描已安装插件，设置页多选作者和插件，按 cron 定时或点按钮立即更新；"
                    "只更新选中的、市场里有新版的插件。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pluginautoupdater.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "pluginautoupdater_"
@@ -262,7 +262,7 @@ class PluginAutoUpdater(_PluginBase):
         # 且 MP 是 job["func"]() 无参调用，触发来源只能靠 run_once 的参数默认值。
         return [{
             "id": PLUGIN_ID,
-            "name": "插件自动更新",
+            "name": "插件更新",
             "trigger": trigger,
             "func": self.run_once,
             "kwargs": {},
@@ -328,7 +328,7 @@ class PluginAutoUpdater(_PluginBase):
         if mode == "issue" and not (report.get("success") or report.get("failed")
                                     or report.get("dry_run")):
             return
-        self._send_message("插件自动更新", str(report.get("message") or ""))
+        self._send_message("插件更新", str(report.get("message") or ""))
 
     # ------------------------------------------------------------------
     # 扫描 / 运行
@@ -750,7 +750,7 @@ class PluginAutoUpdater(_PluginBase):
             text = (f"扫描到 {len((self._scan_snapshot().get('plugins') or []))} 个插件；"
                     f"最近一次：{report.get('message') or '还没跑过'}")
         try:
-            self.post_message(title="插件自动更新", text=_esc(text),
+            self.post_message(title="插件更新", text=_esc(text),
                               channel=data.get("channel"), userid=data.get("userid"),
                               **({"mtype": _PLUGIN_MTYPE} if _PLUGIN_MTYPE is not None else {}))
         except Exception as err:  # noqa: BLE001

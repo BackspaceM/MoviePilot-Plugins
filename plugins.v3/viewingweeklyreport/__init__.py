@@ -74,6 +74,7 @@ SYSTEM_VERSION = ">=3.0.0"
 _LOG_PREFIX = "观影周报与转码诊断"
 _ONCE_JOB_ID = "vwr_once"
 _MAX_LOGS = 200
+_CONFIG_CACHE_TTL = 30.0             # 已连接媒体服务器配置缓存（秒）
 _DEFAULT_CRON = "0 9 * * 1"          # 每周一 09:00 推送周报
 _DEFAULT_HISTORY_LIMIT = 200
 _DEFAULT_RETENTION_DAYS = 60
@@ -101,14 +102,26 @@ _WEEK_START_LABELS = {
     "6": "周日为一周起点",
 }
 
-try:
-    from schemas import Response
-except Exception:  # noqa: BLE001
-    class Response:  # type: ignore
-        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
-            self.success = success
-            self.message = message
-            self.data = data
+# V3 宿主用 FastAPI 动态注册插件路由：endpoint 的返回注解必须是 Pydantic
+# 可识别的类型。若这里降级成普通 Python 类，add_api_route 会抛
+# FastAPIError("Invalid args for response field")，宿主捕获后跳过该路由，
+# 详情页按钮请求就会得到 404 Not Found。因此统一使用宿主响应模型，
+# 离线环境降级到本地 BaseModel，两种环境下路由都能正常注册。
+from pydantic import BaseModel
+
+
+class Response(BaseModel):
+    """插件 API 统一响应：success / message / data 三段式。
+
+    V3 宿主用 FastAPI 动态注册插件路由，endpoint 的返回注解必须是 Pydantic
+    可识别的类型。若降级成普通 Python 类，add_api_route 会抛 FastAPIError，
+    宿主捕获后跳过该路由，详情页按钮就会得到 404 Not Found。
+    自带模型可避免依赖宿主内部模块布局，离线测试同样能完成路由注册。
+    """
+
+    success: bool = True
+    message: str = ""
+    data: Any = None
 
 try:
     _PLUGIN_MTYPE = MessageType.Plugin
@@ -150,7 +163,7 @@ class ViewingWeeklyReport(_PluginBase):
                    "电影剧集占比、热门影片），并按规则引擎扫描转码记录给出硬件加速、音频直通、"
                    "字幕烧录、远程码率等可执行诊断建议。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/viewingweeklyreport.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "viewingweeklyreport_"
@@ -169,6 +182,10 @@ class ViewingWeeklyReport(_PluginBase):
         self._running = False
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # 连接配置/密钥的短时缓存：一轮采集里日志会多次调用 _secrets()，
+        # 缓存可避免逐条日志重复读取宿主配置与解析手动补充框。
+        self._cfg_cache: Tuple[float, Dict[str, Any]] = (0.0, {})
+        self._secrets_cache: Tuple[float, List[str]] = (0.0, [])
         # 默认配置，保证 init_plugin 前调用 get_form/get_page 不崩
         self._media_servers: List[str] = []
         self._media_servers_manual = ""
@@ -186,6 +203,9 @@ class ViewingWeeklyReport(_PluginBase):
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
+        # 配置一变就失效缓存，避免继续沿用旧的连接信息与密钥。
+        self._cfg_cache = (0.0, {})
+        self._secrets_cache = (0.0, [])
         self._enabled = bool(config.get("enabled"))
 
         selected = config.get("media_servers") or []
@@ -256,7 +276,7 @@ class ViewingWeeklyReport(_PluginBase):
             trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
         return [{
             "id": PLUGIN_NAME,
-            "name": "观影周报 / 转码诊断",
+            "name": "观影周报",
             "trigger": trigger,
             "func": self.start_run,
             # kwargs 是展开给 APScheduler.add_job 的调度参数，绝不能含 trigger；
@@ -268,21 +288,25 @@ class ViewingWeeklyReport(_PluginBase):
     # 已连接媒体服务器下拉数据源（通用选型模式）
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _connected_media_configs() -> Dict[str, Any]:
-        """从 MP 服务门面读取已连接的媒体服务器配置，按类型过滤。"""
+    def _connected_media_configs(self) -> Dict[str, Any]:
+        """从 MP 服务门面读取已连接的媒体服务器配置，按类型过滤并做短时缓存。"""
+        now = time.monotonic()
+        cached_at, cached = self._cfg_cache
+        if cached and now - cached_at < _CONFIG_CACHE_TTL:
+            return cached
         try:
             from app.sdk.services import MediaServerHelper
             configs = MediaServerHelper().get_configs() or {}
         except Exception as err:  # noqa: BLE001
             logger.warning(f"{_LOG_PREFIX}：读取已连接媒体服务器失败 {err}")
-            return {}
+            return cached
         out: Dict[str, Any] = {}
         items = configs.items() if isinstance(configs, dict) else []
         for key, cfg in items:
             stype = _cfg_attr(cfg, "type", "server_type")
             if str(stype or "").lower() in _MEDIA_TYPES:
                 out[str(key)] = cfg
+        self._cfg_cache = (now, out)
         return out
 
     def _connected_items(self) -> List[Dict[str, str]]:
@@ -296,7 +320,11 @@ class ViewingWeeklyReport(_PluginBase):
         servers: List[MediaServer] = []
         warnings: List[str] = []
         cfg_map = self._connected_media_configs()
-        for name in self._media_servers:
+        selected = list(self._media_servers)
+        # 未勾选且没填手动补充时，自动使用全部已连接实例：装好即用，无需配置。
+        if not selected and not (self._media_servers_manual or "").strip():
+            selected = list(cfg_map.keys())
+        for name in selected:
             cfg = cfg_map.get(name)
             if cfg is None:
                 warnings.append(f"已选实例 {name} 在当前连接列表中不存在，请重新勾选或改到手动补充框")
@@ -318,15 +346,25 @@ class ViewingWeeklyReport(_PluginBase):
         return list(seen.values()), warnings
 
     def _secrets(self) -> List[str]:
+        """日志脱敏用的密钥清单，与连接配置共用同一缓存窗口。"""
+        now = time.monotonic()
+        cached_at, cached = self._secrets_cache
+        if cached and now - cached_at < _CONFIG_CACHE_TTL:
+            return cached
+        cfg_map = self._connected_media_configs()
+        selected = list(self._media_servers)
+        if not selected and not (self._media_servers_manual or "").strip():
+            selected = list(cfg_map.keys())
         secrets: List[str] = []
-        for name in self._media_servers:
-            cfg = self._connected_media_configs().get(name)
+        for name in selected:
+            cfg = cfg_map.get(name)
             if cfg is not None:
                 v = _cfg_attr(cfg, "apikey", "api_key", "token", "access_token")
                 if v:
                     secrets.append(str(v))
         manual, _ = parse_servers(self._media_servers_manual)
         secrets.extend([s.apikey for s in manual if s.apikey])
+        self._secrets_cache = (now, secrets)
         return secrets
 
     # ------------------------------------------------------------------
@@ -375,7 +413,8 @@ class ViewingWeeklyReport(_PluginBase):
                     {"component": "VSelect", "props": {
                         "model": "media_servers", "label": "已连接媒体服务器（可多选）",
                         "items": connected_items, "multiple": True, "chips": True,
-                        "clearable": True, "hint": "从 MoviePilot 已连接的实例中勾选；不选则仅用下方手动补充",
+                        "clearable": True,
+                        "hint": "留空即自动使用全部已连接实例（推荐，装好即用）；也可只勾选部分",
                         "persistent-hint": True}}]},
                 {"component": "VCol", "props": {"cols": 12, "md": 5}, "content": [
                     {"component": "VSelect", "props": {

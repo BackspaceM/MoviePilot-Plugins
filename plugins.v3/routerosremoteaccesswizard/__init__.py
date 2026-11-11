@@ -91,12 +91,12 @@ def _cmd_esc(value: Any) -> str:
 
 class RouterOSRemoteAccessWizard(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取，常量引用会被判为「未声明」
-    plugin_name = "RouterOS 外网访问向导"
+    plugin_name = "外网访问向导"
     plugin_desc = ("从 MoviePilot 已连接的媒体服务器、下载器和 MP 本体里挑服务，一键生成 "
                    "dst-nat 映射 + 防火墙放行，预览「外网端口 → 内网服务」后批量写入；"
                    "带域名备注、连通性测试、自动备份与失败回滚，只新增带 MP-B1 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosremoteaccesswizard_"

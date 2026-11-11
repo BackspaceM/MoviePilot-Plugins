@@ -1,9 +1,9 @@
 {
   "RouterOSSiteRouting": {
-    "name": "RouterOS 站点智能分流 / DNS",
+    "name": "站点分流",
     "description": "从 MoviePilot 站点管理读出已配置站点和 Tracker 域名，自动在 RouterOS 上生成 static DNS、地址列表、mangle 标记与策略路由，配合 CF 优选 IP 一起用。站点增删时增量更新，不用手工维护地址列表。预览每条动作的中文含义、风险与等价命令，确认后批量下发；只新增带 MP-B3 标签的条目，同标签幂等跳过，部署前留系统备份，中途失败逆序自动回滚。",
     "labels": "RouterOS,PT站点,智能分流,static DNS,address-list,mangle,策略路由,MikroTik,增量更新,自动回滚",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerossiterouting.png",
     "author": "BackspaceM",
     "level": 1,
@@ -12,15 +12,16 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：读取 MP 站点管理与 Tracker 域名（下拉多选 + 手动补充），生成 static DNS 正向记录、站点地址列表、mangle 连接/包标记与可选策略路由；站点增删按标签增量同步，只新增带 MP-B3 标签的条目，同标签幂等跳过；预览展示中文含义、风险与等价命令，确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚、手动回滚只删本次新建条目；支持定时增量同步、试运行、通知与远程命令。",
-      "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.2": "统一插件图标（同一渐变底板与线性符号）与显示名「站点分流」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
+      "v1.0.0": "首个版本：读取 MP 站点管理与 Tracker 域名（下拉多选 + 手动补充），生成 static DNS 正向记录、站点地址列表、mangle 连接/包标记与可选策略路由；站点增删按标签增量同步，只新增带 MP-B3 标签的条目，同标签幂等跳过；预览展示中文含义、风险与等价命令，确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚、手动回滚只删本次新建条目；支持定时增量同步、试运行、通知与远程命令。"
     }
   },
   "RouterOSWorkbench": {
-    "name": "RouterOS 统一工作台",
+    "name": "ROS 工作台",
     "description": "把分散在多个 RouterOS 插件里的内容收进一个工具箱：一次配置连接，页签切换「概览 / 防火墙 / Queue / 备份 / 分流」，共用实时流量与拓扑卡片。不改动其它插件结构，直接读 RouterOS REST 现状与本地插件状态，附带各插件的启用情况与快捷入口。",
     "labels": "RouterOS,统一工作台,页签,概览,防火墙,Queue,备份,分流,MikroTik,工具箱",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosworkbench.png",
     "author": "BackspaceM",
     "level": 1,
@@ -29,15 +30,16 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：一次配置连接（支持 RouterOS 连接中心下拉），五个页签「概览 / 防火墙 / Queue / 备份 / 分流」聚合 RouterOS 系统资源、接口实时流量、防火墙规则、简单队列、静态 DNS、地址列表与备份状态；同时列出本地 RouterOS 插件的启用状态、版本与快捷入口。只读聚合，不改其它插件结构，支持一键刷新、定时刷新、远程命令与通知。",
-      "v1.0.1": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.2": "统一插件图标（同一渐变底板与线性符号）与显示名「ROS 工作台」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.0.1": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
+      "v1.0.0": "首个版本：一次配置连接（支持 RouterOS 连接中心下拉），五个页签「概览 / 防火墙 / Queue / 备份 / 分流」聚合 RouterOS 系统资源、接口实时流量、防火墙规则、简单队列、静态 DNS、地址列表与备份状态；同时列出本地 RouterOS 插件的启用状态、版本与快捷入口。只读聚合，不改其它插件结构，支持一键刷新、定时刷新、远程命令与通知。"
     }
   },
   "PluginAutoUpdater": {
-    "name": "插件自动更新",
+    "name": "插件更新",
     "description": "扫描已安装插件，设置页可多选作者和插件，按 cron 定时或点按钮立即更新；只更新选中的、市场里有新版的插件。",
     "labels": "插件管理,自动更新,作者多选,插件多选,cron,立即运行,试运行,MoviePilot",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pluginautoupdater.png",
     "author": "BackspaceM",
     "level": 1,
@@ -46,16 +48,17 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.1.2": "统一插件图标（同一渐变底板与线性符号）与显示名「插件更新」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.1.1": "修复服务注册失败（get_service 的 kwargs 含 trigger 键，被展开给 APScheduler.add_job 时撞名）；定时触发来源改由 run_once 参数默认值提供。筛选逻辑由交集改为并集：固定作者（可多选）自动覆盖其名下所有已安装插件（含以后新装的），指定插件（可多选）作为额外补充，两者合并去重，互不排斥。作者/插件下拉各增加逗号分隔的手动补充框，兼容扫描不到或外部插件；配置页与详情页补充范围说明；api_filter 补 Body(default=None) 使 POST body 可注入。",
       "v1.1.0": "设置页改成作者与插件两个多选下拉，cron 定时保持不变；配置页只读本机插件表，不再因在线目录卡住；修掉详情页按钮的 422 参数错误；主界面只留按钮和一行状态，日志与记录交给宿主日志和接口。",
-      "v1.0.0": "首个版本：扫描已安装插件（ID / 名称 / 作者 / 当前版本 / 可更新版本 / 来源仓库），配置页按作者单选筛选、另一个下拉框多选目标插件；支持立即运行按钮、cron 定时执行、试运行、单次最多更新数量、跳过自身、失败继续、更新记录与日志、通知与远程命令。更新走宿主插件安装入口，离线环境自动降级为只读扫描。",
-      "v1.1.1": "修复服务注册失败（get_service 的 kwargs 含 trigger 键，被展开给 APScheduler.add_job 时撞名）；定时触发来源改由 run_once 参数默认值提供。筛选逻辑由交集改为并集：固定作者（可多选）自动覆盖其名下所有已安装插件（含以后新装的），指定插件（可多选）作为额外补充，两者合并去重，互不排斥。作者/插件下拉各增加逗号分隔的手动补充框，兼容扫描不到或外部插件；配置页与详情页补充范围说明；api_filter 补 Body(default=None) 使 POST body 可注入。"
+      "v1.0.0": "首个版本：扫描已安装插件（ID / 名称 / 作者 / 当前版本 / 可更新版本 / 来源仓库），配置页按作者单选筛选、另一个下拉框多选目标插件；支持立即运行按钮、cron 定时执行、试运行、单次最多更新数量、跳过自身、失败继续、更新记录与日志、通知与远程命令。更新走宿主插件安装入口，离线环境自动降级为只读扫描。"
     }
   },
   "RouterOSRemoteAccessWizard": {
-    "name": "RouterOS 外网访问向导",
+    "name": "外网访问向导",
     "description": "从 MoviePilot 已连接的媒体服务器、下载器 WebUI 和 MP 本体里挑服务，一次生成 dst-nat 映射 + forward 放行（可选 Hairpin NAT）。预览表里直接看「外网端口 → 内网服务」的中文含义、风险与等价命令，确认后批量写入 RouterOS；备注带域名，方便以后在路由器上认出每条规则。部署前自动留系统备份，中途失败逆序回滚，同标签已存在则跳过。还带内网/外网连通性测试、一键回滚、试运行、MP 通知与远程命令。只新增带 MP-B1 标签的条目，不动用户手工规则；公网映射需显式勾选放行。",
     "labels": "RouterOS,端口映射,外网访问,dst-nat,防火墙,连通性测试,自动回滚,MikroTik,远程观影",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -64,15 +67,16 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：自动列出 MP 已连接的媒体服务器、下载器与 MP 本体的内网地址端口，支持下拉多选 + 手动补充；按「外网端口 → 内网服务」生成 dst-nat、forward 放行与可选 Hairpin NAT，外网端口自动分配并避开已占用端口，备注里写入域名；预览展示中文含义、风险、等价命令与插入位置（放行规则插到兜底 drop 之前）；确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚、手动回滚只删本次新建条目；统一 MP-B1 标签实现幂等跳过，公网映射需显式放行，参数校验与试运行；内网/外网两级连通性测试；接入 RouterOS 连接中心、11 个插件 API 与 5 个远程命令。",
-      "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.2": "统一插件图标（同一渐变底板与线性符号）与显示名「外网访问向导」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
+      "v1.0.0": "首个版本：自动列出 MP 已连接的媒体服务器、下载器与 MP 本体的内网地址端口，支持下拉多选 + 手动补充；按「外网端口 → 内网服务」生成 dst-nat、forward 放行与可选 Hairpin NAT，外网端口自动分配并避开已占用端口，备注里写入域名；预览展示中文含义、风险、等价命令与插入位置（放行规则插到兜底 drop 之前）；确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚、手动回滚只删本次新建条目；统一 MP-B1 标签实现幂等跳过，公网映射需显式放行，参数校验与试运行；内网/外网两级连通性测试；接入 RouterOS 连接中心、11 个插件 API 与 5 个远程命令。"
     }
   },
   "RouterOSScenarioTemplates": {
-    "name": "RouterOS 场景模板一键部署",
+    "name": "场景模板",
     "description": "把 PT 友好 QoS、远程观影放行、访客网络隔离、IPv6 基础开通、WireGuard 回家做成场景模板：勾选 → 预览每条写入的分区、中文含义、风险与等价命令 → 确认 → 批量下发到 RouterOS 10 个配置分区。部署前自动创建 RouterOS 系统备份并把现状快照存到 MP，中途失败按逆序删除本次新建条目自动回滚，同标签已存在则跳过（幂等）；只新增带 MP-A2 标签的条目，绝不改动用户手工规则。连接参数可直接从 RouterOS 连接中心下拉带入，并支持试运行、一键回滚、MP 通知与远程命令。",
     "labels": "RouterOS,场景模板,一键部署,自动回滚,配置备份,MikroTik,QoS,IPv6,WireGuard,降门槛",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png",
     "author": "BackspaceM",
     "level": 1,
@@ -81,15 +85,16 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：5 套场景模板（PT 友好 QoS / 远程观影放行 / 访客网络隔离 / IPv6 基础开通 / WireGuard 回家）共 21 条动作覆盖 10 个 RouterOS 分区；预览展示中文含义、风险等级、等价命令与插入位置；确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚，手动回滚只删本次新建条目；统一 MP-A2 备注标签实现幂等跳过，高危模板需显式放行，参数校验与试运行；接入 RouterOS 连接中心下拉、9 个插件 API 与 4 个远程命令。",
-      "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.2": "统一插件图标（同一渐变底板与线性符号）与显示名「场景模板」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
+      "v1.0.0": "首个版本：5 套场景模板（PT 友好 QoS / 远程观影放行 / 访客网络隔离 / IPv6 基础开通 / WireGuard 回家）共 21 条动作覆盖 10 个 RouterOS 分区；预览展示中文含义、风险等级、等价命令与插入位置；确认后批量下发，部署前 /system/backup/save 备份 + MP 结构化快照，失败逆序自动回滚，手动回滚只删本次新建条目；统一 MP-A2 备注标签实现幂等跳过，高危模板需显式放行，参数校验与试运行；接入 RouterOS 连接中心下拉、9 个插件 API 与 4 个远程命令。"
     }
   },
   "RouterOSConnectionCenter": {
-    "name": "RouterOS 连接中心",
+    "name": "连接中心",
     "description": "一处保存多台 RouterOS 连接，自动广播给同库的 RouterOS 插件（设置页下拉即可选择，不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查配置、端口连通、REST 可用性、认证权限、RouterOS 版本与业务分区读权限，失败时给出可直接复制到 RouterOS 终端执行的修复命令。不选下拉时其他插件行为完全不变。",
     "labels": "RouterOS,连接管理,一键体检,配置同步,降门槛,MikroTik",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png",
     "author": "BackspaceM",
     "level": 1,
@@ -98,17 +103,18 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.3": "统一插件图标（同一渐变底板与线性符号）与显示名「连接中心」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.0.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.0.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
-      "v1.0.0": "首个版本：统一维护多台 RouterOS 连接并广播共享文件，其余 4 个 RouterOS 插件设置页新增「已保存的路由器」下拉；一键体检覆盖配置完整性、TCP 连通、REST 与认证、版本、业务分区读权限，失败项给出 RouterOS 修复命令；广播文件权限 0600，关闭广播或读取失败时自动回退各插件原有手填配置。",
-      "v1.0.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本：统一维护多台 RouterOS 连接并广播共享文件，其余 4 个 RouterOS 插件设置页新增「已保存的路由器」下拉；一键体检覆盖配置完整性、TCP 连通、REST 与认证、版本、业务分区读权限，失败项给出 RouterOS 修复命令；广播文件权限 0600，关闭广播或读取失败时自动回退各插件原有手填配置。"
     }
   },
   "PiecesHashReseed": {
-    "name": "Pieces Hash 辅种",
+    "name": "Hash 辅种",
     "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验。",
     "labels": "做种,辅种,站点,下载器",
-    "version": "1.0.2",
-    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed_A.png",
+    "version": "1.0.3",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png",
     "author": "BackspaceM",
     "level": 1,
     "release": true,
@@ -116,35 +122,37 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.3": "统一插件图标（同一渐变底板与线性符号）与显示名「Hash 辅种」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.0.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.0.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
-      "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。",
-      "v1.0.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。"
     }
   },
   "CFRouterOS": {
-    "name": "Cloudflare 优选 IP → RouterOS",
+    "name": "CF 优选 IP",
     "description": "默认零 DoH 依赖，把配置的 PT 站点域名直接视为 Cloudflare CDN 站点；自动刷新 Cloudflare 官方 ips-v4/ips-v6，并支持多个第三方/个人维护的 IP 池地址（纯文本/JSON/CIDR/IPv6），池内 IP 优先参与 TCP/TLS 测速；取最优若干写入 RouterOS /ip/dns/static。逐站点原始 IP、优选 IP 与写入结果通过 SSE 实时日志查看，支持 MP 通知、cron、试运行与先写后删保护。",
     "labels": "网络",
-    "version": "1.3.2",
+    "version": "1.3.3",
     "release": true,
     "author": "BackspaceM",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.3.3": "统一插件图标（同一渐变底板与线性符号）与显示名「CF 优选 IP」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.3.2": "主界面新增「最近写入成功」展示（最近几次成功运行 + 最近一次逐域名写入明细），并精简重复日志区块。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.3.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.3.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.2.0": "去掉对单一 DoH 的强依赖：新增站点判定方式（默认不检测全部纳入 / 系统 DNS 判定 CDN IP / 多源 DoH 判定）与判定失败仍纳入开关，彻底解决所有域名显示「DoH 解析失败或无 A 记录」被跳过；支持多个第三方或个人维护的 Cloudflare IP 池 URL（纯文本/JSON/CIDR/IP:端口/IPv6）、手动 IP 池、IP 来源模式、刷新周期与按源缓存回退，官方网段来源在界面可见；逐站点原始 IP、判定来源、优选 IP 与 RouterOS 写入成败写入 INFO 日志，MP「查看日志」经 SSE 实时推送，另增实时进度 /live、站点明细与 IP 池来源面板、/refresh_pool 与 /cfrouteros_pool 命令；通知带站点明细，补排除域名、TLS SNI 固定、池 IP 配额、候选分批可中止、日志脱敏增强与写入地址明细。",
       "v1.1.0": "新增配置页「立即执行一次」与详情页有效按钮；修复插件日志不可见（关键路径 INFO 日志 + 详情页运行日志 + /logs）；通知改用 MoviePilot 通知链并支持全部/仅异常/关闭三种模式，远程命令按来源渠道回复；补 AAAA 解析、先写后删保护、最少可用 IP 表单项、实例级运行锁、事件循环兼容与图标地址修复。",
-      "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。",
-      "v1.3.2": "主界面新增「最近写入成功」展示（最近几次成功运行 + 最近一次逐域名写入明细），并精简重复日志区块。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "初版：Cloudflare 网段自动刷新、DoH 解析判定、并发 TCP 测速、Top N 写入 RouterOS DNS static（按备注前缀精确替换）、PT 站点域名自动收集、dry-run 预演。"
     }
   },
   "HDWinGCrossSeed": {
     "name": "HDWinG 辅种",
     "description": "从本地下载器取已完成任务，在 HDWinG（hdwing.org）按名称检索候选种子，文件一致时下载原种加入做种，提升站点做种收益。",
     "labels": "做种",
-    "version": "1.1.2",
+    "version": "1.1.3",
     "release": true,
     "author": "BackspaceM",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png",
@@ -152,17 +160,18 @@
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.1.3": "统一插件图标（同一渐变底板与线性符号）与显示名「HDWinG 辅种」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.1.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.1.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.1.0": "最近记录改为紧凑表格（仅显示最近 8 条、长文本截断、状态彩色标签）；待重试数改为运行时维护，详情页不再遍历整份辅种缓存，历史存储上限收紧到 40 条。",
-      "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、HDWinG 检索匹配、严格文件级校验、自动辅种与去重缓存。",
-      "v1.1.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "初版：支持 qBittorrent/Transmission 已完成任务扫描、HDWinG 检索匹配、严格文件级校验、自动辅种与去重缓存。"
     }
   },
   "PlaybackScheduler": {
-    "name": "播放感知调度",
+    "name": "播放调度",
     "description": "读取 Emby/Jellyfin/Plex 的活动播放会话，按「是否转码 / 是否远程」判定播放状态，对下载器（qBittorrent / Transmission）施加对应限速并可选联动 RouterOS 简单队列；支持在播文件保护标签、观影后自动删种、定时轮询与立即检查、MP 通知与 INFO 级 SSE 实时日志。",
     "labels": "媒体库,Emby,Plex,Jellyfin,限速,RouterOS,播放,带宽",
-    "version": "1.1.3",
+    "version": "1.1.4",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/playbackscheduler.png",
     "author": "BackspaceM",
     "level": 1,
@@ -171,17 +180,18 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.1.4": "修复 V3 动态路由注册失败导致的详情页按钮 Not Found：响应模型改为自带 Pydantic BaseModel，不再依赖已移除的顶层 schemas 导入；统一插件图标（同一渐变底板与线性符号）与显示名「播放调度」；修正按钮 POST 与接口仅声明 GET 的方法冲突。",
+      "v1.1.3": "补齐 core.md_safe，修复插件导入失败（ImportError）。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.1.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.1.0": "媒体服务器与下载器改为已连接实例下拉；各状态限速改为直接填速度（Mbps）；详情页卡片分区与按钮分组美化；修复插件 API 路径多写前缀导致按钮 404 与 status 方法不匹配。",
-      "v1.0.0": "首个版本：读取 Emby/Jellyfin/Plex 在播会话（支持多服务器、路径映射），按 directplay/transcode/remote_transcode/idle 四态用 Mbps 限速换算为下载器所需单位（qB 字节/秒、TR KB/秒）并实时下发；可选联动 RouterOS 简单队列（idle 自动移除、播放时按上传限速推导 max-limit）；在播文件打保护标签、观影后按保留天数与做种率自动删种；cron 定时轮询、配置页与远程命令立即检查、MP 通知分级、INFO 级 SSE 实时日志与详情页按钮。",
-      "v1.1.3": "补齐 core.md_safe，修复插件导入失败（ImportError）。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本：读取 Emby/Jellyfin/Plex 在播会话（支持多服务器、路径映射），按 directplay/transcode/remote_transcode/idle 四态用 Mbps 限速换算为下载器所需单位（qB 字节/秒、TR KB/秒）并实时下发；可选联动 RouterOS 简单队列（idle 自动移除、播放时按上传限速推导 max-limit）；在播文件打保护标签、观影后按保留天数与做种率自动删种；cron 定时轮询、配置页与远程命令立即检查、MP 通知分级、INFO 级 SSE 实时日志与详情页按钮。"
     }
   },
   "RouterOSConfigGuard": {
-    "name": "RouterOS 配置备份与漂移检测",
+    "name": "配置守卫",
     "description": "定时备份 RouterOS 关键配置分区并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录（结构化快照、可对比回滚）、RouterOS 本机（.backup 系统备份 + .rsc 配置导出）或双份，含文件轮转与漂移即时通知。",
     "labels": "RouterOS,备份,漂移检测,配置审计,MikroTik,备份位置",
-    "version": "1.3.3",
+    "version": "1.3.4",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -190,19 +200,20 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.3.4": "修复 V3 动态路由注册失败导致的详情页按钮 Not Found：响应模型改为自带 Pydantic BaseModel，不再依赖已移除的顶层 schemas 导入；统一插件图标（同一渐变底板与线性符号）与显示名「配置守卫」；修正按钮 POST 与接口仅声明 GET 的方法冲突。",
+      "v1.3.3": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.3.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.3.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.2.0": "详情页卡片分区与按钮分组美化，修正按钮 API 路径与 GET/POST 方法；设置页补齐权限、加密、基线与轮转的文字说明，替换原来只有图标的小提示，并增加分区标题。",
       "v1.1.0": "新增备份位置选项：可选仅存 MP 插件目录（结构化快照、可对比/回滚）、仅存 RouterOS 本机（/system/backup/save 生成 .backup + /export 生成 .rsc，按前缀自动轮转删除旧组）、或两处都存；漂移基线作为轻量检测状态始终留 MP，RouterOS 单机模式也能手动设基线。移除与备份无关的下载器/媒体服务器关联巡检（该选型约定适用于后续其它插件）。修复详情页运行日志/差异明细因方括号被前端当 Markdown 参考式链接而渲染成空药丸的问题（动态文本统一全角转义 + 日志改用全角 ｜ 分隔）；新增 /rosbackups 刷新 ROS 备份清单 API 与详情页双清单视图。",
-      "v1.0.0": "首个版本：RouterOS REST 只读抓取 20 个可配置分区（默认 12 个），剔除 .id 与易变统计字段后生成稳定指纹快照；与基线做多重集对比输出新增/删除，防火墙/NAT/路由/DNS/用户/脚本等敏感分区漂移高亮告警；cron 定时备份+立即执行、快照落盘与自动轮转、一键设基线、详情页漂移明细/快照清单/SSE 实时日志、MP 分级通知、测试连接与远程命令。",
-      "v1.3.3": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本：RouterOS REST 只读抓取 20 个可配置分区（默认 12 个），剔除 .id 与易变统计字段后生成稳定指纹快照；与基线做多重集对比输出新增/删除，防火墙/NAT/路由/DNS/用户/脚本等敏感分区漂移高亮告警；cron 定时备份+立即执行、快照落盘与自动轮转、一键设基线、详情页漂移明细/快照清单/SSE 实时日志、MP 分级通知、测试连接与远程命令。"
     }
   },
   "MediaLibraryRefresh": {
-    "name": "媒体库精准刷新",
+    "name": "媒体库刷新",
     "description": "监听整理入库/字幕/删除事件，按文件级增量刷新 Emby/Jellyfin 与 Plex（不做全库扫描）；支持多服务器、路径映射、合并窗口去重、分级回退与失败重试、定时对账、试运行、MP 通知与 SSE 实时日志。",
     "labels": "媒体库,Emby,Plex,Jellyfin,刷新",
-    "version": "1.1.2",
+    "version": "1.1.3",
     "release": true,
     "author": "BackspaceM",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/medialibraryrefresh.png",
@@ -211,17 +222,18 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.1.3": "统一插件图标（同一渐变底板与线性符号）与显示名「媒体库刷新」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
+      "v1.1.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.1.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.1.0": "媒体服务器改为从 MoviePilot 已连接实例下拉多选；保留手动补充框用于路径映射，同名手动配置优先覆盖下拉项。",
-      "v1.0.0": "首个版本：TransferComplete/字幕/删除事件提取文件路径；Emby/Jellyfin 用 /Library/Media/Updated 做单文件级 Created/Modified/Deleted 增量刷新，Plex 按媒体库 + 父目录局部扫描；按服务器路径映射、合并窗口 debounce、批量上限与最大等待、三级回退（父目录/库级/全库）、指数退避重试与丢弃告警；多服务器连通性检测、定时对账、试运行、MP 通知分级、INFO 级 SSE 实时日志与详情页逐服务器明细/队列/日志；5 个远程命令与 9 个插件 API。",
-      "v1.1.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本：TransferComplete/字幕/删除事件提取文件路径；Emby/Jellyfin 用 /Library/Media/Updated 做单文件级 Created/Modified/Deleted 增量刷新，Plex 按媒体库 + 父目录局部扫描；按服务器路径映射、合并窗口 debounce、批量上限与最大等待、三级回退（父目录/库级/全库）、指数退避重试与丢弃告警；多服务器连通性检测、定时对账、试运行、MP 通知分级、INFO 级 SSE 实时日志与详情页逐服务器明细/队列/日志；5 个远程命令与 9 个插件 API。"
     }
   },
   "BandwidthQueueScheduler": {
-    "name": "带宽/Queue 智能调度",
+    "name": "带宽调度",
     "description": "在 RouterOS 上按带宽方案智能编排简单队列：内置均衡/观影优先/下载优先/夜间全速四套方案，支持时段规则自动切换、详情页一键手动切换、队列实时速率监控与 FastTrack 绕过诊断；统一管理前缀，绝不误伤手工队列。",
     "labels": "RouterOS,带宽管理,Queue,智能调度,MikroTik,限速,时段调度",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/bandwidthqueuescheduler.png",
     "author": "BackspaceM",
     "level": 1,
@@ -230,18 +242,19 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.2.4": "修复 V3 动态路由注册失败导致的详情页按钮 Not Found：响应模型改为自带 Pydantic BaseModel，不再依赖已移除的顶层 schemas 导入；统一插件图标（同一渐变底板与线性符号）与显示名「带宽调度」。",
+      "v1.2.3": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.2.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.2.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.1.0": "详情页卡片分区、方案按钮高亮当前项、操作按钮按主次分组；设置页增加分区标题与 FastTrack/权限/填写格式说明；修复按钮 API 路径导致的 404。",
-      "v1.0.0": "首个版本：在 RouterOS 上按带宽方案智能编排简单队列。用户以 名称=IP/CIDR|角色 定义设备，内置均衡/观影优先/下载优先/夜间全速四套方案并支持自定义 JSON 覆盖；可按 HH:MM-HH:MM=方案 的时段规则自动切换（含跨午夜），也可在详情页一键切换（每个按钮均绑定真实 API，杜绝无效按钮）。每轮按差异新建/更新/删除队列（仅管理统一前缀，不碰手工队列），读取实时速率并诊断 FastTrack 绕过风险；cron 定时+立即执行+试运行、MP 分级通知、INFO 级 SSE 实时日志、7 个 API 与远程命令。详情页动态文本统一全角转义，避免被当 Markdown 渲染成空药丸。",
-      "v1.2.3": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本：在 RouterOS 上按带宽方案智能编排简单队列。用户以 名称=IP/CIDR|角色 定义设备，内置均衡/观影优先/下载优先/夜间全速四套方案并支持自定义 JSON 覆盖；可按 HH:MM-HH:MM=方案 的时段规则自动切换（含跨午夜），也可在详情页一键切换（每个按钮均绑定真实 API，杜绝无效按钮）。每轮按差异新建/更新/删除队列（仅管理统一前缀，不碰手工队列），读取实时速率并诊断 FastTrack 绕过风险；cron 定时+立即执行+试运行、MP 分级通知、INFO 级 SSE 实时日志、7 个 API 与远程命令。详情页动态文本统一全角转义，避免被当 Markdown 渲染成空药丸。"
     }
   },
   "ViewingWeeklyReport": {
-    "name": "观影周报 / 转码诊断",
+    "name": "观影周报",
     "description": "汇总 MoviePilot 已连接媒体服务器（Emby/Jellyfin/Plex）近期观影数据，生成本周/上周/近 7 天观影周报（观看时长、用户与服务器排行、每日趋势、电影剧集占比、热门影片），并按规则引擎扫描转码记录给出硬件加速、音频直通、字幕烧录、远程码率等可执行诊断建议。",
     "labels": "观影周报,转码诊断,Emby,Jellyfin,Plex,播放统计,硬件加速,观影报告",
-    "version": "1.1.3",
+    "version": "1.1.4",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/viewingweeklyreport.png",
     "author": "BackspaceM",
     "level": 1,
@@ -250,17 +263,18 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.1.4": "修复 V3 动态路由注册失败导致的详情页按钮 Not Found：响应模型改为自带 Pydantic BaseModel，不再依赖已移除的顶层 schemas 导入；统一插件图标（同一渐变底板与线性符号）与显示名「观影周报」。",
+      "v1.1.3": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.1.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.1.0": "详情页卡片分区与分组彩色按钮；设置页增加分区标题与使用说明；修复按钮 API 路径导致的 404。",
-      "v1.0.0": "首个版本。媒体服务器采用 MoviePilot 已连接实例下拉多选 + 手动补充框的通用选型模式。按本周/上周/近 7 天（周一或周日为起点）聚合观看时长、用户/服务器排行、每日趋势与热门影片，并给出播放健康度等级；转码诊断覆盖 HEVC、音频不兼容、字幕烧录、远程转码、4K 高负载、软件转码、高码率七类问题并给出优化建议。支持定时推送(cron)+立即执行+详情页手动采集/诊断/推送，MP 分级通知与 INFO 级 SSE 实时日志。详情页所有动态文本统一全角转义、日志用全角 ｜ 分隔，杜绝半角方括号被当 Markdown 渲染成空药丸；每个按钮均绑定真实 API，无不可点击按钮。",
-      "v1.1.3": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。"
+      "v1.0.0": "首个版本。媒体服务器采用 MoviePilot 已连接实例下拉多选 + 手动补充框的通用选型模式。按本周/上周/近 7 天（周一或周日为起点）聚合观看时长、用户/服务器排行、每日趋势与热门影片，并给出播放健康度等级；转码诊断覆盖 HEVC、音频不兼容、字幕烧录、远程转码、4K 高负载、软件转码、高码率七类问题并给出优化建议。支持定时推送(cron)+立即执行+详情页手动采集/诊断/推送，MP 分级通知与 INFO 级 SSE 实时日志。详情页所有动态文本统一全角转义、日志用全角 ｜ 分隔，杜绝半角方括号被当 Markdown 渲染成空药丸；每个按钮均绑定真实 API，无不可点击按钮。"
     }
   },
   "RosFirewallManager": {
-    "name": "RouterOS 防火墙可视化管理器",
+    "name": "防火墙管理",
     "description": "把 RouterOS 防火墙规则翻成中文：导入 .rsc 后先说明这批规则写进去防火墙整体会怎样，再逐条解释会做什么、影响谁、有什么风险；看懂核对后一次批量导入（默认插到兜底 drop 前，改动前留备份，可试运行）。也能查看 filter/nat/mangle/raw 现有规则、检测隐患并逐条管理。",
     "labels": "RouterOS,防火墙,Firewall,MikroTik,规则管理,影子规则,安全巡检",
-    "version": "1.2.5",
+    "version": "1.2.6",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png",
     "author": "BackspaceM",
     "level": 1,
@@ -269,13 +283,14 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.2.6": "修复 V3 动态路由注册失败导致的详情页按钮 Not Found：响应模型改为自带 Pydantic BaseModel，不再依赖已移除的顶层 schemas 导入；统一插件图标（同一渐变底板与线性符号）与显示名「防火墙管理」；补齐「上传 .rsc / 规则文件」原生文件控件与就地中文反馈、导入整体摘要。",
+      "v1.2.5": "修复主界面按钮：插件 API 显式关闭 response_model，解决 12 条路由因返回类型注解在宿主注册失败、点「立即扫描隐患/刷新规则/测试连接/RouterOS 留备份/停止任务」显示 Not Found；「上传 .rsc / 规则文件」改为原生文件选择控件，不再依赖会失效的 props.onclick 字符串脚本，上传后无需刷新即可就地看到中文解释。新增「导入后会发生什么」整体摘要（数量、插入位置、动作与影响分布、高危条数、试运行/禁用状态）；配置页增加选择 .rsc 文件与容器内文件路径两种入口；详情页显示最近一次操作结果，避免点完按钮看不到反馈。",
+      "v1.2.4": "重做产品定位：从「逐条手填规则」改为「导入 → 翻译成人话 → 看懂再应用」。接入连接中心已保存路由器下拉（手填兼容）；支持粘贴 .rsc/export/print 文本与上传文件两种批量导入；解析后逐条说明「会做什么、影响谁、风险、建议、等价命令」，识别 WinBox/SSH/Emby 等常见端口、端口转发、内网共享上网、FastTrack、动态黑名单等场景；确认后一次性批量写入（默认插到兜底 drop 前，改动前自动留备份，支持试运行）。设置页删除 17 个逐条录入字段，精简为连接/导入/定时/安全四组。",
+      "v1.2.3": "逐条规则操作默认上限收敛为 10 条，主界面更紧凑。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.2.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.2.0": "设置页新增「已保存的路由器」下拉，可从 RouterOS 连接中心一键带入连接参数；不选下拉时行为与旧版一致。",
       "v1.1.0": "新增批量导入：可上传 .rsc 文件、粘贴规则文本或填容器内路径，解析后逐条展示中文含义与风险提示，确认后一次性批量写入 RouterOS；详情页卡片分区与按钮分组美化；修复按钮 API 路径导致的 404。",
-      "v1.0.0": "首个版本：RouterOS 防火墙可视化管理器。(1) 读取 filter/nat/mangle/raw 四表全部规则并按执行顺序展示；(2) 自动检测影子规则(放行被兜底 drop 遮挡)、被架空的拒绝规则、重复规则、缺失兜底 drop 四类隐患；(3) 逐条启用/禁用/上移/下移/置顶/置底/删除，破坏性操作二次确认；(4) 配置页表单新增规则，默认插到兜底 drop 之前避免变成死规则，可置顶/置底/指定位置；(5) 改动前自动在 RouterOS 执行 /system/backup/save 留后路，规则快照存 MP；(6) cron 定时扫描 + MP 分级通知 + 远程命令；(7) 详情页每个按钮绑定真实 API、无禁用按钮，所有动态文本全角转义杜绝 Markdown 空药丸。定位为管理器，绝不批量删除用户真实规则。",
-      "v1.2.3": "逐条规则操作默认上限收敛为 10 条，主界面更紧凑。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
-      "v1.2.4": "重做产品定位：从「逐条手填规则」改为「导入 → 翻译成人话 → 看懂再应用」。接入连接中心已保存路由器下拉（手填兼容）；支持粘贴 .rsc/export/print 文本与上传文件两种批量导入；解析后逐条说明「会做什么、影响谁、风险、建议、等价命令」，识别 WinBox/SSH/Emby 等常见端口、端口转发、内网共享上网、FastTrack、动态黑名单等场景；确认后一次性批量写入（默认插到兜底 drop 前，改动前自动留备份，支持试运行）。设置页删除 17 个逐条录入字段，精简为连接/导入/定时/安全四组。",
-      "v1.2.5": "修复主界面按钮：插件 API 显式关闭 response_model，解决 12 条路由因返回类型注解在宿主注册失败、点「立即扫描隐患/刷新规则/测试连接/RouterOS 留备份/停止任务」显示 Not Found；「上传 .rsc / 规则文件」改为原生文件选择控件，不再依赖会失效的 props.onclick 字符串脚本，上传后无需刷新即可就地看到中文解释。新增「导入后会发生什么」整体摘要（数量、插入位置、动作与影响分布、高危条数、试运行/禁用状态）；配置页增加选择 .rsc 文件与容器内文件路径两种入口；详情页显示最近一次操作结果，避免点完按钮看不到反馈。"
+      "v1.0.0": "首个版本：RouterOS 防火墙可视化管理器。(1) 读取 filter/nat/mangle/raw 四表全部规则并按执行顺序展示；(2) 自动检测影子规则(放行被兜底 drop 遮挡)、被架空的拒绝规则、重复规则、缺失兜底 drop 四类隐患；(3) 逐条启用/禁用/上移/下移/置顶/置底/删除，破坏性操作二次确认；(4) 配置页表单新增规则，默认插到兜底 drop 之前避免变成死规则，可置顶/置底/指定位置；(5) 改动前自动在 RouterOS 执行 /system/backup/save 留后路，规则快照存 MP；(6) cron 定时扫描 + MP 分级通知 + 远程命令；(7) 详情页每个按钮绑定真实 API、无禁用按钮，所有动态文本全角转义杜绝 Markdown 空药丸。定位为管理器，绝不批量删除用户真实规则。"
     }
   }
 }

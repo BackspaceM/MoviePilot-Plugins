@@ -79,7 +79,7 @@ _CMD_CHECK = "mlr_check"
 _CMD_QUEUE = "mlr_queue"
 _CMD_ALL = "mlr_all"
 _CMD_STOP = "mlr_stop"
-_LOG_PREFIX = "媒体库精准刷新"
+_LOG_PREFIX = "媒体库刷新"
 
 _MEDIA_TYPES = ("emby", "jellyfin", "plex")
 
@@ -120,10 +120,10 @@ def _event_type_name(event: Any) -> str:
 class MediaLibraryRefresh(_PluginBase):
     """Emby / Jellyfin / Plex 精准刷新插件。"""
 
-    plugin_name = "媒体库精准刷新"
+    plugin_name = "媒体库刷新"
     plugin_desc = "监听整理入库事件，按文件级增量刷新 Emby/Jellyfin/Plex，支持多服务器、路径映射、合并去重与分级回退"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/medialibraryrefresh.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_label = "媒体库,Emby,Plex,Jellyfin,刷新"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -245,7 +245,7 @@ class MediaLibraryRefresh(_PluginBase):
                 logger.warning(f"{_LOG_PREFIX}：复位立即执行开关失败 {err}")
             if not self._enabled:
                 self._log("WARN", "插件未启用，已忽略「立即执行一次」")
-                self._send_message("媒体库精准刷新", "插件未启用，请先启用后再执行")
+                self._send_message("媒体库刷新", "插件未启用，请先启用后再执行")
             elif self.start_run(trigger="配置页", prefer_thread=True):
                 self._log("INFO", "配置页触发「立即执行一次」（独立线程）")
             else:
@@ -320,7 +320,7 @@ class MediaLibraryRefresh(_PluginBase):
         channel, userid = data.get("channel"), data.get("userid")
         if action == _CMD_RUN:
             ok = self.start_run(trigger="远程命令", prefer_thread=True)
-            self._send_message("媒体库精准刷新", "已触发队列刷新" if ok else "已有任务在运行，已忽略",
+            self._send_message("媒体库刷新", "已触发队列刷新" if ok else "已有任务在运行，已忽略",
                                channel=channel, userid=userid)
         elif action == _CMD_CHECK:
             results = self._check_servers_sync()
@@ -337,7 +337,7 @@ class MediaLibraryRefresh(_PluginBase):
                                channel=channel, userid=userid)
         elif action == _CMD_STOP:
             self._stop_event.set()
-            self._send_message("媒体库精准刷新", "已发送中止信号", channel=channel, userid=userid)
+            self._send_message("媒体库刷新", "已发送中止信号", channel=channel, userid=userid)
         else:
             return
 

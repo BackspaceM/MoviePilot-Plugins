@@ -90,12 +90,12 @@ def _cmd_esc(value: Any) -> str:
 
 class RouterOSScenarioTemplates(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取，常量引用会被判为「未声明」
-    plugin_name = "RouterOS 场景模板一键部署"
+    plugin_name = "场景模板"
     plugin_desc = ("把 PT 友好 QoS、远程观影放行、访客网络隔离、IPv6、WireGuard 回家等高"
                    "频场景做成模板：勾选→预览规则与中文含义→确认→批量下发，写入前自动"
                    "备份，失败按逆序自动回滚；只新增带 MP-A2 标签的条目，不改用户已有配置。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosscenariotemplates_"

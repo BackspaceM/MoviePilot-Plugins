@@ -15,3 +15,9 @@ config.local.*
 
 # RouterOS 连接中心广播文件（含明文凭据，禁止提交）
 plugins.v3/routeros_connections.json
+
+# 编辑器与虚拟环境
+.venv/
+.idea/
+.vscode/
+*.log

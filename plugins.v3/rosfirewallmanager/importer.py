@@ -514,3 +514,64 @@ def format_import_brief(preview: Dict[str, Any], limit: int = 12) -> str:
     for note in errors[:5]:
         lines.append(md_safe(f"解析提示：{note}"))
     return "\n".join(lines)
+
+
+# 构成匹配条件的常见 RouterOS 参数；drop 规则不带这些就是无条件丢弃
+_CONDITION_KEYS = frozenset({
+    "protocol", "dst-port", "src-port", "in-interface", "out-interface",
+    "in-interface-list", "out-interface-list", "src-address", "dst-address",
+    "src-address-list", "dst-address-list", "connection-state", "connection-nat-state",
+    "tcp-flags", "limit", "comment", "content", "layer7-protocol",
+})
+
+
+def summarize_import_effect(preview: Dict[str, Any], existing_count: int = 0,
+                            dry_run: bool = False) -> str:
+    """整体摘要：回答「这批规则写进 WinBox 后，防火墙会怎样」。
+
+    与 format_import_brief 的逐条翻译互补，这里给出数量、动作分布、
+    插入位置、整体影响与高危提示，供详情页和上传接口就地展示。
+    """
+    rules = list(preview.get("rules") or [])
+    total = len(rules)
+    existing = max(0, int(existing_count or 0))
+    lines: List[str] = [
+        "导入后会发生什么（WinBox / RouterOS 批量写入整体预览）",
+        md_safe(f"共 {total} 条待导入；现存 {existing} 条，写入后约 {existing + total} 条。"),
+    ]
+
+    actions: Dict[str, int] = {}
+    for row in rules:
+        action = str(row.get("action") or "未识别")
+        actions[action] = actions.get(action, 0) + 1
+    lines.append("动作：" + ("、".join(f"{k} {v} 条" for k, v in actions.items()) or "无"))
+
+    place = str(preview.get("place") or "before_drop")
+    place_text = {
+        "before_drop": "插到兜底 drop 之前（新规则能被匹配到）",
+        "top": "插到规则链顶部",
+        "bottom": "追加到规则链末尾",
+    }.get(place, place)
+    lines.append(f"位置：{place_text}")
+
+    unconditional_drops = sum(
+        1 for row in rules
+        if str(row.get("action") or "").lower() == "drop"
+        and not any(key in (row.get("payload") or {}) for key in _CONDITION_KEYS)
+    )
+    if unconditional_drops:
+        lines.append("影响：" + md_safe(
+            f"有 {unconditional_drops} 条无条件 drop，会丢弃其后所有未匹配流量；"
+            "建议放在规则链末尾并先确认放行管理端口。"))
+        lines.append("高危：无条件 drop 可能把自己锁在路由器外，务必先核对位置。")
+    else:
+        lines.append("影响：" + md_safe(
+            "按预览位置写入后，命中流量的处理方式随上述动作变化；"
+            "未列出的流量仍按现有规则处理。"))
+
+    for row in rules[:3]:
+        if row.get("meaning"):
+            lines.append(md_safe(f"会做什么｜第 {row.get('index', 0)} 条：{row['meaning']}"))
+    if dry_run:
+        lines.append("试运行已开启：本次只生成预览，不会写入 RouterOS。")
+    return "\n".join(lines)

@@ -113,10 +113,10 @@ def _get(item: Any, key: str, default: Any = None) -> Any:
 class PiecesHashReseed(_PluginBase):
     """基于 pieces hash 的下载器辅种插件。"""
 
-    plugin_name = "Pieces Hash 辅种"
+    plugin_name = "Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
-    plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed_A.png"
-    plugin_version = "1.0.2"
+    plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png"
+    plugin_version = "1.0.3"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
@@ -265,7 +265,7 @@ class PiecesHashReseed(_PluginBase):
             return []
         base = {
             "id": f"{self.__class__.__name__}Reseed",
-            "name": "Pieces Hash 辅种",
+            "name": "Hash 辅种",
             "func": self.run_reseed,
             "kwargs": {},
         }
@@ -300,7 +300,7 @@ class PiecesHashReseed(_PluginBase):
         self._schedule_once(self.run_reseed, "run", "远程触发辅种", 3)
         self.post_message(
             channel=data.get("channel"),
-            title="Pieces Hash 辅种",
+            title="Hash 辅种",
             text="已收到命令，辅种任务将在 3 秒后执行。",
             userid=data.get("user"),
         )
@@ -607,7 +607,7 @@ class PiecesHashReseed(_PluginBase):
             )
             logger.info(f"{LOG_TAG}{summary}")
             if self._notify and (stats["success"] or stats["failed"]):
-                self.post_message(title="Pieces Hash 辅种", text=summary)
+                self.post_message(title="Hash 辅种", text=summary)
 
     def _process_downloader(
         self,

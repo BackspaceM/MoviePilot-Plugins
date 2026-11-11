@@ -94,11 +94,11 @@ def _shortcut(pid: Any) -> str:
 
 class RouterOSWorkbench(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取，常量引用会被判为「未声明」
-    plugin_name = "RouterOS 统一工作台"
+    plugin_name = "ROS 工作台"
     plugin_desc = ("一次配置连接，五个页签一起看 RouterOS 现状：概览、防火墙、Queue、备份、分流。"
                    "只读聚合，不改其它插件，也不往路由器写配置；顺带列出本地 RouterOS 插件的启用情况。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosworkbench.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosworkbench_"
@@ -311,7 +311,7 @@ class RouterOSWorkbench(_PluginBase):
                 f"｜触发 {trigger}")
         if failed:
             text += "｜读不到：" + "、".join(sections.label_of(s) for s in failed[:4])
-        self._send_message("RouterOS 统一工作台", text)
+        self._send_message("ROS 工作台", text)
 
     def _snapshot(self) -> Dict[str, Any]:
         data = self.get_data(_KEY_SNAPSHOT)
@@ -753,7 +753,7 @@ class RouterOSWorkbench(_PluginBase):
                     f"｜页签 {sections.tab_label(self._active())}"
                     f"｜最近刷新 {(snap.get('created') or '还没刷新')}")
         try:
-            self.post_message(title="RouterOS 统一工作台", text=_esc(text),
+            self.post_message(title="ROS 工作台", text=_esc(text),
                               channel=data.get("channel"), userid=data.get("userid"),
                               **({"mtype": _PLUGIN_MTYPE} if _PLUGIN_MTYPE is not None else {}))
         except Exception as err:  # noqa: BLE001

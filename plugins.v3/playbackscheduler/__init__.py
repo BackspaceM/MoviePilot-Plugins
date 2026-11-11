@@ -67,7 +67,7 @@ AUTHOR_URL = "https://github.com/BackspaceM"
 PLUGIN_COLOR = "#5DADE2"
 SYSTEM_VERSION = ">=3.0.0"
 
-_LOG_PREFIX = "播放感知调度"
+_LOG_PREFIX = "播放调度"
 _ONCE_JOB_ID = "playback_once"
 _MAX_LOGS = 200
 _MAX_HISTORY = 500
@@ -79,14 +79,23 @@ _LOG_KEY = "playback_logs"
 _HISTORY_KEY = "playback_history"
 
 # MP 不可用时降级
-try:
-    from schemas import Response
-except Exception:  # noqa: BLE001
-    class Response:  # type: ignore
-        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
-            self.success = success
-            self.message = message
-            self.data = data
+# V3 宿主用 FastAPI 动态注册插件路由：endpoint 的返回注解必须是 Pydantic
+# 可识别的类型，普通类会导致 add_api_route 失败、路由被跳过、按钮 404。
+from pydantic import BaseModel
+
+
+class Response(BaseModel):
+    """插件 API 统一响应：success / message / data 三段式。
+
+    V3 宿主用 FastAPI 动态注册插件路由，endpoint 的返回注解必须是 Pydantic
+    可识别的类型。若降级成普通 Python 类，add_api_route 会抛 FastAPIError，
+    宿主捕获后跳过该路由，详情页按钮就会得到 404 Not Found。
+    自带模型可避免依赖宿主内部模块布局，离线测试同样能完成路由注册。
+    """
+
+    success: bool = True
+    message: str = ""
+    data: Any = None
 
 try:
     _PLUGIN_MTYPE = MessageType.Plugin
@@ -102,7 +111,7 @@ class PlaybackScheduler(_PluginBase):
     plugin_name = 'PlaybackScheduler'
     plugin_desc = '读取 Emby/Plex 在播会话，按转码/远程状态对下载器限速并可选联动 RouterOS，保护在播文件、观影后自动删种。'
     plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/playbackscheduler.png'
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = 'BackspaceM'
     author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "playbackscheduler_"
@@ -598,7 +607,8 @@ class PlaybackScheduler(_PluginBase):
         }, {
             "path": "/status",
             "auth": "bear",
-            "endpoint": self.api_status, "methods": ["GET"],
+            # 详情页「查看当前状态」按钮用 POST；同时保留 GET 供外部查询。
+            "endpoint": self.api_status, "methods": ["GET", "POST"],
             "summary": "获取当前播放与限速状态",
         }, {
             "path": "/stop",
@@ -676,7 +686,7 @@ class PlaybackScheduler(_PluginBase):
 
     def _cmd_apply(self, channel, userid) -> None:
         self.start_run(trigger="远程命令", prefer_thread=True)
-        self._send_message("播放感知调度", "已触发一轮检查", channel=channel, userid=userid)
+        self._send_message("播放调度", "已触发一轮检查", channel=channel, userid=userid)
 
     def _cmd_reset(self, channel, userid) -> None:
         res = self.reset_limits()
@@ -684,4 +694,4 @@ class PlaybackScheduler(_PluginBase):
 
     def _cmd_clear(self, channel, userid) -> None:
         self.clear_history()
-        self._send_message("播放感知调度", "观看历史已清空", channel=channel, userid=userid)
+        self._send_message("播放调度", "观看历史已清空", channel=channel, userid=userid)

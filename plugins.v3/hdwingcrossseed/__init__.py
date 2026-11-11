@@ -191,7 +191,7 @@ class HDWinGCrossSeed(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
     )
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_label = "站点,辅种,HDWinG"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"

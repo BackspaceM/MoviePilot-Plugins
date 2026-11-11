@@ -39,7 +39,7 @@ from . import roslink
 from .prober import LEVEL_FAIL, LEVEL_INFO, LEVEL_OK, LEVEL_WARN, collect_fixes, probe_one
 
 PLUGIN_ID = "RouterOSConnectionCenter"
-_LOG_PREFIX = "RouterOS 连接中心"
+_LOG_PREFIX = "连接中心"
 _KEY_PROBE = "rcc_probe_result"
 
 _LEVEL_COLOR = {
@@ -64,12 +64,12 @@ def _esc(value: Any) -> str:
 
 class RouterOSConnectionCenter(_PluginBase):
     # 类级元数据一律用字符串字面量：官方版本检查以 AST 提取，常量引用会被判为「未声明」
-    plugin_name = "RouterOS 连接中心"
+    plugin_name = "连接中心"
     plugin_desc = ("一处保存多台 RouterOS 连接并自动同步给同库的 RouterOS 插件（设置页下拉即可选择，"
                    "不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查端口、REST、权限与版本，"
                    "失败时给出可直接复制到 RouterOS 终端执行的修复命令。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosconnectioncenter_"

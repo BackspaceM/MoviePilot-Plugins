@@ -34,14 +34,23 @@ try:
 except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
-try:
-    from schemas import Response
-except Exception:  # noqa: BLE001
-    class Response:  # type: ignore
-        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
-            self.success = success
-            self.message = message
-            self.data = data
+# V3 宿主用 FastAPI 动态注册插件路由：endpoint 的返回注解必须是 Pydantic
+# 可识别的类型，普通类会导致 add_api_route 失败、路由被跳过、按钮 404。
+from pydantic import BaseModel
+
+
+class Response(BaseModel):
+    """插件 API 统一响应：success / message / data 三段式。
+
+    V3 宿主用 FastAPI 动态注册插件路由，endpoint 的返回注解必须是 Pydantic
+    可识别的类型。若降级成普通 Python 类，add_api_route 会抛 FastAPIError，
+    宿主捕获后跳过该路由，详情页按钮就会得到 404 Not Found。
+    自带模型可避免依赖宿主内部模块布局，离线测试同样能完成路由注册。
+    """
+
+    success: bool = True
+    message: str = ""
+    data: Any = None
 
 try:
     _PLUGIN_MTYPE = MessageType.Plugin
@@ -127,7 +136,7 @@ class RouterOSConfigGuard(_PluginBase):
     plugin_name = 'RouterOSConfigGuard'
     plugin_desc = '定时备份 RouterOS 配置并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录、RouterOS 本机（.backup+.rsc）或双份；漂移即时通知。'
     plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png'
-    plugin_version = "1.3.3"
+    plugin_version = "1.3.4"
     plugin_author = 'BackspaceM'
     author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "routerosconfigguard_"
@@ -226,7 +235,7 @@ class RouterOSConfigGuard(_PluginBase):
             trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
         return [{
             "id": PLUGIN_NAME,
-            "name": "RouterOS 配置备份与漂移检测",
+            "name": "配置守卫",
             "trigger": trigger,
             "func": self.start_run,
             # kwargs 是展开给 APScheduler.add_job 的调度参数，绝不能含 trigger；
@@ -790,7 +799,7 @@ class RouterOSConfigGuard(_PluginBase):
             {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "立即备份并检测漂移"},
             {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
             {"path": "/baseline", "auth": "bear", "endpoint": self.api_baseline, "methods": ["POST"], "summary": "将最近快照设为基线"},
-            {"path": "/snapshots", "auth": "bear", "endpoint": self.api_snapshots, "methods": ["GET"], "summary": "获取 MP 快照索引列表"},
+            {"path": "/snapshots", "auth": "bear", "endpoint": self.api_snapshots, "methods": ["GET", "POST"], "summary": "获取 MP 快照索引列表"},
             {"path": "/rosbackups", "auth": "bear", "endpoint": self.api_rosbackups, "methods": ["POST"], "summary": "从 RouterOS 重新读取本机备份文件清单"},
             {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
             {"path": "/clear", "auth": "bear", "endpoint": self.api_clear, "methods": ["POST"], "summary": "清空 MP 快照与基线（保留 ROS 本机文件）"},
