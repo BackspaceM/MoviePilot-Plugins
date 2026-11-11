@@ -1,6 +1,6 @@
 """媒体库体检 —— 快照聚合与缓存。
 
-A / B / C 共用一次只读采集，避免三个视图各查一遍宿主；缓存按配置签名，
+三个页面共用一次只读采集，不用各查一遍宿主；缓存按配置签名，
 配置变化或点「重新体检」时强制重算。全程只读，无写操作。
 """
 
@@ -58,11 +58,11 @@ def collect(force: bool = False, config: Optional[Dict[str, Any]] = None,
     c = parity.build_parity(cfg, servers, servers_ok, servers_reason)
 
     common.emit(
-        f"体检完成：A 预演 {a['summary']['total']} 个文件"
+        f"体检完成：整理预演 {a['summary']['total']} 个文件"
         f"（高风险 {a['summary']['high']} / 跨盘 {a['summary']['cross_device']}）、"
-        f"B 账本 {b['summary']['total']} 条记录"
+        f"入库账本 {b['summary']['total']} 条记录"
         f"（退化复制 {b['summary']['degraded_copy']} / 未核验 {b['summary']['unverified']}）、"
-        f"C 对账 {c['summary']['total']} 个媒体身份"
+        f"媒体库对比 {c['summary']['total']} 个媒体身份"
         f"（可核验 {c['summary']['servers_ok']}/{c['summary']['servers_total']} 家）。"
         "全程只读，未修改任何文件、配置或整理历史。"
     )
@@ -82,7 +82,7 @@ def collect(force: bool = False, config: Optional[Dict[str, Any]] = None,
         "notes": [
             "本插件全程只读：不创建、移动、重命名、删除任何文件，不改动整理历史、下载器任务与媒体服务器。",
             "远程存储与容器内不可见的路径一律标「未核验」，绝不把查不到当成已删除。",
-            "命名与分类规则由宿主导入链决定，A 视图的目标路径为保守预测，仅供事前核对。",
+            "命名与分类规则由宿主整理链决定，整理预演里的目标路径是保守估计，仅供事前核对。",
         ],
     }
     _CACHE.update({"at": now, "sig": sig, "data": snap})

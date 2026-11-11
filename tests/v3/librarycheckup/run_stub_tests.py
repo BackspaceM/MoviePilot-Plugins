@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import sys
@@ -707,6 +708,87 @@ class TestCollector(unittest.TestCase):
             self.assertTrue(os.path.exists(spath))
             self.assertTrue(os.path.exists(dpath))
             self.assertEqual(snap["histories"]["total"], 1)
+
+
+class TestHostSignature(unittest.TestCase):
+    """离线 stub 的 get_data(key, default) 与宿主真实签名不同，单独锁住切页行为。
+
+    宿主 app/sdk/plugin/base.py 的定义是 get_data(key=None, plugin_id=None)，
+    第二个参数是**插件 ID**。曾误写成 get_data("view", "preview")，
+    等于去读一个叫 preview 的插件的数据，结果永远读不到、页面一直停在整理预演。
+    """
+
+    def _plugin_with_host_api(self):
+        store = {}
+        plugin = PLUGIN_CLS()
+
+        def host_save_data(key, value, plugin_id=None):
+            self.assertIn(plugin_id, (None, "LibraryCheckup"))
+            store[key] = value
+
+        def host_get_data(key=None, plugin_id=None):
+            # 模拟宿主：传了别的 plugin_id 就是查别人的数据，一律读不到
+            if plugin_id and plugin_id != "LibraryCheckup":
+                return None
+            return store.get(key)
+
+        plugin.save_data = host_save_data
+        plugin.get_data = host_get_data
+        return plugin, store
+
+    def test_old_wrong_call_would_read_another_plugin(self):
+        plugin, store = self._plugin_with_host_api()
+        store["view"] = "parity"
+        self.assertEqual(plugin.get_data("view"), "parity")
+        self.assertIsNone(plugin.get_data("view", "preview"))
+
+    def test_switching_pages_works_with_host_signature(self):
+        plugin, _ = self._plugin_with_host_api()
+        titles = {
+            "preview": "整理预演明细（全量）",
+            "ledger": "src ↔ dest 链接拓扑（全量）",
+            "parity": "媒体服务器连接状态",
+        }
+        with mock.patch.object(common, "fetch_histories", return_value=([], True, "")), \
+             mock.patch.object(common, "fetch_servers", return_value=([], True, "")):
+            for view, marker in titles.items():
+                with self.subTest(view=view):
+                    response = plugin.api_view({"view": view})
+                    self.assertTrue(response.success)
+                    self.assertEqual(plugin._view(), view)
+                    html = "".join(str(e.get("html") or "") for e in plugin.get_page())
+                    self.assertIn(marker, html, "页面没有切到对应的内容")
+                    for other, other_marker in titles.items():
+                        if other != view:
+                            self.assertNotIn(other_marker, html)
+
+    def test_instance_state_is_a_fallback_when_persistence_fails(self):
+        plugin = PLUGIN_CLS()
+        plugin.save_data = lambda *a, **k: (_ for _ in ()).throw(OSError("db down"))
+        self.assertTrue(plugin.api_view({"view": "ledger"}).success)
+        self.assertEqual(plugin._view(), "ledger")
+
+
+class TestWording(unittest.TestCase):
+    def test_button_labels_are_plain_and_short(self):
+        labels = [text for _, text, _ in MODULE.VIEW_BUTTONS]
+        self.assertEqual(labels, ["整理预演", "入库账本", "媒体库对比"])
+        for label in labels:
+            self.assertNotRegex(label, r"[A-Za-z]")
+            self.assertLessEqual(len(label), 6)
+
+    def test_no_letter_stages_in_user_facing_text(self):
+        plugin = PLUGIN_CLS()
+        with mock.patch.object(common, "fetch_histories", return_value=([], True, "")), \
+             mock.patch.object(common, "fetch_servers", return_value=([], True, "")):
+            html = "".join(str(e.get("html") or "") for e in plugin.get_page())
+        form, _ = plugin.get_form()
+        blob = "\n".join((plugin.plugin_desc, html, str(form),
+                          json.dumps(json.loads((ROOT / "package.v3.json").read_text(
+                              encoding="utf-8"))["LibraryCheckup"], ensure_ascii=False),
+                          (ROOT / "README.md").read_text(encoding="utf-8")))
+        for bad in ("A → B", "A / B / C", "A · 整理", "B · 入库", "C · ", "三步走"):
+            self.assertNotIn(bad, blob, f"面向用户的文案仍含阶段式表述：{bad}")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,10 @@
 """媒体库体检 —— MoviePilot V3 媒体管理增强插件。
 
-按 A → B → C 三个阶段共用一套「只读采集 → 对齐 → 出报告」骨架：
+三个页面共用同一套只读采集：整理前先预演目标路径与冲突、跨盘硬链接退化风险；
+再用 inode / 设备号核对入库记录，画出 src ↔ dest 链接账本；
+最后把 Emby / Jellyfin / Plex 三家的条目对齐，列出缺集与重复。
 
-* A 整理预演沙盘：批量整理前先看目标路径 / 冲突 / 跨盘硬链接退化风险；
-* B 入库账本与链接拓扑：inode / 设备号核验，画出 src ↔ dest 拓扑；
-* C Emby / Jellyfin / Plex 一致性对账：统一媒体身份对齐，输出跨服差异矩阵。
-
-三个视图全部**只读报告**，零配置（媒体服务器与目录自动发现），
+三个页面全部**只读报告**，零配置（媒体服务器与目录自动发现），
 不创建/移动/重命名/删除任何文件，不改动整理历史、下载器任务与媒体服务器。
 
 V3 合同要点（本项目踩过按钮 404 的坑，勿改）：
@@ -54,9 +52,9 @@ class Response(BaseModel):
 
 
 VIEW_BUTTONS: Tuple[Tuple[str, str, str], ...] = (
-    ("preview", "A · 整理预演", "mdi-file-search-outline"),
-    ("ledger", "B · 入库账本", "mdi-link-variant"),
-    ("parity", "C · 跨服对账", "mdi-server-network"),
+    ("preview", "整理预演", "mdi-file-search-outline"),
+    ("ledger", "入库账本", "mdi-link-variant"),
+    ("parity", "媒体库对比", "mdi-server-network"),
 )
 
 
@@ -64,12 +62,12 @@ class LibraryCheckup(_PluginBase):
     # 类体元数据一律用字符串字面量：官方校验脚本用 AST 直接提取字面量。
     plugin_name = "媒体库体检"
     plugin_desc = (
-        "A 整理预演沙盘 + B 入库账本与链接拓扑 + C Emby/Jellyfin/Plex 一致性对账。"
-        "三视图共用只读采集骨架，零配置自动发现目录与已连接媒体服务器，"
-        "全量明细不截断，全程只读，绝不改动任何文件与整理历史。"
+        "整理前先看看文件会存到哪、会不会覆盖，顺带核对硬链接是不是真链接；"
+        "再把 Emby、Jellyfin、Plex 三家的媒体条目对齐，找出缺集和重复。"
+        "媒体服务器与目录自动识别，装好即用，明细不截断、日志可复制，全程只读。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/librarycheckup.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "librarycheckup_"
@@ -83,6 +81,7 @@ class LibraryCheckup(_PluginBase):
         super().__init__()
         self._enabled = True
         self._cfg: Dict[str, Any] = {}
+        self._view_state = "preview"
 
     # ------------------------------------------------------------------
     # 生命周期 / 配置（零配置：只有一个可选的预演目录）
@@ -108,10 +107,19 @@ class LibraryCheckup(_PluginBase):
         return cfg
 
     def _view(self) -> str:
+        """读取当前页面。
+
+        宿主 _PluginBase.get_data 的签名是 get_data(key, plugin_id=None)，
+        第二个参数是插件 ID 而**不是默认值**。曾误写成 get_data("view", "preview")，
+        等于去读名为 preview 的插件的数据，结果永远读不到、页面永远停在整理预演。
+        这里只传 key，并用实例属性再兜一层底。
+        """
         try:
-            value = self.get_data("view", "preview")
+            value = self.get_data("view")
         except Exception:  # noqa: BLE001
-            value = "preview"
+            value = None
+        if value not in collector.VIEWS:
+            value = getattr(self, "_view_state", None)
         return value if value in collector.VIEWS else "preview"
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -153,10 +161,9 @@ class LibraryCheckup(_PluginBase):
                     {"component": "VAlert", "props": {
                         "type": "info", "variant": "tonal",
                     }, "text": (
-                        "零配置装好即用：媒体服务器、下载目录与媒体库目录全部自动发现。"
-                        "A 预演 / B 账本 / C 跨服对账三个视图均为只读报告，"
-                        "不删除、不移动、不重命名任何文件，也不会触发媒体库刷新或写回。"
-                        "首页仪表盘可添加「媒体库体检」组件常驻查看。"
+                        "媒体服务器、下载目录和媒体库目录自动识别，一般不用填任何东西。"
+                        "整理预演、入库账本、媒体库对比三页都只是报告，不会删除、移动、"
+                        "重命名文件，也不会刷新或写回媒体服务器。首页还能加个组件常看汇总。"
                     )},
                 ]},
             ]},
@@ -171,11 +178,11 @@ class LibraryCheckup(_PluginBase):
         # path 用相对路径：宿主会自动补 /api/v1/plugin/LibraryCheckup。
         return [
             {"path": "/snapshot", "auth": "bear", "endpoint": self.api_snapshot,
-             "methods": ["GET"], "summary": "读取三视图完整只读快照（JSON）"},
+             "methods": ["GET"], "summary": "读取三个页面的完整只读快照（JSON）"},
             {"path": "/refresh", "auth": "bear", "endpoint": self.api_refresh,
              "methods": ["POST"], "summary": "清空缓存并强制重新体检"},
             {"path": "/view", "auth": "bear", "endpoint": self.api_view,
-             "methods": ["POST"], "summary": "切换 A / B / C 视图"},
+             "methods": ["POST"], "summary": "切换页面"},
             {"path": "/preview", "auth": "bear", "endpoint": self.api_preview,
              "methods": ["POST"], "summary": "切回 A 并重新预演（只读）"},
             {"path": "/log", "auth": "bear", "endpoint": self.api_log,
@@ -203,16 +210,18 @@ class LibraryCheckup(_PluginBase):
         body = payload if isinstance(payload, dict) else {}
         view = str(body.get("view") or "")
         if view not in collector.VIEWS:
-            return Response(success=False, message="未知的视图，仅支持 preview / ledger / parity", data={})
+            return Response(success=False, message="未知的页面", data={})
+        self._view_state = view
         try:
             self.save_data("view", view)
         except Exception:  # noqa: BLE001
             pass
         label = dict((k, t) for k, t, _ in VIEW_BUTTONS).get(view, view)
-        common.emit(f"切换到视图 {label}（只读报告）。")
+        common.emit(f"切换到「{label}」（只读报告）。")
         return Response(success=True, message=f"已切换到 {label}", data={"view": view})
 
     def api_preview(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        self._view_state = "preview"
         try:
             self.save_data("view", "preview")
         except Exception:  # noqa: BLE001
@@ -269,7 +278,7 @@ class LibraryCheckup(_PluginBase):
         if current == "preview":
             elements.append({
                 "component": "VBtn",
-                "text": "重新预演（只读）",
+                "text": "重新预演",
                 "props": {
                     "color": "secondary", "variant": "tonal",
                     "prependIcon": "mdi-file-search-outline", "class": "mb-3", "size": "small",
@@ -293,7 +302,7 @@ class LibraryCheckup(_PluginBase):
             "refresh": self._DASHBOARD_REFRESH,
             "border": False,
             "title": "媒体库体检",
-            "subtitle": "A 预演 · B 账本 · C 跨服对账",
+            "subtitle": "整理预演 · 入库账本 · 媒体库对比",
         }
         elements = [{"component": "div", "html": renderer.render(data, compact=True)}]
         return cols, attrs, elements

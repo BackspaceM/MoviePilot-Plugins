@@ -203,7 +203,7 @@ def _preview_view(a: Dict[str, Any]) -> str:
             f'<td class="lc-risk">{risks}</td></tr>'
         )
     parts.append(_section(
-        "A · 整理预演明细（全量）",
+        "整理预演明细（全量）",
         f"共 {len(rows)} 个文件 · 按风险排序 · 未改动任何文件",
         _table(["源文件 / 识别结果", "保守预测目标路径", "等级 / 目标目录", "风险与说明"], rows,
                "没有可预演的媒体文件"),
@@ -242,7 +242,7 @@ def _ledger_view(b: Dict[str, Any]) -> str:
             f'{_e(" ⟷ ".join((g.get("dest") or [])[:2]) or "—")}</td></tr>'
         )
     parts.append(_section(
-        "B · src ↔ dest 链接拓扑（全量）", "按剧集 / 季聚合，列出每组的源与目标链条",
+        "src ↔ dest 链接拓扑（全量）", "按剧集 / 季聚合，列出每组的源与目标链条",
         _table(["标题 / 季", "记录数", "状态分布", "源 ⟷ 目标示例"], group_rows, "暂无拓扑分组"),
     ))
 
@@ -266,7 +266,7 @@ def _ledger_view(b: Dict[str, Any]) -> str:
             f'<div class="lc-risk">{notes}</div></td></tr>'
         )
     parts.append(_section(
-        "B · 入库账本明细（全量）", f"共 {len(rec_rows)} 条 · 按状态严重程度排序",
+        "入库账本明细（全量）", f"共 {len(rec_rows)} 条 · 按状态严重程度排序",
         _table(["媒体 / 记录", "源文件 src", "库文件 dest", "核验结论"], rec_rows, "暂无整理历史"),
     ))
 
@@ -277,7 +277,7 @@ def _ledger_view(b: Dict[str, Any]) -> str:
         for x in (b.get("external") or [])
     ]
     parts.append(_section(
-        "B · 疑似外部登记缺失（全量）",
+        "疑似外部登记缺失（全量）",
         "库目录里有实体文件，但整理历史里找不到对应 dest；可能是手工 ln 入库，不代表异常"
         + ("（已截断）" if b.get("external_truncated") else ""),
         _table(["库目录文件", "识别结果", "说明"], ext_rows, "没有发现未登记的库文件"),
@@ -312,7 +312,7 @@ def _parity_view(c: Dict[str, Any]) -> str:
             f'<div class="lc-risk">{_e(srv.get("reason"))}</div></td></tr>'
         )
     parts.append(_section(
-        "C · 媒体服务器连接状态", "只显示主机名，不暴露完整地址与密钥；失败的家不参与缺集判定",
+        "媒体服务器连接状态", "只显示主机名，不暴露完整地址与密钥；失败的家不参与缺集判定",
         _table(["实例", "类型", "主机", "条目数", "状态"], srv_cards, "未发现已连接实例"),
     ))
 
@@ -343,7 +343,7 @@ def _parity_view(c: Dict[str, Any]) -> str:
     if not successful:
         headers = ["媒体身份", "年 / 季集", "类型", "结论", "缺失实例"]
     parts.append(_section(
-        "C · 跨服差异矩阵（全量）",
+        "跨服差异矩阵（全量）",
         f"共 {len(rows)} 个媒体身份 · 可核验 {len(successful)} 家"
         + ("（已截断）" if s.get("truncated") else ""),
         _table(headers, rows, "没有可对齐的媒体条目"),
@@ -362,32 +362,32 @@ def render(data: Dict[str, Any], compact: bool = False) -> str:
     head = (
         f'<div class="lc-head"><div class="lc-brand"><div class="lc-logo">{_LOGO_SVG}</div>'
         f'<div><div class="lc-title">媒体库体检</div>'
-        f'<div class="lc-sub">A 整理预演 · B 入库账本 · C 三家一致性对账</div></div></div>'
+        f'<div class="lc-sub">整理预演 · 入库账本 · 媒体库对比</div></div></div>'
         f'<div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">'
         f'<span class="lc-pill lc-pill-safe">全程只读</span>'
         f'<span class="lc-time">{_e(data.get("generated_at"))}</span></div></div>'
     )
     overview = _kpi([
-        ("A · 预演文件", sa.get("total", 0), f"高风险 {sa.get('high', 0)} · 跨盘 {sa.get('cross_device', 0)}"),
-        ("B · 历史记录", sb.get("total", 0), f"退化复制 {sb.get('degraded_copy', 0)} · 未核验 {sb.get('unverified', 0)}"),
-        ("C · 媒体身份", sc.get("total", 0), f"缺集 {sc.get('missing_in_some', 0)} · 可核验 {sc.get('servers_ok', 0)} 家"),
+        ("整理预演", sa.get("total", 0), f"高风险 {sa.get('high', 0)} · 跨盘 {sa.get('cross_device', 0)}"),
+        ("入库账本", sb.get("total", 0), f"退化复制 {sb.get('degraded_copy', 0)} · 未核验 {sb.get('unverified', 0)}"),
+        ("媒体库对比", sc.get("total", 0), f"缺集 {sc.get('missing_in_some', 0)} · 可核验 {sc.get('servers_ok', 0)} 家"),
     ])
     if compact:
         return (
             f'<div class="lc">{_STYLE}{head}{overview}'
-            f'<div class="lc-foot">{_e(data.get("generated_at"))} · 插件详情页可切换 A / B / C 三个视图查看全量明细</div></div>'
+            f'<div class="lc-foot">{_e(data.get("generated_at"))} · 插件详情页可切换三页查看全量明细</div></div>'
         )
 
-    view_label = {"preview": "A · 整理预演沙盘", "ledger": "B · 入库账本与链接拓扑",
-                  "parity": "C · Emby / Jellyfin / Plex 一致性对账"}.get(view, "A · 整理预演沙盘")
+    view_label = {"preview": "整理预演", "ledger": "入库账本与链接拓扑",
+                  "parity": "Emby / Jellyfin / Plex 媒体库对比"}.get(view, "整理预演")
     payloads = {"preview": a, "ledger": b, "parity": c}
     body = {"preview": _preview_view, "ledger": _ledger_view, "parity": _parity_view}.get(
         view, _preview_view
     )(payloads.get(view, a))
 
     switch_note = _alert(
-        "当前视图：<b>" + _e(view_label) + "</b>。点页面上方三个按钮切换 A / B / C，"
-        "切换后当前视图会输出全量明细；顶部 KPI 始终是三视图汇总。", "lc-alert-info",
+        "现在看的是<b>" + _e(view_label) + "</b>。点上方按钮换一页，"
+        "每一页都列出完整明细，不会只显示前几条。", "lc-alert-info",
     )
     notes = "".join(f"<div>· {_e(x)}</div>" for x in (data.get("notes") or []))
     log_text = "\n".join(str(x) for x in (data.get("log") or []))
