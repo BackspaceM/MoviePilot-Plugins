@@ -17,6 +17,9 @@ from app.plugins.rosfirewallmanager import (
     _KEY_LOGS,
     _KEY_RULES,
     _KEY_SNAPSHOT,
+    _KEY_IMPORT,
+    importer,
+    roslink,
 )
 from app.plugins.rosfirewallmanager.clients import (
     RouterOSFirewallClient,
@@ -346,10 +349,16 @@ def test_get_form_fields_match_defaults():
 
     walk(form)
     assert models == set(defaults), f"表单字段与默认值不一致: {models ^ set(defaults)}"
-    # 关键字段存在
-    for model in ("router_address", "manage_tables", "new_rule_chain", "new_rule_place",
-                  "before_change_backup", "add_once", "dry_run", "scan_cron"):
+    # 关键字段存在：连接中心下拉 + 批量导入 + 扫描/安全
+    for model in ("router_address", "ros_connection", "manage_tables",
+                  "import_rules", "import_table", "import_place", "import_disabled",
+                  "before_change_backup", "dry_run", "scan_cron", "display_limit"):
         assert model in models
+    # 产品定位：不再提供「一条一条已知效果往里添加」的表单
+    for model in ("new_rule_chain", "new_rule_action", "new_rule_dst_port",
+                  "new_rule_log_prefix", "add_once"):
+        assert model not in models, f"配置页不该再有逐条录入字段 {model}"
+    assert len(defaults) <= 20, f"配置页字段仍然太多：{len(defaults)}"
 
 
 def test_get_service_trigger():
@@ -471,12 +480,19 @@ def test_every_page_button_has_live_api():
 
     for btn in buttons:
         props = btn.get("props") or {}
-        label = props.get("text", "?")
+        label = btn.get("text") or props.get("text", "?")
+        assert label and label != "?", "按钮必须有可见文字（text 在组件顶层）"
         assert "disabled" not in props, f"按钮「{label}」含 disabled 属性"
         assert props.get("disabled") is not True, f"按钮「{label}」被禁用"
         click = (btn.get("events") or {}).get("click") or {}
         api = str(click.get("api") or "").lstrip("/")
-        assert api, f"按钮「{label}」未绑定 api"
+        if not api:
+            # 「上传 .rsc 文件」按钮用 props.onclick 脚本弹出文件选择器，
+            # 不走 events.click（官方 certmanager 同款写法），它同样是可点的。
+            script = str(props.get("onclick") or "")
+            assert "MoviePilotAPI.post" in script and "/import_text" in script, \
+                f"按钮「{label}」既无 events.click.api，也没有可执行的上传脚本"
+            continue
         assert api in api_map, f"按钮「{label}」的 API {api} 未在 get_api 注册（点了没反应）"
         assert click.get("method") == "post", f"按钮「{label}」method 非 post"
 
@@ -650,3 +666,216 @@ def test_add_once_triggers_add_with_prefix():
     assert placed and placed[0]["comment"] == "rfm-winbox from LAN"
     assert [r[".id"] for r in state["filter"]].index(placed[0][".id"]) < \
            [r[".id"] for r in state["filter"]].index("*5")
+
+
+# ---------------------------------------------------------------------------
+# 批量导入 / 连接中心 / 中文解释（本插件的核心价值）
+# ---------------------------------------------------------------------------
+
+def _all_nodes(node):
+    if isinstance(node, dict):
+        yield node
+        content = node.get("content")
+        if isinstance(content, (list, dict)):
+            yield from _all_nodes(content)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _all_nodes(item)
+
+
+_SAMPLE_SCRIPT = (
+    "/ip firewall filter\n"
+    "add chain=input action=accept protocol=tcp dst-port=8291\n"
+    "add chain=forward action=fasttrack-connection "
+    "connection-state=established,related\n"
+    "/ip firewall nat\n"
+    "add chain=srcnat action=masquerade out-interface=ether1\n"
+    "add chain=dstnat action=dst-nat protocol=tcp dst-port=8096 "
+    "to-addresses=192.168.88.10 to-ports=8096\n"
+)
+
+
+def test_importer_explains_rules_in_chinese():
+    """导入后要告诉用户「这条规则会做什么」，而不只是 echo 原始参数。"""
+    rules, errors = importer.parse_firewall_script(_SAMPLE_SCRIPT, "filter")
+    assert not errors, errors
+    assert len(rules) == 4
+    assert "WinBox" in rules[0].meaning and "管理端口" in rules[0].risk
+    assert "src-address" in rules[0].advice
+    assert "FastTrack" in rules[1].meaning and "Queue" in rules[1].risk
+    assert "共享上网" in rules[2].meaning
+    assert "转发到" in rules[3].meaning and "192.168.88.10:8096" in rules[3].meaning
+    preview = importer.build_import_preview(
+        {}, text_override=_SAMPLE_SCRIPT, source_override="上传文件")
+    brief = importer.format_import_brief(preview, 10)
+    for word in ("会做什么", "影响", "注意", "建议", "命令"):
+        assert word in brief
+    assert "[x][y]" not in brief          # 动态文本已做 Markdown 安全转义
+    assert preview["rules"][0]["command"].startswith("/ip firewall filter add")
+
+
+def test_importer_recognizes_print_output_and_continuation():
+    """WinBox 里 print 出来的规则、反斜杠续行也要能解析。"""
+    text = (' 0  chain=input action=accept protocol=tcp dst-port=22\n'
+            'add chain=input action=drop \\\n'
+            '    in-interface-list=WAN comment="wan drop"\n')
+    rules, errors = importer.parse_firewall_script(text, "filter")
+    assert len(rules) == 2, errors
+    assert "SSH" in rules[0].meaning
+    assert "阻断" in rules[1].meaning or "丢弃" in rules[1].meaning
+
+
+def test_pasted_text_generates_preview_on_save():
+    """文本框方式：保存配置就自动生成中文解释预览。"""
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4",
+                   "import_rules": "chain=input action=accept protocol=tcp dst-port=8291",
+                   "import_disabled": True})
+    preview = dict(p.get_data(_KEY_IMPORT) or {})
+    assert preview["source"] == "粘贴规则文本"
+    assert len(preview["rules"]) == 1
+    assert preview["rules"][0]["disabled"] is True
+    assert "WinBox" in preview["rules"][0]["meaning"]
+    import json
+    assert "会做什么" in json.dumps(p.get_page(), ensure_ascii=False)
+
+
+def test_upload_file_api_parses_content():
+    """上传文件方式：JS 把文件文本 POST 到 /import_text，兼容 base64/data URL。"""
+    import base64
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4"})
+    text = "chain=forward action=drop in-interface-list=WAN"
+    res = p.api_import_text({"text": text, "name": "firewall.rsc"})
+    assert res.success and res.data["count"] == 1
+    preview = dict(p.get_data(_KEY_IMPORT) or {})
+    assert "上传文件" in preview["source"] and "firewall.rsc" in preview["source"]
+    assert "阻断" in preview["rules"][0]["meaning"] or "丢弃" in preview["rules"][0]["meaning"]
+    b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    res2 = p.api_import_text({"text": "data:text/plain;base64," + b64,
+                              "name": "encoded.txt"})
+    assert res2.success and res2.data["count"] == 1
+    assert p.api_import_text({"text": ""}).success is False
+
+
+def test_upload_button_has_executable_script():
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4"})
+    btn = next(b for b in _page_buttons(p) if "上传" in str(b.get("text") or ""))
+    script = str((btn.get("props") or {}).get("onclick") or "")
+    assert "MoviePilotAPI.post" in script and "/import_text" in script
+    assert str(btn.get("text") or "").strip()
+
+
+def test_import_apply_writes_all_rules_before_drop():
+    """确认批量导入：一次写入全部规则，且都插在兜底 drop 之前。"""
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "192.168.1.1",
+                   "manage_tables": ["filter"], "before_change_backup": True,
+                   "import_rules": ("chain=input action=accept protocol=tcp dst-port=8291\n"
+                                    "chain=input action=accept protocol=udp dst-port=53")})
+    state, responder, backups = _stateful_responder(_default_tables_state())
+    AsyncRequestUtils.responder = responder
+    before = len(state["filter"])
+    res = p.api_import_apply()
+    assert res.success and res.data["total"] == 2 and res.data["success"] == 2, res.message
+    assert len(state["filter"]) == before + 2
+    assert backups["n"] >= 1
+    order = [r[".id"] for r in state["filter"]]
+    for port in ("8291", "53"):
+        rid = next(r[".id"] for r in state["filter"]
+                   if str(r.get("dst-port") or "") == port)
+        assert order.index(rid) < order.index("*5"), f"{port} 落到了兜底 drop 之后"
+
+
+def test_import_apply_dry_run_writes_nothing():
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "192.168.1.1",
+                   "manage_tables": ["filter"], "dry_run": True,
+                   "before_change_backup": True,
+                   "import_rules": "chain=input action=accept protocol=tcp dst-port=8291"})
+    state, responder, backups = _stateful_responder(_default_tables_state())
+    AsyncRequestUtils.responder = responder
+    before = len(state["filter"])
+    res = p.api_import_apply()
+    assert res.success and res.data["dry_run"] is True
+    assert len(state["filter"]) == before
+    assert backups["n"] == 0
+    mutating = [(m, u) for m, u, _ in AsyncRequestUtils.calls
+                if m in ("PUT", "PATCH", "DELETE")]
+    assert mutating == [], mutating
+
+
+def test_import_clear_and_apply_without_preview():
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "192.168.1.1"})
+    assert p.api_import_apply().success is False, "没有预览时不该写入"
+    p.api_import_text({"text": "chain=input action=accept protocol=tcp dst-port=22"})
+    assert p.get_data(_KEY_IMPORT)["rules"]
+    assert p.api_import_clear().success
+    assert not p.get_data(_KEY_IMPORT)
+
+
+def test_connection_center_overrides_credentials():
+    """下拉选中连接中心已保存的路由器，自动带入地址/端口/账号/密码。"""
+    p = _fresh_plugin()
+    roslink.write_shared([{
+        "name": "主路由", "address": "10.0.0.1", "port": 8443,
+        "username": "cc-user", "password": "cc-pass", "ssl": True,
+    }])
+    try:
+        p.init_plugin({"enabled": True, "router_address": "1.2.3.4",
+                       "router_username": "manual",
+                       "ros_connection": "主路由"})
+        assert p._address == "10.0.0.1"
+        assert p._port == 8443
+        assert p._username == "cc-user"
+        assert p._password == "cc-pass"
+        import json
+        form, _ = p.get_form()
+        assert "主路由" in json.dumps(form, ensure_ascii=False), "下拉里要列出已保存路由器"
+    finally:
+        roslink.write_shared([])
+
+
+def test_connection_center_missing_falls_back_to_manual():
+    p = _fresh_plugin()
+    roslink.write_shared([])
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4",
+                   "router_username": "manual", "ros_connection": "不存在的路由器"})
+    assert p._address == "1.2.3.4" and p._username == "manual"
+
+
+def test_form_is_simplified_and_has_no_bare_labels():
+    import json
+    p = _fresh_plugin()
+    form, defaults = p.get_form()
+    blob = json.dumps(form, ensure_ascii=False)
+    for model in ("new_rule_chain", "new_rule_action", "new_rule_dst_port",
+                  "new_rule_log_prefix", "add_once"):
+        assert model not in blob
+    assert len(defaults) <= 20
+    assert "粘贴 RouterOS" in blob and "已保存的路由器" in blob
+    for node in _all_nodes(form):
+        assert node.get("component") not in ("VAlert", "VLabel"), "不要只有图标没有说明的元素"
+        assert not isinstance(node.get("content"), dict), "content 必须是数组"
+
+
+def test_page_shows_import_explanation_without_markdown_artifacts():
+    import json
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4",
+                   "import_rules": 'chain=input action=accept protocol=tcp '
+                                   'dst-port=8291 comment="[x][y] *b* _c_`d`"'})
+    blob = json.dumps(p.get_page(), ensure_ascii=False)
+    assert "会做什么" in blob and "WinBox" in blob
+    assert "[x][y]" not in blob and "［x］［y］" in blob
+    assert "运行日志" not in blob, "主界面不重复铺运行日志"
+
+
+def test_import_apis_registered_with_auth():
+    p = _fresh_plugin()
+    paths = {e["path"] for e in p.get_api()}
+    assert {"/import_text", "/import_apply", "/import_clear"} <= paths
+    for e in p.get_api():
+        assert e.get("auth") == "bear" and callable(e.get("endpoint"))
