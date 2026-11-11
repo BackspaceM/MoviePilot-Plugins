@@ -147,7 +147,7 @@ class BandwidthQueueScheduler(_PluginBase):
     plugin_name = 'BandwidthQueueScheduler'
     plugin_desc = '在 RouterOS 上按带宽方案智能编排简单队列：内置均衡/观影/下载/夜间四套方案，支持时段自动切换、一键手动切换、实时速率监控与 FastTrack 失效诊断，统一管理前缀不误伤手工队列。'
     plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/bandwidthqueuescheduler.png'
-    plugin_version = "1.2.4"
+    plugin_version = "1.2.5"
     plugin_author = 'BackspaceM'
     author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "bandwidthqueuescheduler_"

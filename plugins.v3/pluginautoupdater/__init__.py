@@ -123,7 +123,7 @@ class PluginAutoUpdater(_PluginBase):
     plugin_desc = ("扫描已安装插件，设置页多选作者和插件，按 cron 定时或点按钮立即更新；"
                    "只更新选中的、市场里有新版的插件。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pluginautoupdater.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "pluginautoupdater_"

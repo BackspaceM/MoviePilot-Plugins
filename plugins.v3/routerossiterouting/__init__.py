@@ -90,7 +90,7 @@ class RouterOSSiteRouting(_PluginBase):
                    "地址列表、mangle 标记与策略路由，配合 CF 优选 IP；站点增删按标签增量"
                    "同步，预览中文含义后批量写入，只新增带 MP-B3 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerossiterouting.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerossiterouting_"

@@ -123,7 +123,7 @@ class MediaLibraryRefresh(_PluginBase):
     plugin_name = "媒体库刷新"
     plugin_desc = "监听整理入库事件，按文件级增量刷新 Emby/Jellyfin/Plex，支持多服务器、路径映射、合并去重与分级回退"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/medialibraryrefresh.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_label = "媒体库,Emby,Plex,Jellyfin,刷新"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"

@@ -69,7 +69,7 @@ class RouterOSConnectionCenter(_PluginBase):
                    "不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查端口、REST、权限与版本，"
                    "失败时给出可直接复制到 RouterOS 终端执行的修复命令。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosconnectioncenter_"

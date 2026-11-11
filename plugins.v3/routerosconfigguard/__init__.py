@@ -136,7 +136,7 @@ class RouterOSConfigGuard(_PluginBase):
     plugin_name = 'RouterOSConfigGuard'
     plugin_desc = '定时备份 RouterOS 配置并检测漂移（新增/删除高亮敏感分区）；备份可选存于 MP 插件目录、RouterOS 本机（.backup+.rsc）或双份；漂移即时通知。'
     plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconfigguard.png'
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     plugin_author = 'BackspaceM'
     author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "routerosconfigguard_"

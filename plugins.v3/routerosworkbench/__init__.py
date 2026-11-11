@@ -98,7 +98,7 @@ class RouterOSWorkbench(_PluginBase):
     plugin_desc = ("一次配置连接，五个页签一起看 RouterOS 现状：概览、防火墙、Queue、备份、分流。"
                    "只读聚合，不改其它插件，也不往路由器写配置；顺带列出本地 RouterOS 插件的启用情况。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosworkbench.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosworkbench_"

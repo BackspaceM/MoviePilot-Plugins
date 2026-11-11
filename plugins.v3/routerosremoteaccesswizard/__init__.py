@@ -96,7 +96,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                    "dst-nat 映射 + 防火墙放行，预览「外网端口 → 内网服务」后批量写入；"
                    "带域名备注、连通性测试、自动备份与失败回滚，只新增带 MP-B1 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosremoteaccesswizard_"

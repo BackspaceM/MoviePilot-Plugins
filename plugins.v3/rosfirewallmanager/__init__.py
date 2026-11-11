@@ -189,7 +189,7 @@ class RosFirewallManager(_PluginBase):
     plugin_desc = ("RouterOS 防火墙可视化管理器：表格化查看 filter/nat/mangle/raw 全部规则并检测影子规则·重复·缺失兜底，"
                    "逐条启停/上下移/删除或按表单新增（自动插到兜底 drop 前），操作前可留备份，定时扫描隐患并推送 MP 通知。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png"
-    plugin_version = "1.2.6"
+    plugin_version = "1.2.7"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "rosfirewallmanager_"

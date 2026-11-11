@@ -158,7 +158,7 @@ class CFRouterOS(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/cfrouteros.png"
     )
-    plugin_version = "1.3.3"
+    plugin_version = "1.3.4"
     plugin_label = "网络,Cloudflare,RouterOS,DNS"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"

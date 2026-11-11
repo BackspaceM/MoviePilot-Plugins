@@ -4,7 +4,8 @@
 用 FastAPI.add_api_route 注册。宿主在注册失败时会捕获异常并跳过路由，
 详情页按钮随后就会得到 404 Not Found，所以这里把「注册失败」当成错误。
 
-同时静态核对详情页按钮 api 与 get_api() 声明是否一一对应。
+同时在多种数据状态下扫描详情页全部分支按钮，核对 api/method 与 get_api() 声明，
+避免只校验默认空状态页面而漏掉"有数据"分支里的按钮。
 
 用法：python3 tests/v3/check_api_contract.py
 依赖：Python 3.9+、fastapi、pydantic（不需要 MoviePilot 宿主）。
@@ -249,6 +250,37 @@ def collect_click_events(node: Any) -> list[dict[str, str]]:
     return found
 
 
+class _AnyData(dict):
+    """让 get_data(key, default) 对任意 key 返回同一非空值，用于触发页面分支。"""
+
+    def __init__(self, value: Any) -> None:
+        super().__init__()
+        self.value = value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.value
+
+
+# 页面常按"有无运行数据"切换分支，只扫默认实例会漏掉大量按钮。
+_PAGE_STATE_VALUES: tuple[Any, ...] = (
+    None, {}, {"x": 1}, [{"x": 1}], "text", 1, True,
+)
+
+
+def collect_page_clicks(plugin: Any) -> list[dict[str, str]]:
+    """在多种数据状态下反复调用 get_page()，收集全部分支里的按钮。"""
+    seen: dict[tuple[str, str], dict[str, str]] = {}
+    for value in _PAGE_STATE_VALUES:
+        try:
+            plugin._data = _AnyData(value)
+            page = plugin.get_page() or []
+        except Exception:  # noqa: BLE001 - 某些状态值类型不匹配，跳过该分支
+            continue
+        for click in collect_click_events(page):
+            seen[(click["api"], click["method"])] = click
+    return list(seen.values())
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     import argparse
 
@@ -300,11 +332,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if missing_auth:
             failures.append(f"{plugin_id}: 缺少 auth=bear 的接口 {missing_auth}")
 
-        try:
-            clicks = collect_click_events(plugin.get_page() or [])
-        except Exception as error:  # noqa: BLE001
-            clicks = []
-            warnings.append(f"{plugin_id}: get_page 离线执行失败 {type(error).__name__}: {error}")
+        clicks = collect_page_clicks(plugin)
+        if not clicks:
+            warnings.append(f"{plugin_id}: 全状态扫描未发现任何按钮，请确认页面是否确实无操作")
 
         prefix = f"plugin/{plugin_id}/"
         orphans: list[str] = []
@@ -331,7 +361,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ok = bad == 0 and not missing_auth and not orphans and not conflicts
         print(
             f"  {plugin_id:32s} 接口 {len(apis):2d}  注册失败 {bad:2d}  "
-            f"按钮 {len(clicks):2d}  未声明 {len(set(orphans)):2d}  "
+            f"按钮(全状态) {len(clicks):2d}  未声明 {len(set(orphans)):2d}  "
             f"方法冲突 {len(conflicts):2d}  {'OK' if ok else 'FAIL'}"
         )
 

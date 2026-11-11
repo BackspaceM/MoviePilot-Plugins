@@ -111,7 +111,7 @@ class PlaybackScheduler(_PluginBase):
     plugin_name = 'PlaybackScheduler'
     plugin_desc = '读取 Emby/Plex 在播会话，按转码/远程状态对下载器限速并可选联动 RouterOS，保护在播文件、观影后自动删种。'
     plugin_icon = 'https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/playbackscheduler.png'
-    plugin_version = "1.1.4"
+    plugin_version = "1.1.5"
     plugin_author = 'BackspaceM'
     author_url = 'https://github.com/BackspaceM'
     plugin_config_prefix = "playbackscheduler_"

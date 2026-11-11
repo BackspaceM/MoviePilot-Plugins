@@ -95,7 +95,7 @@ class RouterOSScenarioTemplates(_PluginBase):
                    "频场景做成模板：勾选→预览规则与中文含义→确认→批量下发，写入前自动"
                    "备份，失败按逆序自动回滚；只新增带 MP-A2 标签的条目，不改用户已有配置。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosscenariotemplates_"

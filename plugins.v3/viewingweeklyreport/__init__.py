@@ -163,7 +163,7 @@ class ViewingWeeklyReport(_PluginBase):
                    "电影剧集占比、热门影片），并按规则引擎扫描转码记录给出硬件加速、音频直通、"
                    "字幕烧录、远程码率等可执行诊断建议。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/viewingweeklyreport.png"
-    plugin_version = "1.1.4"
+    plugin_version = "1.1.5"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "viewingweeklyreport_"

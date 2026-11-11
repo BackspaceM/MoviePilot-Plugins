@@ -116,7 +116,7 @@ class PiecesHashReseed(_PluginBase):
     plugin_name = "Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
