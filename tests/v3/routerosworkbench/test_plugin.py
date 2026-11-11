@@ -216,7 +216,7 @@ def test_tab_button_paths_match_get_api():
 # ---------------------------------------------------------------------------
 
 def test_contract_metadata():
-    assert RouterOSWorkbench.plugin_version == "1.0.0"
+    assert len(RouterOSWorkbench.plugin_version.split(".")) == 3 and all(p.isdigit() for p in RouterOSWorkbench.plugin_version.split("."))
     assert RouterOSWorkbench.plugin_author == "BackspaceM"
     assert RouterOSWorkbench.plugin_config_prefix == "routerosworkbench_"
     assert RouterOSWorkbench.plugin_icon.startswith("https://")

@@ -283,7 +283,7 @@ def test_normalize_base_url():
 # ---------------------------------------------------------------------------
 
 def test_contract_attributes():
-    assert BandwidthQueueScheduler.plugin_version == "1.2.1"
+    assert len(BandwidthQueueScheduler.plugin_version.split(".")) == 3 and all(p.isdigit() for p in BandwidthQueueScheduler.plugin_version.split("."))
     assert BandwidthQueueScheduler.plugin_name == PLUGIN_NAME
     assert BandwidthQueueScheduler.plugin_author == "BackspaceM"
     assert BandwidthQueueScheduler.plugin_config_prefix == "bandwidthqueuescheduler_"

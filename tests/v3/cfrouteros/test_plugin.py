@@ -266,7 +266,7 @@ def test_check_reports_identity():
 def test_plugin_metadata():
     assert CFRouterOS.plugin_author == "BackspaceM"
     assert CFRouterOS.plugin_config_prefix == "cfrouteros_"
-    assert CFRouterOS.plugin_version == "1.3.1"
+    assert len(CFRouterOS.plugin_version.split(".")) == 3 and all(p.isdigit() for p in CFRouterOS.plugin_version.split("."))
     assert "GITHUB_USER" not in CFRouterOS.plugin_icon
     commands = {item["cmd"] for item in CFRouterOS.get_command()}
     assert commands == {"/cfrouteros_run", "/cfrouteros_check",

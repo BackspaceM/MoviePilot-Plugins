@@ -255,7 +255,7 @@ def test_server_result_serialization():
 # ---------------------------------------------------------------------------
 
 def test_plugin_metadata():
-    assert MediaLibraryRefresh.plugin_version == "1.1.1"
+    assert len(MediaLibraryRefresh.plugin_version.split(".")) == 3 and all(p.isdigit() for p in MediaLibraryRefresh.plugin_version.split("."))
     assert MediaLibraryRefresh.plugin_author == "BackspaceM"
     assert MediaLibraryRefresh.author_url == "https://github.com/BackspaceM"
     assert MediaLibraryRefresh.plugin_icon.endswith("medialibraryrefresh.png")

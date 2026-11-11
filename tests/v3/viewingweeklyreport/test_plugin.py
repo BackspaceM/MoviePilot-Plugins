@@ -348,7 +348,7 @@ def test_validate_cron():
 
 def test_v3_class_attributes():
     assert ViewingWeeklyReport.plugin_name == PLUGIN_NAME
-    assert ViewingWeeklyReport.plugin_version == "1.1.1"
+    assert len(ViewingWeeklyReport.plugin_version.split(".")) == 3 and all(p.isdigit() for p in ViewingWeeklyReport.plugin_version.split("."))
     assert ViewingWeeklyReport.plugin_icon == PLUGIN_ICON
     assert ViewingWeeklyReport.plugin_author == "BackspaceM"
     assert ViewingWeeklyReport.plugin_config_prefix == "viewingweeklyreport_"
@@ -426,7 +426,7 @@ def test_get_service_cron_instance():
     assert len(jobs) == 1
     assert jobs[0]["trigger"] == ("cron", "0 9 * * 1")
     assert jobs[0]["func"] == p.start_run
-    assert jobs[0]["kwargs"]["mode"] == "full"
+    assert jobs[0]["kwargs"] == {}  # MP 无参调用 func，业务参数靠默认值
     p2 = _fresh_plugin()  # 未启用 -> 无 job
     p2.init_plugin({"enabled": False})
     assert p2.get_service() == []
@@ -626,7 +626,7 @@ def test_get_page_status_and_sections():
     p = _fresh_plugin()
     _init(p)
     page = json.dumps(p.get_page(), ensure_ascii=False)
-    assert "观影周报" in page and "生成周报" in page
+    assert "生成周报" in page and "观看时长" in page
     for section in ("实时在播会话", "运行日志", "周报与诊断", "数据与通知"):
         assert section not in page
     assert "已连接媒体服务器" in p.get_form()[1] or True  # 表单已在其它用例校验

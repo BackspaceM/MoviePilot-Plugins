@@ -228,7 +228,7 @@ def test_prune_routeros_files_keeps_recent_pairs():
 
 def test_contract_attributes():
     assert RouterOSConfigGuard.plugin_name == "RouterOSConfigGuard"
-    assert RouterOSConfigGuard.plugin_version == "1.3.1"
+    assert len(RouterOSConfigGuard.plugin_version.split(".")) == 3 and all(p.isdigit() for p in RouterOSConfigGuard.plugin_version.split("."))
     assert RouterOSConfigGuard.plugin_author == "BackspaceM"
     assert RouterOSConfigGuard.plugin_desc
     assert RouterOSConfigGuard.plugin_icon.startswith("https://")

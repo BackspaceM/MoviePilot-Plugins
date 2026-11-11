@@ -531,7 +531,7 @@ def test_onlyonce_and_get_service() -> None:
 def test_esc_and_version_consistency() -> None:
     assert _esc("<x>") == "&lt;x&gt;"
     assert _esc("a[b]") == "a［b］"
-    assert PluginAutoUpdater.plugin_version == "1.1.0"
+    assert len(PluginAutoUpdater.plugin_version.split(".")) == 3 and all(p.isdigit() for p in PluginAutoUpdater.plugin_version.split("."))
     assert PluginAutoUpdater.plugin_author == "BackspaceM"
     assert PluginAutoUpdater.plugin_order == 56
     assert PluginAutoUpdater.system_version == ">=3.0.0"

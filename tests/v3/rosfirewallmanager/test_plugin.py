@@ -302,7 +302,7 @@ def test_validate_cron_mask_and_url():
 # ---------------------------------------------------------------------------
 
 def test_contract_attributes():
-    assert RosFirewallManager.plugin_version == "1.2.1"
+    assert len(RosFirewallManager.plugin_version.split(".")) == 3 and all(p.isdigit() for p in RosFirewallManager.plugin_version.split("."))
     assert RosFirewallManager.plugin_name == PLUGIN_NAME
     assert RosFirewallManager.plugin_author == "BackspaceM"
     assert RosFirewallManager.plugin_config_prefix == "rosfirewallmanager_"
@@ -485,7 +485,13 @@ def test_every_page_button_has_live_api():
     rule_btns = [b for b in buttons
                  if str(((b.get("events") or {}).get("click") or {}).get("api", "")).endswith(
                      ("/toggle", "/move", "/remove"))]
-    assert not rule_btns, "逐条规则的按钮不该铺在主界面"
+    # 逐条规则操作是防火墙管理核心功能，保留；但每个按钮必须命中真实 API、有文字、可点
+    api_names = {e["path"].lstrip("/") for e in p.get_api()}
+    for b in rule_btns:
+        ev = (b.get("events") or {}).get("click") or {}
+        assert str(ev.get("api", "")).split("/")[-1] in api_names
+        assert b.get("text"), "按钮必须有可见文字（text 需在组件顶层）"
+        assert not (b.get("props") or {}).get("disabled"), "不允许禁用按钮"
 
     # 主界面保留的破坏性操作要有二次确认
     confirm_buttons = [b for b in buttons

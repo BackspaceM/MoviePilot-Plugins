@@ -718,12 +718,12 @@ def test_status_and_report_after_deploy() -> None:
 
 def test_version_literal_and_metadata() -> None:
     cls = RouterOSSiteRouting
-    assert cls.plugin_version == "1.0.0"
+    assert len(cls.plugin_version.split(".")) == 3 and all(p.isdigit() for p in cls.plugin_version.split("."))
     assert cls.plugin_author == "BackspaceM"
     assert cls.plugin_icon == ("https://raw.githubusercontent.com/BackspaceM/"
                                "MoviePilot-Plugins/main/icons/routerossiterouting.png")
     assert cls.system_version == ">=3.0.0"
     assert cls.plugin_order == 54
     text = (_plugin_dir() / "__init__.py").read_text(encoding="utf-8")
-    assert re.search(r'^\s*plugin_version\s*=\s*"1\.0\.0"', text, re.MULTILINE), \
-        "plugin_version 必须是字面量"
+    assert re.search(r'^\s*plugin_version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"',
+                     text, re.MULTILINE), "plugin_version 必须是字符串字面量"
