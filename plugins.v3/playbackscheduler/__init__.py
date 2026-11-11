@@ -36,6 +36,7 @@ from .core import (
     eligible_for_cleanup,
     format_sessions,
     mask_secrets,
+    md_safe,
     normalize_path,
     overall_state,
     parse_downloaders,
@@ -543,22 +544,18 @@ class PlaybackScheduler(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[dict]:
+        """精简主界面：状态行 + 一行结果 + 操作按钮。
+        运行日志由 MP 插件卡片右上角三圆点的实时日志查看，不在此重复渲染。"""
         live = dict(self.get_data(_LIVE_KEY) or {})
         last = dict(self.get_data(_LAST_KEY) or {})
-        logs = list(self.get_data(_LOG_KEY) or [])
         history = list(self.get_data(_HISTORY_KEY) or [])
         state = live.get("state", STATE_IDLE)
-        sessions = [Session(**s) for s in (live.get("sessions") or [])]
-        playing = [s for s in sessions if s.is_playing]
 
-        session_lines = []
-        for s in playing:
-            session_lines.append(f"{s.user}@{s.server}｜{s.title}｜"
-                                 f"{'远程' if s.is_remote else '内网'}/"
-                                 f"{'转码' if s.is_transcoding else '原画'}/"
-                                 f"{int(s.progress*100)}%")
-        if not session_lines:
-            session_lines = ["当前无播放中会话"]
+        def kv(label: str, value: Any) -> dict:
+            return {"component": "VCol", "props": {"cols": 6, "md": 4}, "content": [
+                {"component": "div", "text": md_safe(f"{label}：{value}"),
+                 "props": {"style": "font-size:13px"}},
+            ]}
 
         buttons = []
         for label, api in (("立即检查并应用", "run"), ("恢复默认限速", "reset"),
@@ -570,32 +567,17 @@ class PlaybackScheduler(_PluginBase):
                                      "params": {}, "confirm": label in ("停止", "清空观看历史")}},
             })
 
-        return [{
-            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
-                "component": "VCardText", "content": [
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 6}, "content": [
-                            {"component": "VLabel", "text": "当前播放状态"},
-                            {"component": "div", "text": state_label(state)}]},
-                        {"component": "VCol", "props": {"cols": 6}, "content": [
-                            {"component": "VLabel", "text": "观看历史条目"},
-                            {"component": "div", "text": str(len(history))}]},
-                    ]},
-                    {"component": "VDivider"},
-                    {"component": "VLabel", "text": "在播会话"},
-                    *[{"component": "div", "text": line, "props": {"style": "white-space:pre-wrap"}} for line in session_lines],
-                    {"component": "VDivider"},
-                    {"component": "VLabel", "text": "最近状态"},
-                    {"component": "div", "text": last.get("message") or "尚未执行", "props": {"style": "white-space:pre-wrap"}},
-                    {"component": "VDivider"},
-                    {"component": "VLabel", "text": "运行日志（最近 20 条）"},
-                    *[{"component": "div",
-                       "text": f"[{l['time']}][{l['level']}] {l['message']}",
-                       "props": {"style": "white-space:pre-wrap;font-size:12px"}} for l in logs[:20]],
-                    {"component": "VRow", "content": [{"component": "VCol", "content": buttons}]},
-                ]},
+        nodes: List[dict] = [
+            {"component": "VRow", "content": [
+                kv("播放状态", state_label(state)),
+                kv("观看历史", f"{len(history)} 条"),
+                kv("最近结果", last.get("message") or "尚未执行"),
             ]},
+            {"component": "VRow", "props": {"class": "mt-3"}, "content": [
+                {"component": "VCol", "content": buttons}]},
         ]
+        return [{"component": "VCard", "props": {"variant": "tonal"}, "content": [
+            {"component": "VCardText", "content": nodes}]}]
 
     # ------------------------------------------------------------------
     # API
@@ -603,23 +585,23 @@ class PlaybackScheduler(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [{
-            "path": f"/plugin/{PLUGIN_NAME}/run",
+            "path": "/run",
             "endpoint": self.api_run, "methods": ["POST"],
             "summary": "立即执行一轮播放感知检查",
         }, {
-            "path": f"/plugin/{PLUGIN_NAME}/reset",
+            "path": "/reset",
             "endpoint": self.api_reset, "methods": ["POST"],
             "summary": "恢复下载器与 RouterOS 默认限速",
         }, {
-            "path": f"/plugin/{PLUGIN_NAME}/status",
+            "path": "/status",
             "endpoint": self.api_status, "methods": ["GET"],
             "summary": "获取当前播放与限速状态",
         }, {
-            "path": f"/plugin/{PLUGIN_NAME}/stop",
+            "path": "/stop",
             "endpoint": self.api_stop, "methods": ["POST"],
             "summary": "停止当前任务",
         }, {
-            "path": f"/plugin/{PLUGIN_NAME}/clear_history",
+            "path": "/clear_history",
             "endpoint": self.api_clear, "methods": ["POST"],
             "summary": "清空观看历史",
         }]
