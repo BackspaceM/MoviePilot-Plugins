@@ -486,13 +486,7 @@ def test_every_page_button_has_live_api():
         assert props.get("disabled") is not True, f"按钮「{label}」被禁用"
         click = (btn.get("events") or {}).get("click") or {}
         api = str(click.get("api") or "").lstrip("/")
-        if not api:
-            # 「上传 .rsc 文件」按钮用 props.onclick 脚本弹出文件选择器，
-            # 不走 events.click（官方 certmanager 同款写法），它同样是可点的。
-            script = str(props.get("onclick") or "")
-            assert "MoviePilotAPI.post" in script and "/import_text" in script, \
-                f"按钮「{label}」既无 events.click.api，也没有可执行的上传脚本"
-            continue
+        assert api, f"按钮「{label}」缺少 events.click.api（点了没反应）"
         assert api in api_map, f"按钮「{label}」的 API {api} 未在 get_api 注册（点了没反应）"
         assert click.get("method") == "post", f"按钮「{label}」method 非 post"
 
@@ -759,12 +753,134 @@ def test_upload_file_api_parses_content():
 
 
 def test_upload_button_has_executable_script():
+    """上传控件必须是 html 原生 input + inline onchange，不能再用 props.onclick。
+
+    props.onclick 字符串会被 Vue 当 DOM property 赋值（字符串不是函数）→ 点击无反应。
+    """
     p = _fresh_plugin()
     p.init_plugin({"enabled": True, "router_address": "1.2.3.4"})
-    btn = next(b for b in _page_buttons(p) if "上传" in str(b.get("text") or ""))
-    script = str((btn.get("props") or {}).get("onclick") or "")
-    assert "MoviePilotAPI.post" in script and "/import_text" in script
-    assert str(btn.get("text") or "").strip()
+    htmls = []
+
+    def walk(n):
+        if isinstance(n, dict):
+            if n.get("html"):
+                htmls.append(str(n["html"]))
+            for c in (n.get("content") or []):
+                walk(c)
+        elif isinstance(n, list):
+            for c in n:
+                walk(c)
+
+    for card in p.get_page():
+        walk(card)
+    assert htmls, "详情页缺少上传控件的 html 节点"
+    html = "\n".join(htmls)
+    assert "上传 .rsc / 规则文件" in html
+    assert "onchange=" in html and 'type="file"' in html
+    assert "window.MoviePilotAPI" in html and "/import_text" in html
+    assert "rfmUploadTip" in html, "上传后要有就地显示中文解释的容器"
+    # 页面里不能残留把脚本塞进 props.onclick 的写法
+    for b in _page_buttons(p):
+        assert "onclick" not in (b.get("props") or {}), "禁止 props.onclick 字符串脚本"
+
+
+def test_upload_script_has_no_html_attribute_breakers():
+    """inline 脚本里不能出现双引号或 & （会破坏 HTML 属性解析）。"""
+    from app.plugins.rosfirewallmanager import _UPLOAD_JS, _UPLOAD_HTML
+    assert '"' not in _UPLOAD_JS
+    assert "&" not in _UPLOAD_JS, "innerHTML 属性值里的 & 可能被当字符引用"
+    assert _UPLOAD_JS.startswith("var tip="), "onchange 直接写语句，this 才是 input"
+    assert "this.files" in _UPLOAD_JS
+    assert _UPLOAD_JS in _UPLOAD_HTML
+    assert "A.post(" in _UPLOAD_JS and "rd.readAsText(f)" in _UPLOAD_JS
+
+
+def test_all_api_routes_can_register_in_fastapi():
+    """按宿主真实注册方式逐条 add_api_route，防止再出现「按钮 Not Found」。
+
+    宿主 app/api/endpoints/plugin.py 对每条 get_api() 执行 add_api_route(**api)，
+    失败只写日志；旧版 endpoint 的 -> Response 注解是普通 class，FastAPI 抛
+    FastAPIError，12 条路由静默注册失败。
+    """
+    try:
+        from fastapi import FastAPI
+    except ImportError:
+        # 离线环境没有 fastapi 时，退化为契约检查
+        for e in _fresh_plugin().get_api():
+            assert e.get("response_model", "MISSING") is None, \
+                f"{e['path']} 未显式关闭 response_model"
+        return
+    app = FastAPI()
+    entries = _fresh_plugin().get_api()
+    failed = []
+    for entry in entries:
+        api = dict(entry)
+        api.pop("auth", None)
+        api["path"] = "/api/v1/plugin/RosFirewallManager" + api["path"]
+        try:
+            app.add_api_route(**api, tags=["plugin"])
+        except Exception as err:  # noqa: BLE001
+            failed.append((api["path"], type(err).__name__, str(err)[:120]))
+    assert not failed, f"以下路由在宿主里注册不了（点击必 404）：{failed}"
+    registered = {getattr(r, "path", "") for r in app.routes}
+    for name in ("scan", "refresh", "test", "router_backup", "stop",
+                 "import_text", "import_apply", "import_clear"):
+        assert f"/api/v1/plugin/RosFirewallManager/{name}" in registered
+
+
+def test_import_effect_summary_explains_overall_change():
+    """新增的整体摘要：回答「这批规则写进去后防火墙会怎样」。"""
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4",
+                   "import_rules": ("chain=input action=accept protocol=tcp dst-port=8291\n"
+                                    "add chain=input action=drop")})
+    preview = dict(p.get_data(_KEY_IMPORT) or {})
+    text = importer.summarize_import_effect(preview, existing_count=7, dry_run=True)
+    assert "导入后会发生什么" in text and "共 2 条" in text
+    assert "写入后约 9 条" in text
+    assert "位置：" in text and "动作：" in text and "影响：" in text
+    assert "高危" in text, "无条件 drop 应被点名为高危"
+    assert "试运行已开启" in text
+    import json
+    assert "导入后会发生什么" in json.dumps(p.get_page(), ensure_ascii=False)
+
+
+def test_upload_api_returns_brief_for_instant_feedback():
+    p = _fresh_plugin()
+    p.init_plugin({"enabled": True, "router_address": "1.2.3.4"})
+    res = p.api_import_text({"text": "chain=input action=accept protocol=tcp dst-port=8291",
+                             "name": "firewall.rsc"})
+    assert res.success
+    assert "WinBox" in res.data["brief"] or "会做什么" in res.data["brief"]
+    assert "导入后会发生什么" in res.data["brief"]
+
+
+def test_form_has_file_input_without_model_leak():
+    form, defaults = _fresh_plugin().get_form()
+    blob = __import__("json").dumps(form, ensure_ascii=False)
+    assert "VFileInput" in blob and "onUpdate:modelValue" in blob
+    assert "import_rules=String" in blob, "选文件后要把文本写进粘贴框模型"
+    assert "import_file_path" in defaults, "保留容器内路径兜底入口"
+
+
+def test_container_file_path_works_without_browser():
+    """浏览器上传不可用时的零 JS 兜底：填容器内的 .rsc 路径也能生成解释。"""
+    import os
+    import tempfile
+    p = _fresh_plugin()
+    fd, path = tempfile.mkstemp(suffix=".rsc")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("/ip firewall filter\n"
+                    "add chain=input action=accept protocol=tcp dst-port=8291\n")
+        p.init_plugin({"enabled": True, "router_address": "1.2.3.4",
+                       "import_file_path": path, "import_rules": ""})
+        preview = dict(p.get_data(_KEY_IMPORT) or {})
+        assert len(preview.get("rules") or []) == 1
+        assert "容器内文件" in preview["source"]
+        assert "WinBox" in preview["rules"][0]["meaning"]
+    finally:
+        os.unlink(path)
 
 
 def test_import_apply_writes_all_rules_before_drop():
