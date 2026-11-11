@@ -32,19 +32,13 @@ except Exception:  # noqa: BLE001
     AsyncRequestUtils = None  # type: ignore
 
 try:
-    from app import schemas
-
-    Response = schemas.Response
+    from schemas import Response
 except Exception:  # noqa: BLE001
-    from pydantic import BaseModel
-
-    class Response(BaseModel):  # type: ignore
-        """宿主不可用时的三字段 envelope 降级实现。"""
-
-        success: bool = True
-        message: str = ""
-        data: Any = None
-
+    class Response:  # type: ignore
+        def __init__(self, success: bool = True, message: str = "ok", data: Any = None):
+            self.success = success
+            self.message = message
+            self.data = data
 
 # 带参按钮的 POST body 由 FastAPI 注入；离线测试环境降级为 None。
 try:
@@ -121,7 +115,7 @@ _KEY_RATES = "bqs_rates"             # 最近一次队列速率列表
 _KEY_FASTTRACK = "bqs_fasttrack"     # 最近一次 FastTrack 诊断
 
 _NOTIFY_LABELS = {
-    "change": "仅变更/异常",
+    "change": "仅变更/异常（推荐）",
     "all": "每次调度",
     "none": "关闭",
 }
@@ -140,13 +134,11 @@ def _ts_text(ts: Optional[float]) -> str:
         return str(ts)
 
 
-
-from . import roslink
 class BandwidthQueueScheduler(_PluginBase):
     plugin_name = PLUGIN_NAME
     plugin_desc = PLUGIN_DESCRIPTION
     plugin_icon = PLUGIN_ICON
-    plugin_version = "1.2.1"
+    plugin_version = "1.0.0"
     plugin_author = PLUGIN_AUTHORS
     author_url = AUTHOR_URL
     plugin_config_prefix = "bandwidthqueuescheduler_"
@@ -186,20 +178,13 @@ class BandwidthQueueScheduler(_PluginBase):
     def init_plugin(self, config: dict) -> None:
         config = dict(config or {})
         self.stop_service()
-
-        # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持原配置不变
-        _ccfg = dict(config or {})
-        _rcc, _rcc_note = roslink.connection_overrides(_ccfg.get("ros_connection"), "std")
-        _ccfg.update(_rcc)
-        if _rcc_note:
-            (logger.info if _rcc else logger.warning)(f"RouterOS 连接中心：{_rcc_note}")
         self._enabled = bool(config.get("enabled"))
 
-        self._address = str(_ccfg.get("router_address") or "").strip()
-        self._port = int(_ccfg.get("router_port") or 443)
-        self._use_ssl = bool(_ccfg.get("router_ssl", True))
-        self._username = str(_ccfg.get("router_username") or "").strip()
-        self._password = str(_ccfg.get("router_password") or "")
+        self._address = str(config.get("router_address") or "").strip()
+        self._port = int(config.get("router_port") or 443)
+        self._use_ssl = bool(config.get("router_ssl", True))
+        self._username = str(config.get("router_username") or "").strip()
+        self._password = str(config.get("router_password") or "")
 
         self._prefix = "".join(
             c for c in str(config.get("queue_prefix") or _DEFAULT_PREFIX).strip()
@@ -269,7 +254,11 @@ class BandwidthQueueScheduler(_PluginBase):
             "name": "带宽/Queue 智能调度",
             "trigger": trigger,
             "func": self.start_run,
-            "kwargs": {"trigger": "定时轮询", "prefer_thread": True},
+            # MP scheduler.py 以 add_job(self.start, service["trigger"], ..., **service["kwargs"],
+            # kwargs={"job_id": ...}) 注册；kwargs 是给 add_job 的调度参数，不是传给 func 的。
+            # 放 "trigger" 会与位置参数撞名报 multiple values for argument 'trigger'。
+            # 插件 func 由 MP 无参调用，触发来源/线程偏好请放在 func 默认值里。
+            "kwargs": {},
         }]
 
     # ------------------------------------------------------------------
@@ -281,7 +270,6 @@ class BandwidthQueueScheduler(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "router_address": "",
-            "ros_connection": "",
             "router_port": 443,
             "router_ssl": True,
             "router_username": "",
@@ -318,29 +306,6 @@ class BandwidthQueueScheduler(_PluginBase):
         ]
 
         content: List[dict] = [
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-2"},
-                 "text": "连接中心"},
-                {"component": "VCardText", "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "ros_connection",
-                        "label": "已保存的路由器",
-                        "items": roslink.connection_items(),
-                        "clearable": True,
-                        "hint": "选中后自动带入连接参数，下面可以留空；不选就用手填的。",
-                        "persistentHint": True}},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "下拉是空的就直接手填，不影响使用。"},
-                ]},
-            ]},
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                                              "class": "mb-4"},
-             "content": {"text": "按时段在 RouterOS 上切换简单队列，也能在详情页手动切。"
-                                 "只管前缀开头的队列，你手工建的不动。"}},
-            {"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
-                                              "class": "mb-3"},
-             "content": {"text": "开了 FastTrack 的流量不走 Queue，限速会看着像没生效，详情页有「FastTrack 诊断」。"
-                                 "账号要有 read/write/api 权限，第一次用先开「试运行」看看。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件", "hint": "关闭后不再定时调度"}}]},
@@ -350,7 +315,6 @@ class BandwidthQueueScheduler(_PluginBase):
                     {"component": "VSwitch", "props": {"model": "dry_run", "label": "试运行", "hint": "只评估差异，不实际改动队列"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "RouterOS 连接"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     {"component": "VTextField", "props": {"model": "router_address", "label": "RouterOS 地址",
@@ -365,7 +329,6 @@ class BandwidthQueueScheduler(_PluginBase):
                     fld("router_password", "密码", {"type": "password"})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "队列与默认方案"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("queue_prefix", "队列名前缀",
@@ -379,7 +342,6 @@ class BandwidthQueueScheduler(_PluginBase):
                         "model": "auto_apply", "label": "按规则自动切换", "hint": "关闭则保持当前方案"}}]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "设备与时段规则"},
             {"component": "VRow", "content": [
                 area("targets", "设备定义（每行一个）",
                      "格式：名称=IP/CIDR|角色；角色可选 download/nas/media/other，省略为 other。",
@@ -396,7 +358,6 @@ class BandwidthQueueScheduler(_PluginBase):
                      '{"movie":{"label":"观影优先·自定义","rules":{"download":{"max":"1M/3M","priority":8}}}}', 4),
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"}, "text": "调度与通知"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     fld("cron", "调度周期(cron)", {"placeholder": "*/5 * * * *  每 5 分钟"})]},
@@ -406,10 +367,6 @@ class BandwidthQueueScheduler(_PluginBase):
                     {"component": "VSelect", "props": {"model": "notify_mode", "label": "通知方式",
                      "items": [{"title": v, "value": k} for k, v in _NOTIFY_LABELS.items()]}}]},
             ]},
-            {"component": "VAlert", "props": {"type": "info", "variant": "text",
-                                              "class": "mt-2"},
-             "content": {"text": "角色：download 是下载机、nas 是服务器、media 是观影设备（不限速）。"
-                                 "速率写「上/下行」，如 1M/3M，0/0 不限速；时段 HH:MM-HH:MM=方案，重叠时后写的优先。"}},
         ]
         return content, defaults
 
@@ -417,7 +374,7 @@ class BandwidthQueueScheduler(_PluginBase):
     # 执行控制
     # ------------------------------------------------------------------
 
-    def start_run(self, trigger: str = "手动", prefer_thread: bool = False,
+    def start_run(self, trigger: str = "定时轮询", prefer_thread: bool = True,
                   profile: Optional[str] = None) -> bool:
         with self._state_lock:
             if self._running:
@@ -649,26 +606,19 @@ class BandwidthQueueScheduler(_PluginBase):
 
     def _action_button(self, label: str, api: str, *, params: Optional[dict] = None,
                        confirm: bool = False, variant: str = "tonal",
-                       color: Optional[str] = None, icon: str = "",
-                       method: str = "post", size: str = "small") -> dict:
-        """详情页按钮：文字放组件级 text，带颜色/图标，避免出现灰色空按钮。
-
-        所有按钮都指向 get_api() 中已注册的真实 endpoint，不使用 disabled。
-        """
-        props: Dict[str, Any] = {"variant": variant, "size": size, "class": "ma-1"}
+                       color: Optional[str] = None) -> dict:
+        props: Dict[str, Any] = {"variant": variant, "size": "small", "text": label}
         if color:
             props["color"] = color
-        if icon:
-            props["prepend-icon"] = icon
         event: Dict[str, Any] = {
-            "api": f"plugin/{PLUGIN_NAME}/{api}", "method": method,
+            "api": f"plugin/{PLUGIN_NAME}/{api}", "method": "post",
             "params": params or {}, "confirm": confirm,
         }
-        return {"component": "VBtn", "props": props, "text": label,
-                "events": {"click": event}}
+        return {"component": "VBtn", "props": props, "events": {"click": event}}
 
     def get_page(self) -> List[dict]:
-        """详情页：卡片分区 + 分组彩色按钮，所有按钮指向真实 API。"""
+        """精简主界面：状态行 + 一行摘要 + 操作按钮。
+        运行日志由 MP 插件卡片右上角三圆点的实时日志查看，不在此重复渲染。"""
         status = self.current_status()
         last = status.get("last") or {}
         apply = last.get("apply") or {}
@@ -676,93 +626,72 @@ class BandwidthQueueScheduler(_PluginBase):
         if rates is None:
             rates = self.get_data(_KEY_RATES) or []
         fasttrack = last.get("fasttrack")
-        if fasttrack is None:
-            fasttrack = self.get_data(_KEY_FASTTRACK)
         if not isinstance(fasttrack, dict):
-            fasttrack = None
+            fasttrack = self.get_data(_KEY_FASTTRACK)
         current = status.get("profile") or "—"
 
-        def kv(label: str, value: Any, md: int = 3) -> dict:
-            return {"component": "VCol", "props": {"cols": 6, "md": md}, "content": [
-                {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                 "text": label},
-                {"component": "div", "props": {"class": "text-subtitle-2 font-weight-bold"},
-                 "text": md_safe(str(value))},
+        def kv(label: str, value: Any) -> dict:
+            return {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
+                {"component": "div", "text": md_safe(f"{label}：{value}"),
+                 "props": {"style": "font-size:13px"}},
             ]}
 
-        def text_row(value: str, size: int = 12) -> dict:
+        def line(value: str) -> dict:
             return {"component": "div", "text": md_safe(value),
-                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
+                    "props": {"style": "white-space:pre-wrap;font-size:12px;opacity:.8"}}
 
-        profile_buttons = []
-        for prof in available_profiles(self._profiles):
-            active = prof["key"] == current
-            profile_buttons.append(self._action_button(
-                f"应用·{prof['label']}", "apply_profile",
-                params={"profile": prof["key"]},
-                variant="flat" if active else "tonal",
-                color="primary" if active else "",
-                icon="mdi-check-circle" if active else "mdi-speedometer"))
-
-        primary = [
-            self._action_button("立即按规则调度", "run", color="primary",
-                                icon="mdi-play", variant="flat"),
-            self._action_button("刷新队列状态", "refresh", color="info", icon="mdi-refresh"),
+        profile_buttons = [
+            self._action_button(f"应用·{prof['label']}", "apply_profile",
+                                params={"profile": prof["key"]},
+                                variant="flat" if prof["key"] == current else "tonal",
+                                color="primary" if prof["key"] == current else None)
+            for prof in available_profiles(self._profiles)
         ]
-        secondary = [
-            self._action_button("FastTrack 诊断", "fasttrack", icon="mdi-radar"),
-            self._action_button("测试连接", "test", icon="mdi-lan-connect"),
-        ]
-        danger = [
-            self._action_button("清空本插件队列", "clear_queues", color="error",
-                                icon="mdi-delete-outline", confirm=True),
-            self._action_button("停止", "stop", color="error",
-                                icon="mdi-stop-circle-outline", confirm=True),
+        op_buttons = [
+            self._action_button("立即按规则调度", "run", variant="flat", color="primary"),
+            self._action_button("刷新队列状态", "refresh"),
+            self._action_button("FastTrack 诊断", "fasttrack"),
+            self._action_button("测试连接", "test"),
+            self._action_button("清空本插件队列", "clear_queues", confirm=True),
+            self._action_button("停止", "stop", confirm=True),
         ]
 
-        fast_text = format_fasttrack_text(fasttrack)
-        apply_text = format_apply_text(apply) if apply else "尚无调度记录，点击「立即按规则调度」开始"
+        parts = [f"最近结果：{summary_text(apply) if apply else '尚无调度记录'}",
+                 f"队列 {len(rates)} 条"]
+        if isinstance(fasttrack, dict) and fasttrack.get("has_fasttrack"):
+            parts.append("⚠ 检测到 FastTrack，Queue 限速可能被绕过")
 
-        return [
-            {"component": "VAlert", "props": {
-                "type": "warning" if (fasttrack or {}).get("has_fasttrack") else "info",
-                "variant": "tonal", "class": "mb-3", "title": "FastTrack"},
-             "content": {"text": md_safe(fast_text)}},
-            {"component": "VCard", "props": {"variant": "tonal", "class": "mb-3"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"},
-                 "text": "一键切换带宽方案（点击即刻改写 RouterOS 队列）"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "content": profile_buttons},
-                ]},
+        nodes: List[dict] = [
+            {"component": "VRow", "content": [
+                kv("插件状态", "已启用" if status.get("enabled") else "未启用"),
+                kv("当前任务", "运行中" if status.get("running") else "待命"),
+                kv("当前方案", current),
+                kv("设备数量", status.get("target_count", 0)),
             ]},
-            {"component": "VCard", "props": {"variant": "outlined"}, "content": [
-                {"component": "VCardTitle", "props": {"class": "text-subtitle-1"}, "text": "操作"},
-                {"component": "VCardText", "content": [
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                     "text": "调度与刷新"},
-                    {"component": "div", "content": primary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "诊断"},
-                    {"component": "div", "content": secondary},
-                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-                     "text": "清理与停止"},
-                    {"component": "div", "content": danger},
-                ]},
-            ]}
+            line("｜".join(parts)),
+            {"component": "VRow", "props": {"class": "mt-3"}, "content": [
+                {"component": "VCol", "content": profile_buttons + op_buttons}]},
         ]
+        return [{"component": "VCard", "props": {"variant": "tonal"}, "content": [
+            {"component": "VCardText", "content": nodes}]}]
+
+    # ------------------------------------------------------------------
+    # API（一一对应详情页按钮）
+    # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
-        # path 为相对路径：宿主自动补齐 /api/v1/plugin/<PluginID> 前缀
+        # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
+        # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": "/run", "auth": "bear", "endpoint": self.api_run, "methods": ["POST"], "summary": "按当前规则立即调度"},
-            {"path": "/apply_profile", "auth": "bear", "endpoint": self.api_apply_profile, "methods": ["POST"], "summary": "手动切换带宽方案"},
-            {"path": "/refresh", "auth": "bear", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新队列实时速率"},
-            {"path": "/fasttrack", "auth": "bear", "endpoint": self.api_fasttrack, "methods": ["POST"], "summary": "诊断 FastTrack 是否绕过 Queue"},
-            {"path": "/test", "auth": "bear", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": "/clear_queues", "auth": "bear", "endpoint": self.api_clear_queues, "methods": ["POST"], "summary": "删除本插件创建的全部队列"},
-            {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
-            {"path": "/profiles", "auth": "bear", "endpoint": self.api_profiles, "methods": ["GET"], "summary": "获取可用带宽方案"},
+            {"path": "/run", "endpoint": self.api_run, "methods": ["POST"], "summary": "按当前规则立即调度"},
+            {"path": "/apply_profile", "endpoint": self.api_apply_profile, "methods": ["POST"], "summary": "手动切换带宽方案"},
+            {"path": "/refresh", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新队列实时速率"},
+            {"path": "/fasttrack", "endpoint": self.api_fasttrack, "methods": ["POST"], "summary": "诊断 FastTrack 是否绕过 Queue"},
+            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": "/clear_queues", "endpoint": self.api_clear_queues, "methods": ["POST"], "summary": "删除本插件创建的全部队列"},
+            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/profiles", "endpoint": self.api_profiles, "methods": ["GET"], "summary": "获取可用带宽方案"},
         ]
 
     def api_run(self, _=None) -> Response:
