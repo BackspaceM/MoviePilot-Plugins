@@ -55,6 +55,7 @@ try:
 except Exception:  # noqa: BLE001
     _PLUGIN_MTYPE = None
 
+from . import importer, roslink
 from .clients import RouterOSFirewallClient, build_firewall_client
 from .core import (
     ACTION_OPTIONS,
@@ -102,6 +103,7 @@ _MAX_LOGS = 200
 _DEFAULT_CRON = "0 9 * * 1"          # 每周一 09:00 扫描一次
 _DEFAULT_TABLES = ["filter", "nat"]
 _DEFAULT_LIMIT = 10
+_DEFAULT_IMPORT_LIMIT = 12
 
 # plugindata keys
 _KEY_RULES = "rfm_rules"
@@ -111,6 +113,20 @@ _KEY_LAST_SCAN = "rfm_last_scan"
 _KEY_LAST_OP = "rfm_last_op"
 _KEY_SNAPSHOT = "rfm_snapshot"
 _KEY_CONN = "rfm_conn"
+_KEY_IMPORT = "rfm_import"
+
+# 「上传文件」按钮：MP 前端会把 props.onclick 的字符串透传为 DOM onclick 执行
+# （官方 certmanager 用同样的 window.MoviePilotAPI.post 方式）。
+_UPLOAD_JS = (
+    "function(){var i=document.createElement('input');i.type='file';"
+    "i.accept='.rsc,.txt,.cfg,.conf,text/plain';"
+    "i.onchange=function(e){var f=e.target.files&&e.target.files[0];if(!f)return;"
+    "var r=new FileReader();r.onload=function(){window.MoviePilotAPI.post("
+    "'plugin/RosFirewallManager/import_text',{text:String(r.result||''),name:f.name})"
+    ".then(function(x){alert(x&&x.message?x.message:'已解析，请刷新页面')})"
+    ".catch(function(err){console.error(err);alert('上传解析失败，请查看日志')})};"
+    "r.readAsText(f)};i.click()}"
+)
 
 _NOTIFY_LABELS = {
     "issue": "仅隐患/异常（推荐）",
@@ -145,7 +161,7 @@ class RosFirewallManager(_PluginBase):
     plugin_desc = ("RouterOS 防火墙可视化管理器：表格化查看 filter/nat/mangle/raw 全部规则并检测影子规则·重复·缺失兜底，"
                    "逐条启停/上下移/删除或按表单新增（自动插到兜底 drop 前），操作前可留备份，定时扫描隐患并推送 MP 通知。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/rosfirewallmanager.png"
-    plugin_version = "1.2.3"
+    plugin_version = "1.2.4"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "rosfirewallmanager_"
@@ -179,6 +195,9 @@ class RosFirewallManager(_PluginBase):
         self._before_backup = True
         self._comment_prefix = ""
         self._display_limit = _DEFAULT_LIMIT
+        self._import_table = "filter"
+        self._import_place = "before_drop"
+        self._import_disabled = False
         self._new_rule: Dict[str, Any] = {}
 
     # -- 配置装载 ----------------------------------------------------------
@@ -188,12 +207,27 @@ class RosFirewallManager(_PluginBase):
         self.stop_service()
         self._enabled = bool(config.get("enabled"))
 
-        self._address = str(config.get("router_address") or "").strip()
-        self._port = int(config.get("router_port") or 443)
-        self._use_ssl = bool(config.get("router_ssl", True))
-        self._username = str(config.get("router_username") or "").strip()
-        self._password = str(config.get("router_password") or "")
-        self._timeout = max(3, min(60, int(config.get("timeout") or 10)))
+        # 连接中心：选中已保存的路由器就自动带入连接参数；不选/找不到仍用手填
+        overrides, note = roslink.connection_overrides(
+            config.get("ros_connection"), "std")
+        conn = dict(config)
+        conn.update(overrides)
+        if note:
+            (logger.info if overrides else logger.warning)(
+                f"{_LOG_PREFIX}｜连接中心：{note}")
+
+        self._address = str(conn.get("router_address") or "").strip()
+        try:
+            self._port = int(conn.get("router_port") or 443)
+        except (TypeError, ValueError):
+            self._port = 443
+        self._use_ssl = bool(conn.get("router_ssl", True))
+        self._username = str(conn.get("router_username") or "").strip()
+        self._password = str(conn.get("router_password") or "")
+        try:
+            self._timeout = max(3, min(60, int(config.get("timeout") or 10)))
+        except (TypeError, ValueError):
+            self._timeout = 10
 
         tables = config.get("manage_tables")
         if isinstance(tables, str):
@@ -209,13 +243,28 @@ class RosFirewallManager(_PluginBase):
         self._dry_run = bool(config.get("dry_run"))
         self._before_backup = bool(config.get("before_change_backup", True))
         self._comment_prefix = str(config.get("comment_prefix") or "").strip()
-        self._display_limit = max(10, min(200, int(config.get("display_limit") or _DEFAULT_LIMIT)))
+        self._display_limit = max(3, min(80, int(config.get("display_limit") or _DEFAULT_LIMIT)))
 
-        self._new_rule = {
-            key: config.get(key) for key in _NEW_RULE_FIELDS
-        }
+        # 批量导入选项
+        self._import_table = str(config.get("import_table") or "filter").strip().lower()
+        if self._import_table not in TABLES:
+            self._import_table = "filter"
+        self._import_disabled = bool(config.get("import_disabled"))
+        self._import_place = str(config.get("import_place") or "before_drop").strip()
+        if self._import_place not in _PLACE_LABELS:
+            self._import_place = "before_drop"
+
+        # 配置页粘贴的文本在保存时自动生成中文解析预览（上传文件走 API）
+        preview = importer.build_import_preview(config)
+        if preview.get("source") or preview.get("errors"):
+            preview["created"] = now_text()
+            preview["place"] = self._import_place
+            self.save_data(_KEY_IMPORT, preview)
+            self._log("INFO", f"导入解析｜{preview['source']}｜{len(preview['rules'])} 条")
+
+        # 兼容旧版「立即添加一条规则」开关；新版配置页不再暴露这些字段
+        self._new_rule = {key: config.get(key) for key in _NEW_RULE_FIELDS}
         self._new_rule["table"] = str(config.get("new_rule_table") or "filter").strip().lower()
-
         if config.get("add_once"):
             config["add_once"] = False
             try:
@@ -266,40 +315,30 @@ class RosFirewallManager(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """精简设置页：选路由器 → 粘贴/上传规则 → 回主界面看中文解释。
+
+        刻意不再提供「逐条填 chain/action/端口」的表单：已知规则效果的话，
+        直接用 WinBox 导入更快；本插件的价值是把规则翻译成人话。
+        """
         defaults: Dict[str, Any] = {
-            "enabled": False,
-            "add_once": False,
-            "router_address": "",
-            "router_port": 443,
-            "router_ssl": True,
-            "router_username": "",
-            "router_password": "",
-            "timeout": 10,
-            "manage_tables": list(_DEFAULT_TABLES),
-            "scan_enabled": False,
-            "scan_cron": _DEFAULT_CRON,
-            "notify_mode": "issue",
-            "dry_run": False,
-            "before_change_backup": True,
-            "comment_prefix": "",
-            "display_limit": _DEFAULT_LIMIT,
-            "new_rule_table": "filter",
-            "new_rule_chain": "input",
-            "new_rule_action": "accept",
-            "new_rule_protocol": "",
-            "new_rule_src_address": "",
-            "new_rule_dst_address": "",
-            "new_rule_src_port": "",
-            "new_rule_dst_port": "",
-            "new_rule_in_interface": "",
-            "new_rule_out_interface": "",
-            "new_rule_connection_state": "",
-            "new_rule_comment": "",
-            "new_rule_place": "before_drop",
-            "new_rule_before_id": "",
-            "new_rule_disabled": False,
-            "new_rule_log": False,
-            "new_rule_log_prefix": "",
+            "enabled": self._enabled,
+            "ros_connection": "",
+            "router_address": self._address,
+            "router_port": self._port,
+            "router_ssl": self._use_ssl,
+            "router_username": self._username,
+            "router_password": self._password,
+            "import_rules": "",
+            "import_table": getattr(self, "_import_table", "filter"),
+            "import_place": getattr(self, "_import_place", "before_drop"),
+            "import_disabled": getattr(self, "_import_disabled", False),
+            "scan_enabled": self._scan_enabled,
+            "scan_cron": self._scan_cron,
+            "notify_mode": self._notify_mode,
+            "dry_run": self._dry_run,
+            "before_change_backup": self._before_backup,
+            "manage_tables": list(self._tables),
+            "display_limit": self._display_limit,
         }
 
         def fld(model: str, label: str, props: Optional[dict] = None) -> dict:
@@ -315,94 +354,77 @@ class RosFirewallManager(_PluginBase):
             return {"component": "VSelect", "props": p}
 
         def sw(model: str, label: str, hint: str) -> dict:
-            return {"component": "VSwitch", "props": {"model": model, "label": label, "hint": hint}}
+            return {"component": "VSwitch",
+                    "props": {"model": model, "label": label, "hint": hint}}
 
+        def col(md: int, nodes: List[dict]) -> dict:
+            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": nodes}
+
+        conn_items = roslink.connection_items() or [
+            {"title": "未找到连接中心配置，用下面手填即可", "value": ""}]
         table_items = [{"title": TABLE_LABELS[t], "value": t} for t in TABLES]
-        action_items = [{"title": a, "value": a} for a in ACTION_OPTIONS]
-        proto_items = [{"title": p or "任意", "value": p} for p in PROTOCOL_OPTIONS]
-        cs_items = [{"title": c or "不限", "value": c} for c in CONNSTATE_OPTIONS]
         place_items = [{"title": v, "value": k} for k, v in _PLACE_LABELS.items()]
 
         content: List[dict] = [
+            # 1) 连接：下拉优先，手填兜底
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sw("enabled", "启用插件", "关闭后不再定时扫描，但详情页仍可手动操作")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sw("scan_enabled", "定时扫描隐患", "按下面的 cron 周期扫描并推送")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sw("dry_run", "试运行", "只预览命令，不真正改动 RouterOS")]},
-            ]},
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    fld("router_address", "RouterOS 地址", {"placeholder": "192.168.1.1 或 https://ros.local"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
-                    fld("router_port", "端口", {"type": "number"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sw("router_ssl", "使用 HTTPS", "关闭则用 HTTP（不推荐，密码明文）")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    fld("router_username", "用户名", {"placeholder": "需 read/write/api 权限"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    fld("router_password", "密码", {"type": "password"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    fld("timeout", "请求超时(秒)", {"type": "number",
-                        "hint": "RouterOS 负载高时可适当调大", "persistent-hint": True})]},
-            ]},
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sel("manage_tables", "管理范围（可多选）", table_items,
-                        {"multiple": True, "hint": "详情页展示与扫描覆盖的表", "persistent-hint": True})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    fld("scan_cron", "扫描周期(cron)", {"placeholder": "0 9 * * 1  每周一 09:00"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sel("notify_mode", "通知方式",
-                        [{"title": v, "value": k} for k, v in _NOTIFY_LABELS.items()])]},
+                col(6, [sel("ros_connection", "已保存的路由器（连接中心）", conn_items,
+                           {"hint": "从连接中心选一台即可自动带入连接参数；不选就用下面手填的",
+                            "persistent-hint": True})]),
+                col(3, [fld("router_address", "RouterOS 地址",
+                            {"placeholder": "192.168.88.1 或 https://ros.local"})]),
+                col(3, [fld("router_port", "端口", {"type": "number"})]),
             ]},
             {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sw("before_change_backup", "改动前自动留备份", "在 RouterOS 执行 /system/backup/save")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    fld("comment_prefix", "新增规则备注前缀", {"placeholder": "可选，如 rfm-  便于识别本插件规则"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    fld("display_limit", "详情页操作按钮上限", {"type": "number",
-                        "hint": "仅前 N 条规则生成快捷按钮，避免页面过长", "persistent-hint": True})]},
+                col(4, [fld("router_username", "API 用户名",
+                            {"hint": "建议单独建只读/最小权限账号", "persistent-hint": True})]),
+                col(4, [fld("router_password", "API 密码", {"type": "password"})]),
+                col(4, [sw("router_ssl", "使用 HTTPS", "关闭则走 HTTP，密码会明文传输")]),
             ]},
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sel("new_rule_table", "表", table_items)]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    fld("new_rule_chain", "链 chain", {"placeholder": "input / forward / srcnat…"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    sel("new_rule_action", "动作 action", action_items)]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [sel("new_rule_protocol", "协议", proto_items)]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [fld("new_rule_src_address", "源地址", {"placeholder": "192.168.1.0/24"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [fld("new_rule_dst_address", "目的地址", {"placeholder": "0.0.0.0/0"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [fld("new_rule_dst_port", "目的端口", {"placeholder": "8291 或 80,443"})]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [fld("new_rule_src_port", "源端口")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [fld("new_rule_in_interface", "入接口", {"placeholder": "ether1 / LAN"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [fld("new_rule_out_interface", "出接口", {"placeholder": "ether1 / WAN"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [sel("new_rule_connection_state", "连接状态", cs_items)]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [fld("new_rule_comment", "备注 comment", {"placeholder": "allow winbox from LAN"})]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [sel("new_rule_place", "插入位置", place_items)]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [fld("new_rule_before_id", "指定规则 id", {"placeholder": "仅当插入位置=指定规则之前时填写，如 *5"})]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [sw("new_rule_disabled", "添加后即禁用", "先建规则但不生效，便于核对")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [sw("new_rule_log", "记录日志", "匹配此规则时写日志")]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [fld("new_rule_log_prefix", "日志前缀", {"placeholder": "rfw:"})]},
-            ]},
+            # 2) 批量导入（核心）
             {"component": "VRow", "props": {"class": "mt-2"}, "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [
-                    sw("add_once", "立即添加这条规则", "保存后按上面的字段写入 RouterOS，并自动复位本开关")]},
+                col(12, [{"component": "VTextarea", "props": {
+                    "model": "import_rules", "label": "粘贴 RouterOS 防火墙规则 / 导出脚本",
+                    "rows": 6, "auto-grow": True, "persistent-hint": True,
+                    "hint": "支持 .rsc 导出、/ip firewall filter print 输出，或直接 "
+                            "chain=input action=accept ... 规则；保存后自动翻成中文解释。"
+                            "也可在主界面点「上传 .rsc 文件」。",
+                    "placeholder": "/ip firewall filter\n"
+                                   "add chain=input action=accept protocol=tcp dst-port=8291\n"
+                                   "add chain=input action=drop in-interface-list=WAN"}}]),
             ]},
+            {"component": "VRow", "content": [
+                col(4, [sel("import_table", "未标注表时的默认表", table_items)]),
+                col(4, [sel("import_place", "导入位置", place_items,
+                            {"hint": "默认插到兜底 drop 之前，避免新规则成为死规则",
+                             "persistent-hint": True})]),
+                col(4, [sw("import_disabled", "导入后先禁用",
+                           "先看懂解释并核对，再到详情页逐条启用，更安全")]),
+            ]},
+            # 3) 定时与通知
+            {"component": "VRow", "props": {"class": "mt-2"}, "content": [
+                col(3, [sw("enabled", "启用插件", "关闭后不定时扫描，详情页仍可手动操作")]),
+                col(3, [sw("scan_enabled", "定时扫描隐患", "按右侧 cron 周期扫描并推送")]),
+                col(3, [fld("scan_cron", "扫描周期(cron)",
+                            {"placeholder": "0 9 * * 1  每周一 09:00"})]),
+                col(3, [sel("notify_mode", "通知方式",
+                            [{"title": v, "value": k} for k, v in _NOTIFY_LABELS.items()])]),
+            ]},
+            # 4) 安全与显示
+            {"component": "VRow", "content": [
+                col(3, [sw("dry_run", "试运行", "只预览命令，不真正改动 RouterOS")]),
+                col(3, [sw("before_change_backup", "改动前留备份",
+                           "批量导入前在 RouterOS 执行 /system/backup/save")]),
+                col(3, [sel("manage_tables", "管理范围（可多选）", table_items,
+                            {"multiple": True})]),
+                col(3, [fld("display_limit", "详情页显示条数", {"type": "number",
+                            "hint": "导入解释与逐条操作都只显示前 N 条",
+                            "persistent-hint": True})]),
+            ]},
+            {"component": "div", "props": {
+                "class": "text-caption text-medium-emphasis mt-2"},
+             "text": "保存后回主界面：每条规则都会说明「会做什么、影响谁、有什么风险」；"
+                     "看懂并核对后再点「确认批量导入」。"},
         ]
         return content, defaults
 
@@ -737,8 +759,7 @@ class RosFirewallManager(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
-        """精简主界面：状态行 + 一行隐患摘要 + 操作按钮 + 紧凑规则操作。
-        运行日志由 MP 插件卡片右上角三圆点的实时日志查看，不在此重复渲染。"""
+        """主界面：状态行 + 导入规则的中文解释 + 两行操作按钮 + 现有规则逐条操作。"""
         status = self.current_status()
         rules: List[Rule] = status["rules"]
         findings: List[Finding] = [Finding.from_dict(f) for f in status["findings"]]
@@ -751,14 +772,33 @@ class RosFirewallManager(_PluginBase):
                  "props": {"style": "font-size:13px"}},
             ]}
 
-        high = sum(1 for f in findings if f.severity == SEV_HIGH)
-        med = sum(1 for f in findings if f.severity == "medium")
+        def line(value: str, style: str = "white-space:pre-wrap;font-size:12px;opacity:.8") -> dict:
+            return {"component": "div", "text": md_safe(value),
+                    "props": {"style": style}}
 
-        op_buttons = [
+        high = sum(1 for f in findings if f.severity == SEV_HIGH)
+        preview = dict(self.get_data(_KEY_IMPORT) or {})
+        rule_count = len(preview.get("rules") or [])
+        if preview:
+            brief = importer.format_import_brief(preview, limit)
+        else:
+            brief = ("还没有导入内容：在设置页粘贴 RouterOS 规则，"
+                     "或点下方「上传 .rsc 文件」，导入后每条规则都会翻成中文解释。")
+
+        import_buttons = [
+            {"component": "VBtn", "props": {
+                "variant": "flat", "size": "small", "color": "primary",
+                "class": "ma-1", "prepend-icon": "mdi-file-upload-outline",
+                "onclick": _UPLOAD_JS},
+             "text": "上传 .rsc / 规则文件"},
+            self._action_button("确认批量导入", "import_apply",
+                                confirm=True, variant="flat", color="warning"),
+            self._action_button("清空导入", "import_clear", confirm=True),
+        ]
+        manage_buttons = [
             self._action_button("立即扫描隐患", "scan", variant="flat", color="primary"),
             self._action_button("刷新规则", "refresh"),
             self._action_button("测试连接", "test"),
-            self._action_button("备份快照到 MP", "backup"),
             self._action_button("RouterOS 留备份", "router_backup"),
             self._action_button("停止任务", "stop", confirm=True),
         ]
@@ -770,26 +810,26 @@ class RosFirewallManager(_PluginBase):
             {"component": "VRow", "content": [
                 kv("插件状态", "已启用" if status["enabled"] else "未启用"),
                 kv("连接", conn_text),
-                kv("规则总数", status["summary"].get("total", 0)),
-                kv("隐患", f"{len(findings)} 项（高危 {high}｜中危 {med}）"),
+                kv("现存规则", status["summary"].get("total", 0)),
+                kv("待导入 / 隐患", f"{rule_count} 条 / {len(findings)} 项（高危 {high}）"),
             ]},
-            {"component": "div", "text": md_safe(table_text or "尚未读取规则"),
-             "props": {"style": "white-space:pre-wrap;font-size:12px;opacity:.8"}},
-            {"component": "VRow", "props": {"class": "mt-3"}, "content": [
-                {"component": "VCol", "content": op_buttons}]},
+            line(table_text or "尚未读取规则"),
+            {"component": "div", "props": {
+                "class": "mt-3",
+                "style": "white-space:pre-line;font-size:12px;line-height:1.65"},
+             "text": brief},
+            {"component": "VRow", "props": {"class": "mt-2"}, "content": [
+                {"component": "VCol", "content": import_buttons}]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "content": manage_buttons}]},
         ]
 
-        # 逐条操作是防火墙管理核心功能，保留但收敛到配置页设定的上限
         shown = rules[:limit]
         if shown:
-            nodes.append({"component": "div",
-                          "text": md_safe(f"规则操作（前 {len(shown)} 条；删除/置底需确认）"),
-                          "props": {"style": "font-size:12px;opacity:.8"}})
+            nodes.append(line(f"现有规则逐条操作（前 {len(shown)} 条；删除/置底需确认）"))
             nodes.extend(self._rule_op_row(r) for r in shown)
             if len(rules) > limit:
-                nodes.append({"component": "div",
-                              "text": md_safe(f"另有 {len(rules) - limit} 条未显示，可调大配置页「详情页操作按钮上限」"),
-                              "props": {"style": "font-size:12px;opacity:.8"}})
+                nodes.append(line(f"另有 {len(rules) - limit} 条未显示，可调大设置页「详情页显示条数」"))
         return [{"component": "VCard", "props": {"variant": "tonal"}, "content": [
             {"component": "VCardText", "content": nodes}]}]
 
@@ -813,6 +853,12 @@ class RosFirewallManager(_PluginBase):
             {"path": "/router_backup", "auth": "bear", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
             {"path": "/stop", "auth": "bear", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
             {"path": "/status", "auth": "bear", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/import_text", "auth": "bear", "endpoint": self.api_import_text,
+             "methods": ["POST"], "summary": "上传文件或文本，解析并生成中文解释预览"},
+            {"path": "/import_apply", "auth": "bear", "endpoint": self.api_import_apply,
+             "methods": ["POST"], "summary": "确认后批量写入预览中的规则"},
+            {"path": "/import_clear", "auth": "bear", "endpoint": self.api_import_clear,
+             "methods": ["POST"], "summary": "清空导入预览"},
         ]
 
     def api_scan(self, _=None) -> Response:
@@ -911,6 +957,96 @@ class RosFirewallManager(_PluginBase):
     def api_stop(self, _=None) -> Response:
         self.stop_service()
         return Response(success=True, message="已停止")
+
+    def api_import_text(self, payload: Optional[dict] = _BODY_DEFAULT) -> Any:
+        """上传文件 / API 文本导入：解析后保存预览，返回条数供前端提示。"""
+        text = ""
+        name = ""
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or payload.get("content")
+                       or payload.get("import_rules") or "")
+            name = str(payload.get("name") or "")
+        elif isinstance(payload, str):
+            text = payload
+        text = importer.extract_upload(text)
+        if not text.strip():
+            return Response(success=False, message="文件内容为空，未生成预览")
+        cfg = {"import_table": self._import_table,
+               "import_disabled": self._import_disabled,
+               "import_place": self._import_place}
+        source = "上传文件"
+        if name:
+            source += f"（{name}）"
+        preview = importer.build_import_preview(cfg, text_override=text,
+                                                source_override=source)
+        preview["created"] = now_text()
+        preview["place"] = self._import_place
+        self.save_data(_KEY_IMPORT, preview)
+        self._log("INFO", f"导入解析｜{source}｜{len(preview['rules'])} 条｜"
+                          f"提示 {len(preview['errors'])} 条")
+        return Response(success=True,
+                        message=(f"已解析 {len(preview['rules'])} 条规则，"
+                                 f"回主界面查看中文解释（刷新页面后可见）"),
+                        data={"count": len(preview["rules"]),
+                              "errors": preview["errors"]})
+
+    def api_import_apply(self) -> Any:
+        """确认后把预览里的规则批量写入 RouterOS。"""
+        preview = dict(self.get_data(_KEY_IMPORT) or {})
+        items = [importer.ImportRule.from_dict(r)
+                 for r in (preview.get("rules") or [])]
+        if not items:
+            return Response(success=False, message="没有可导入的规则，先粘贴内容或上传文件")
+        client, http = self._make_client()
+        if client is None:
+            return Response(success=False, message="网络模块不可用或未配置 RouterOS 地址")
+        mode = str(preview.get("place") or self._import_place)
+
+        if self._before_backup and not self._dry_run:
+            bok, bmsg = self._run_coroutine(client.save_routeros_backup(
+                f"rfm-import-{time.strftime('%Y%m%d-%H%M%S')}", client=http))
+            self._log("INFO" if bok else "WARN", f"【批量导入】改动前备份：{bmsg}")
+
+        all_rules = self._run_coroutine(
+            client.list_all(client=http, tables=self._tables))
+        ok_count = 0
+        fail_count = 0
+        details: List[str] = []
+        for item in items:
+            place = item.place_before
+            if not place:
+                place, _ = choose_insert_place(all_rules, item.chain, mode, "")
+            body = dict(item.payload)
+            if self._comment_prefix:
+                prefix = self._comment_prefix.rstrip("-:") + "-"
+                comment = str(body.get("comment") or "")
+                if not comment.startswith(prefix):
+                    body["comment"] = prefix + comment if comment else prefix.rstrip("-")
+            ok, msg = self._run_coroutine(
+                client.add_rule(item.table, body, place, client=http))
+            if ok:
+                ok_count += 1
+            else:
+                fail_count += 1
+            details.append(f"{item.index}. {'成功' if ok else '失败'}｜{msg}")
+            self._log("INFO" if ok else "WARN",
+                      f"【批量导入】{item.index}/{len(items)}｜{msg}")
+
+        fresh = self._run_coroutine(client.list_all(client=http, tables=self._tables))
+        self.save_data(_KEY_RULES, [r.to_dict() for r in fresh])
+        result = {"ok": fail_count == 0, "total": len(items),
+                  "success": ok_count, "failed": fail_count,
+                  "dry_run": self._dry_run, "details": details}
+        self.save_data(_KEY_LAST_OP, result)
+        message = (f"批量导入完成｜成功 {ok_count}｜失败 {fail_count}"
+                   + ("（试运行，未写入）" if self._dry_run else ""))
+        self._send_message("防火墙批量导入结果", message + "\n" + "\n".join(details[:8]))
+        return Response(success=result["ok"], message=message, data=result)
+
+    def api_import_clear(self) -> Any:
+        self.save_data(_KEY_IMPORT, {})
+        self._log("INFO", "已清空导入预览")
+        return Response(success=True, message="已清空导入预览")
 
     def api_status(self, _=None) -> Response:
         st = self.current_status()
