@@ -52,6 +52,15 @@ try:
 except Exception:  # noqa: BLE001
     _PLUGIN_MTYPE = None
 
+# 带参按钮的 POST 是 JSON body；endpoint 参数必须声明 Body 才能注入，
+# 裸 Optional[dict] = None 会被 FastAPI 当 query 参数，值恒为 None。
+try:
+    from fastapi import Body
+
+    _BODY_DEFAULT = Body(default=None)
+except Exception:  # noqa: BLE001 - 离线桩环境没有 fastapi
+    _BODY_DEFAULT = None
+
 from . import host, updater
 
 PLUGIN_ID = "PluginAutoUpdater"
@@ -87,6 +96,23 @@ def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
     return max(low, min(high, number))
 
 
+def _split_manual(value: Any) -> List[str]:
+    """手动补充框：逗号 / 顿号 / 分号 / 换行分隔，去重且保序。"""
+    if value is None:
+        return []
+    raw = value if isinstance(value, (list, tuple, set)) else [value]
+    out: List[str] = []
+    for item in raw:
+        text = (str(item).replace("，", ",").replace("、", ",")
+                .replace(";", ",").replace("；", ",")
+                .replace("\r", ",").replace("\n", ",").replace("\t", ","))
+        for part in text.split(","):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
 def _now_text() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -97,7 +123,7 @@ class PluginAutoUpdater(_PluginBase):
     plugin_desc = ("扫描已安装插件，设置页多选作者和插件，按 cron 定时或点按钮立即更新；"
                    "只更新选中的、市场里有新版的插件。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pluginautoupdater.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "pluginautoupdater_"
@@ -115,6 +141,8 @@ class PluginAutoUpdater(_PluginBase):
         self._cron = _DEFAULT_CRON
         self._author_filters: List[str] = []
         self._target_plugins: List[str] = []
+        self._author_manual = ""
+        self._plugin_manual = ""
         self._dry_run = False
         self._include_self = False
         self._force_reinstall = False
@@ -137,15 +165,21 @@ class PluginAutoUpdater(_PluginBase):
         valid, normalized = updater.validate_cron(self._cron)
         self._cron = normalized if valid else _DEFAULT_CRON
 
-        # 兼容 1.0 的单选作者配置
+        # 兼容 1.0 的单选作者配置；下拉勾选与手动补充框合并后去重保序
         raw_authors = cfg.get("author_filters")
         if raw_authors is None:
             raw_authors = cfg.get("author_filter")
-        self._author_filters = updater.normalize_authors(raw_authors)
+        self._author_manual = str(cfg.get("author_manual") or "")
+        self._plugin_manual = str(cfg.get("plugin_manual") or "")
+        self._author_filters = list(dict.fromkeys(
+            updater.normalize_authors(raw_authors)
+            + _split_manual(self._author_manual)))
         selected = cfg.get("target_plugins") or []
         if isinstance(selected, str):
             selected = [x.strip() for x in selected.split(",") if x.strip()]
-        self._target_plugins = [str(x) for x in selected]
+        self._target_plugins = list(dict.fromkeys(
+            [str(x).strip() for x in selected if str(x).strip()]
+            + _split_manual(self._plugin_manual)))
 
         self._dry_run = bool(cfg.get("dry_run"))
         self._include_self = bool(cfg.get("include_self"))
@@ -222,12 +256,16 @@ class PluginAutoUpdater(_PluginBase):
             trigger = CronTrigger.from_crontab(self._cron)
         except (ValueError, TypeError):
             trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
+        # MP scheduler.py 用 **service["kwargs"] 展开给 APScheduler.add_job()：
+        # 这里放 trigger 会与位置参数撞名，报
+        # "BaseScheduler.add_job() got multiple values for argument 'trigger'"。
+        # 且 MP 是 job["func"]() 无参调用，触发来源只能靠 run_once 的参数默认值。
         return [{
             "id": PLUGIN_ID,
             "name": "插件自动更新",
             "trigger": trigger,
             "func": self.run_once,
-            "kwargs": {"trigger": "定时"},
+            "kwargs": {},
         }]
 
     # ------------------------------------------------------------------
@@ -337,7 +375,7 @@ class PluginAutoUpdater(_PluginBase):
         data = self.get_data(_KEY_SCAN) or {}
         return dict(data) if isinstance(data, dict) else {}
 
-    def run_once(self, trigger: str = "手动",
+    def run_once(self, trigger: str = "定时",
                  dry_run_override: Optional[bool] = None) -> Dict[str, Any]:
         if not self._state_lock.acquire(blocking=False):
             self._log("WARN", "上一轮还没结束，这次跳过")
@@ -468,10 +506,24 @@ class PluginAutoUpdater(_PluginBase):
 
         content: List[dict] = [
             {"component": "VRow", "content": [
-                self._col(6, [self._sel("author_filters", "作者（可多选）", author_items,
-                                        "不选就是所有作者", multiple=True)]),
-                self._col(6, [self._sel("target_plugins", "插件（可多选）", plugin_items,
-                                        "不选就按上面选的作者来", multiple=True)]),
+                self._col(6, [self._sel(
+                    "author_filters", "固定作者（可多选）", author_items,
+                    "勾几位作者，就自动更新他们名下所有已安装插件（含以后新装的）；"
+                    "与下方指定插件取并集", multiple=True)]),
+                self._col(6, [self._sel(
+                    "target_plugins", "指定插件（可多选）", plugin_items,
+                    "额外指定要更新的插件；即使不属于上面选的作者也会更新，两者取并集",
+                    multiple=True)]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(6, [self._fld(
+                    "author_manual", "手动补充作者（逗号分隔）",
+                    "下拉里没有、或想额外固定的作者名；与上方勾选合并生效",
+                    "BackspaceM,OtherAuthor")]),
+                self._col(6, [self._fld(
+                    "plugin_manual", "手动补充插件 ID（逗号分隔）",
+                    "下拉里没列出的插件 ID；与上方勾选合并生效",
+                    "SomePlugin,AnotherPlugin")]),
             ]},
             {"component": "VRow", "content": [
                 self._col(4, [self._fld("cron", "定时执行（cron）", "", "0 5 * * *")]),
@@ -506,6 +558,8 @@ class PluginAutoUpdater(_PluginBase):
             "cron": self._cron,
             "author_filters": list(self._author_filters),
             "target_plugins": list(self._target_plugins),
+            "author_manual": self._author_manual,
+            "plugin_manual": self._plugin_manual,
             "dry_run": self._dry_run,
             "include_self": self._include_self,
             "force_reinstall": self._force_reinstall,
@@ -539,10 +593,13 @@ class PluginAutoUpdater(_PluginBase):
             summary = f"{report.get('finished') or ''}｜{report.get('message') or ''}"
         else:
             summary = "还没跑过"
+        union_note = "（并集）" if self._author_filters and self._target_plugins else ""
         lines = [
             _esc(summary),
             _esc(f"本机 {len(plugins)} 个插件｜定时 {self._cron}｜"
                  f"{'已启用' if self._enabled else '没启用'}"),
+            _esc(f"更新范围｜固定作者 {len(self._author_filters)} 位"
+                 f"｜指定插件 {len(self._target_plugins)} 个{union_note}"),
         ]
         return [
             {"component": "VRow", "content": [
@@ -605,7 +662,7 @@ class PluginAutoUpdater(_PluginBase):
         return Response(success=bool(report.get("ok")),
                         message=str(report.get("message") or ""), data=report)
 
-    def api_filter(self, payload: Optional[dict] = None) -> Any:
+    def api_filter(self, payload: Optional[dict] = _BODY_DEFAULT) -> Any:
         """保留给旧调用方；签名里不能有 **kwargs，否则 FastAPI 会当成必填参数报 422。"""
         author = ""
         if isinstance(payload, dict):
@@ -626,6 +683,8 @@ class PluginAutoUpdater(_PluginBase):
             "cron": self._cron,
             "author_filters": list(self._author_filters),
             "target_plugins": list(self._target_plugins),
+            "author_manual": self._author_manual,
+            "plugin_manual": self._plugin_manual,
             "dry_run": self._dry_run,
             "include_self": self._include_self,
             "force_reinstall": self._force_reinstall,

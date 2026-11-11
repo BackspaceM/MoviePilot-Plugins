@@ -294,40 +294,61 @@ def plugin_items(plugins: Iterable[InstalledPlugin],
 def filter_targets(plugins: Iterable[InstalledPlugin], authors: Any,
                    selected: Any, skip_self_id: str = "",
                    include_self: bool = False) -> Tuple[List[InstalledPlugin], List[str]]:
-    """运行时真实筛选：作者多选 + 目标多选 + 默认排除自身。
+    """运行时真实筛选：固定作者 + 指定插件取【并集】+ 默认排除自身。
 
-    authors 兼容旧配置的单个字符串；勾了具体插件时，作者筛选与插件勾选取交集。
+    - 只勾作者（可多位）：更新这些作者的全部已安装插件，以后新装的也自动纳入；
+    - 只勾插件：只更新这些指定的插件；
+    - 两者都勾：作者名下全部 + 额外指定的插件（即使该插件不属于所选作者）；
+    - 都不勾：全部已安装插件。
+
+    旧版用交集，导致「固定作者所有插件」与「额外指定几个别的作者的插件」
+    互相打架；这里改成并集，authors / selected 仍兼容字符串与列表。
     """
     notes: List[str] = []
     pool = list(plugins or [])
     wanted = normalize_authors(authors)
-    label = "、".join(wanted) if wanted else "全部作者"
-    if wanted:
-        pool = [p for p in pool if unknown_author(p.author) in wanted]
-    notes.append(f"作者 {label}｜匹配 {len(pool)} 个")
 
     if isinstance(selected, str):
         selected = [x.strip() for x in selected.split(",") if x.strip()]
     sel = {str(x).strip() for x in (selected or []) if str(x).strip()}
-    if sel:
-        pool = [p for p in pool if p.id in sel]
-        notes.append(f"勾选 {len(sel)} 个｜命中 {len(pool)} 个")
-    else:
-        notes.append("未勾选目标｜取筛选后的全部插件")
 
+    # 作者维度
+    if wanted:
+        author_pool = [p for p in pool if unknown_author(p.author) in wanted]
+        notes.append(f"固定作者 {'、'.join(wanted)}｜名下 {len(author_pool)} 个插件")
+    elif sel:
+        author_pool = []
+        notes.append("未选作者｜只更新指定插件")
+    else:
+        author_pool = list(pool)
+        notes.append("作者 全部作者｜未勾选目标｜取全部已安装插件")
+
+    # 指定插件维度（与作者并集，不限于所选作者）
+    selected_pool = [p for p in pool if p.id in sel]
+    if sel:
+        matched = {p.id for p in selected_pool}
+        miss = sorted(sel - matched)
+        notes.append(f"指定插件 {len(sel)} 个｜命中 {len(matched)} 个"
+                     + (f"｜清单中未找到 {'、'.join(miss)}" if miss else ""))
+    else:
+        notes.append("未勾选目标｜无额外指定插件")
+
+    combined = author_pool + selected_pool
     if not include_self and skip_self_id:
-        before = len(pool)
-        pool = [p for p in pool if p.id != skip_self_id]
-        if before != len(pool):
+        before = len(combined)
+        combined = [p for p in combined if p.id != skip_self_id]
+        if before != len(combined):
             notes.append("已跳过自身")
 
     seen = set()
     targets: List[InstalledPlugin] = []
-    for p in pool:
+    for p in combined:
         if p.id in seen:
             continue
         seen.add(p.id)
         targets.append(p)
+    if wanted and sel:
+        notes.append(f"作者与指定插件取并集｜最终 {len(targets)} 个")
     return targets, notes
 
 
