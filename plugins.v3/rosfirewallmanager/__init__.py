@@ -324,10 +324,6 @@ class RosFirewallManager(_PluginBase):
         place_items = [{"title": v, "value": k} for k, v in _PLACE_LABELS.items()]
 
         content: List[dict] = [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": "在 MP 里可视化管理 RouterOS 防火墙：按执行顺序查看规则、自动揪出被遮挡的死规则与重复规则，"
-                                 "逐条启停/排序/删除，或填写表单新增。本插件是「管理器」不是「自动对齐器」，"
-                                 "绝不批量删除你的规则；删除、置底等破坏性操作都需二次确认。RouterOS 用户需具备 read/write/api 权限。"}},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sw("enabled", "启用插件", "关闭后不再定时扫描，但详情页仍可手动操作")]},
@@ -337,7 +333,6 @@ class RosFirewallManager(_PluginBase):
                     sw("dry_run", "试运行", "只预览命令，不真正改动 RouterOS")]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "RouterOS 连接"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                     fld("router_address", "RouterOS 地址", {"placeholder": "192.168.1.1 或 https://ros.local"})]},
@@ -374,7 +369,6 @@ class RosFirewallManager(_PluginBase):
                         "hint": "仅前 N 条规则生成快捷按钮，避免页面过长", "persistent-hint": True})]},
             ]},
             {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "新增规则（填好后打开下方开关并保存，即刻写入 RouterOS）"},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                     sel("new_rule_table", "表", table_items)]},
@@ -409,9 +403,6 @@ class RosFirewallManager(_PluginBase):
                 {"component": "VCol", "props": {"cols": 12}, "content": [
                     sw("add_once", "立即添加这条规则", "保存后按上面的字段写入 RouterOS，并自动复位本开关")]},
             ]},
-            {"component": "VAlert", "props": {"type": "warning", "variant": "text", "class": "mt-2"},
-             "content": {"text": "安全提示：新增放行规则默认插到兜底 drop 之前（否则会变成永不匹配的死规则）。"
-                                 "改动防火墙可能导致远程中断，建议开启「改动前自动留备份」，并确认有一条放行你管理 IP/SSH 的规则。"}},
         ]
         return content, defaults
 
@@ -745,28 +736,23 @@ class RosFirewallManager(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
+        """精简主界面：状态行 + 一行隐患摘要 + 操作按钮 + 紧凑规则操作。
+        运行日志由 MP 插件卡片右上角三圆点的实时日志查看，不在此重复渲染。"""
         status = self.current_status()
         rules: List[Rule] = status["rules"]
         findings: List[Finding] = [Finding.from_dict(f) for f in status["findings"]]
         conn = status["conn"]
-        last_op = status["last_op"]
         limit = int(status["display_limit"])
 
-        def kv(label: str, value: str, md: int = 4) -> dict:
-            return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [
-                {"component": "VLabel", "text": label},
-                {"component": "div", "text": md_safe(value),
-                 "props": {"style": "white-space:pre-wrap"}},
+        def kv(label: str, value: Any) -> dict:
+            return {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
+                {"component": "div", "text": md_safe(f"{label}：{value}"),
+                 "props": {"style": "font-size:13px"}},
             ]}
-
-        def text_row(value: str, size: int = 12) -> dict:
-            return {"component": "div", "text": md_safe(value),
-                    "props": {"style": f"white-space:pre-wrap;font-size:{size}px"}}
 
         high = sum(1 for f in findings if f.severity == SEV_HIGH)
         med = sum(1 for f in findings if f.severity == "medium")
 
-        # 顶部操作按钮（全部有真实 endpoint，无 disabled）
         op_buttons = [
             self._action_button("立即扫描隐患", "scan", variant="flat", color="primary"),
             self._action_button("刷新规则", "refresh"),
@@ -776,105 +762,56 @@ class RosFirewallManager(_PluginBase):
             self._action_button("停止任务", "stop", confirm=True),
         ]
 
-        # 单条规则操作（仅前 limit 条生成按钮，避免页面过长）
-        op_rows: List[dict] = []
-        truncated = 0
-        for r in rules[:limit]:
-            op_rows.append(self._rule_op_row(r))
-        truncated = max(0, len(rules) - limit)
-
-        content_nodes: List[dict] = [
-            {"component": "VAlert", "props": {
-                "type": "warning" if high else "info", "variant": "tonal", "class": "mb-4"},
-             "content": {"text": md_safe(
-                 f"隐患 {len(findings)} 项（高危 {high}｜中危 {med}）。"
-                 + ("点击「立即扫描隐患」刷新检测。" if not findings else
-                    "高危项多是「放行规则被兜底 drop 遮挡」或「拒绝规则被全放行架空」，请优先处理。"))}},
+        conn_text = "正常" if conn.get("ok") else ("异常" if conn else "未测试")
+        by_table = {t: sum(1 for r in rules if r.table == t) for t in status["tables"]}
+        table_text = "、".join(f"{TABLE_LABELS.get(t, t)} {n} 条" for t, n in by_table.items())
+        nodes: List[dict] = [
             {"component": "VRow", "content": [
                 kv("插件状态", "已启用" if status["enabled"] else "未启用"),
-                kv("当前任务", "运行中" if status["running"] else "待命"),
-                kv("连接状态", ("正常" if conn.get("ok") else
-                                ("异常" if conn else "未测试")) + f"｜{conn.get('msg', '')}"),
-                kv("试运行", "是（不改动）" if status["dry_run"] else "否"),
-                kv("管理表", "、".join(TABLE_LABELS.get(t, t) for t in status["tables"])),
-                kv("扫描周期", status["scan_cron"] if status["scan_enabled"] else "未启用定时"),
-                kv("上次扫描", status["last_scan"]),
-                kv("规则总数", f"{status['summary'].get('total', 0)} 条"
-                               f"（禁用 {status['summary'].get('disabled', 0)}"
-                               f"｜动态 {status['summary'].get('dynamic', 0)}）"),
+                kv("连接", conn_text),
+                kv("规则总数", status["summary"].get("total", 0)),
+                kv("隐患", f"{len(findings)} 项（高危 {high}｜中危 {med}）"),
             ]},
-            {"component": "VRow", "props": {"class": "mt-2"}, "content": [
+            {"component": "div", "text": md_safe(table_text or "尚未读取规则"),
+             "props": {"style": "white-space:pre-wrap;font-size:12px;opacity:.8"}},
+            {"component": "VRow", "props": {"class": "mt-3"}, "content": [
                 {"component": "VCol", "content": op_buttons}]},
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": f"隐患检测（{len(findings)} 项）"},
-            text_row(format_findings_text(findings), 12),
-            {"component": "VDivider", "props": {"class": "my-3"}},
-            {"component": "VLabel", "text": "规则一览（自上而下即执行顺序）"},
         ]
-        for table in status["tables"]:
-            content_nodes.append(text_row(format_rules_text(rules, table), 12))
 
-        content_nodes.append({"component": "VDivider", "props": {"class": "my-3"}})
-        if op_rows:
-            content_nodes.append({"component": "VLabel",
-                                  "text": f"逐条操作（前 {min(len(rules), limit)} 条；删除/置底需确认）"})
-            content_nodes.extend(op_rows)
-            if truncated:
-                content_nodes.append(text_row(
-                    f"……另有 {truncated} 条规则未显示操作按钮（可调大配置页「详情页操作按钮上限」，"
-                    "或用远程命令 /rfw_scan 查看隐患）", 11))
-        else:
-            content_nodes.append(text_row("尚无规则数据，点击「刷新规则」或「立即扫描隐患」加载。", 12))
-
-        # 最近一次操作结果：说明文字全角转义；命令中的 RouterOS *id 用 md_safe_command 保留原样
-        if last_op:
-            content_nodes.append({"component": "VDivider", "props": {"class": "my-3"}})
-            content_nodes.append({"component": "VLabel", "text": "最近一次操作"})
-            head = md_safe(
-                f"{'成功' if last_op.get('ok') else '失败'}：{last_op.get('message', '')}"
-                + (f"\n位置：{last_op.get('note')}" if last_op.get("note") else ""))
-            content_nodes.append({"component": "div", "text": head,
-                                  "props": {"style": "white-space:pre-wrap;font-size:12px"}})
-            if last_op.get("preview"):
-                content_nodes.append({"component": "div",
-                                      "text": "命令：" + md_safe_command(last_op["preview"]),
-                                      "props": {"style": "white-space:pre-wrap;font-size:12px"}})
-
-        content_nodes.append({"component": "VDivider", "props": {"class": "my-3"}})
-        content_nodes.append({"component": "VLabel",
-                              "text": "运行日志（最近 20 条，INFO 级 SSE 实时输出）"})
-        logs = list(self.get_data(_KEY_LOGS) or [])
-        if not logs:
-            content_nodes.append(text_row("暂无日志，点击上方「立即扫描隐患」或「测试连接」后显示。", 12))
-        for l in logs[:20]:
-            content_nodes.append(text_row(
-                format_log_line(l.get("time", ""), l.get("level", ""), l.get("message", "")), 12))
-
-        return [{
-            "component": "VCard", "props": {"variant": "tonal"}, "content": [{
-                "component": "VCardText", "content": content_nodes,
-            }],
-        }]
+        # 逐条操作是防火墙管理核心功能，保留但收敛到配置页设定的上限
+        shown = rules[:limit]
+        if shown:
+            nodes.append({"component": "div",
+                          "text": md_safe(f"规则操作（前 {len(shown)} 条；删除/置底需确认）"),
+                          "props": {"style": "font-size:12px;opacity:.8"}})
+            nodes.extend(self._rule_op_row(r) for r in shown)
+            if len(rules) > limit:
+                nodes.append({"component": "div",
+                              "text": md_safe(f"另有 {len(rules) - limit} 条未显示，可调大配置页「详情页操作按钮上限」"),
+                              "props": {"style": "font-size:12px;opacity:.8"}})
+        return [{"component": "VCard", "props": {"variant": "tonal"}, "content": [
+            {"component": "VCardText", "content": nodes}]}]
 
     # ------------------------------------------------------------------
     # API（一一对应详情页按钮 + 配置页新增）
     # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
-        base = f"/plugin/{PLUGIN_NAME}"
+        # path 用相对路径：MP get_plugin_apis 会自动补 /{pid}，
+        # 写成 /plugin/{NAME}/xxx 会重复前缀导致按钮 Not Found。
         return [
-            {"path": f"{base}/scan", "endpoint": self.api_scan, "methods": ["POST"], "summary": "立即扫描隐患"},
-            {"path": f"{base}/refresh", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新四表规则"},
-            {"path": f"{base}/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
-            {"path": f"{base}/toggle", "endpoint": self.api_toggle, "methods": ["POST"], "summary": "启用/禁用单条规则"},
-            {"path": f"{base}/move", "endpoint": self.api_move, "methods": ["POST"], "summary": "移动单条规则顺序"},
-            {"path": f"{base}/remove", "endpoint": self.api_remove, "methods": ["POST"], "summary": "删除单条规则"},
-            {"path": f"{base}/add_preview", "endpoint": self.api_add_preview, "methods": ["POST"], "summary": "预览新增规则命令"},
-            {"path": f"{base}/add", "endpoint": self.api_add, "methods": ["POST"], "summary": "按表单新增规则"},
-            {"path": f"{base}/backup", "endpoint": self.api_backup, "methods": ["POST"], "summary": "导出规则快照到 MP"},
-            {"path": f"{base}/router_backup", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
-            {"path": f"{base}/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
-            {"path": f"{base}/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
+            {"path": "/scan", "endpoint": self.api_scan, "methods": ["POST"], "summary": "立即扫描隐患"},
+            {"path": "/refresh", "endpoint": self.api_refresh, "methods": ["POST"], "summary": "刷新四表规则"},
+            {"path": "/test", "endpoint": self.api_test, "methods": ["POST"], "summary": "测试 RouterOS 连接"},
+            {"path": "/toggle", "endpoint": self.api_toggle, "methods": ["POST"], "summary": "启用/禁用单条规则"},
+            {"path": "/move", "endpoint": self.api_move, "methods": ["POST"], "summary": "移动单条规则顺序"},
+            {"path": "/remove", "endpoint": self.api_remove, "methods": ["POST"], "summary": "删除单条规则"},
+            {"path": "/add_preview", "endpoint": self.api_add_preview, "methods": ["POST"], "summary": "预览新增规则命令"},
+            {"path": "/add", "endpoint": self.api_add, "methods": ["POST"], "summary": "按表单新增规则"},
+            {"path": "/backup", "endpoint": self.api_backup, "methods": ["POST"], "summary": "导出规则快照到 MP"},
+            {"path": "/router_backup", "endpoint": self.api_router_backup, "methods": ["POST"], "summary": "在 RouterOS 创建配置备份"},
+            {"path": "/stop", "endpoint": self.api_stop, "methods": ["POST"], "summary": "停止当前任务"},
+            {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "summary": "获取当前状态"},
         ]
 
     def api_scan(self, _=None) -> Response:
