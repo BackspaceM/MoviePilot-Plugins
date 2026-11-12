@@ -215,41 +215,83 @@ def paramiko_state() -> Dict[str, Any]:
         return {"available": False, "reason": _PARAMIKO_REASON}
 
 
+TRANSPORT_CHOICES = ("自动", "paramiko", "ssh 命令")
+
+
 def ssh_cli_state() -> Dict[str, Any]:
-    """容器自带的 ssh 命令能不能用；只能走私钥，密码交给 paramiko。"""
+    """容器自带的 ssh / sshpass 命令能不能用。
+
+    密码登录有两条零 Python 依赖的通道：sshpass -e（密码走环境变量），
+    或 OpenSSH 的 SSH_ASKPASS_REQUIRE=force（密码放在 0600 临时文件里）。
+    """
     path = shutil.which("ssh") or ""
-    return {"available": bool(path), "path": path,
+    sshpass = shutil.which("sshpass") or ""
+    return {"available": bool(path), "path": path, "sshpass": sshpass,
             "reason": "" if path else "容器里也没有 ssh 命令"}
 
 
+def auth_mode(cfg: Dict[str, Any]) -> str:
+    """私钥优先；都没填就是没凭据，别让 ssh 交互式卡住。"""
+    if str(cfg.get("ssh_key") or "").strip():
+        return "私钥"
+    if str(cfg.get("ssh_password") or ""):
+        return "密码"
+    return "未填"
+
+
 def transport_state(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """选一条能用的传输：paramiko 优先，其次 ssh 命令 + 私钥。"""
+    """选传输：paramiko 和系统 ssh 命令都支持密码 / 私钥，密码不需要私钥。"""
     pm = paramiko_state()
     cli = ssh_cli_state()
-    has_key = bool(str(cfg.get("ssh_key") or "").strip())
+    auth = auth_mode(cfg)
+    prefer = str(cfg.get("ssh_transport") or "自动").strip()
+    if prefer not in TRANSPORT_CHOICES:
+        prefer = "自动"
+    use_paramiko = pm["available"] and prefer in ("自动", "paramiko")
+    use_cli = cli["available"] and prefer in ("自动", "ssh 命令")
     has_password = bool(str(cfg.get("ssh_password") or ""))
-    if pm["available"]:
-        transport = "paramiko" + ("（私钥）" if has_key else "")
-        note = "私钥登录" if has_key else ""
-        available, reason = True, ""
-    elif cli["available"] and has_key:
-        transport, note = "ssh 命令（私钥）", "paramiko 未安装，改走容器自带的 ssh 命令"
-        available, reason = True, ""
-    elif cli["available"]:
-        transport, note = "", "ssh 命令只能走私钥，请填 SSH 私钥或安装 paramiko"
-        available, reason = False, note
+
+    available, reason, note, transport, preferred = False, "", "", "", ""
+    if auth == "未填":
+        reason = "还没填 SSH 密码或私钥"
+        note = reason
+    elif use_paramiko:
+        preferred = "paramiko"
+        transport = f"paramiko（{auth}）"
+        note = "私钥登录" if auth == "私钥" else "密码登录，密码只存插件配置"
+        available = True
+    elif use_cli:
+        preferred = "ssh 命令"
+        if auth == "私钥":
+            transport = "ssh 命令（私钥）"
+        elif cli.get("sshpass"):
+            transport = "ssh 命令（密码 · sshpass）"
+        else:
+            transport = "ssh 命令（密码 · askpass）"
+        note = "paramiko 未安装，走容器自带的 ssh 命令；密码不进命令行参数"
+        available = True
+    elif prefer == "paramiko":
+        reason = pm["reason"] or "指定用 paramiko，但容器里没装"
+        note = reason
+    elif prefer == "ssh 命令":
+        reason = cli["reason"] or "指定用 ssh 命令，但容器里没有"
+        note = reason
     else:
-        transport, note = "", pm["reason"]
-        available, reason = False, pm["reason"]
+        reason = pm["reason"]
+        note = reason
     return {
         "available": available,
         "transport": transport,
+        "preferred": preferred,
+        "auth": auth,
         "note": note,
         "reason": reason,
         "paramiko": pm["available"],
         "paramiko_reason": pm["reason"],
         "cli": cli["available"],
+        "cli_password": bool(cli.get("sshpass")),
         "password": has_password,
+        "prefer": prefer,
     }
 
 
@@ -258,10 +300,12 @@ def ssh_info(cfg: Dict[str, Any]) -> Dict[str, Any]:
     state = paramiko_state()
     tp = transport_state(cfg)
     return {
-        "available": tp["available"],
+        "available": bool(tp.get("available")),
         "reason": state["reason"],
-        "transport": tp["transport"],
-        "transport_note": tp["note"],
+        "transport": tp.get("transport") or "",
+        "transport_note": tp.get("note") or "",
+        "auth": tp.get("auth") or auth_mode(cfg),
+        "preferred": tp.get("preferred") or "",
         "paramiko": state["available"],
         "host": str(cfg.get("ssh_host") or "").strip(),
         "used": False,
@@ -391,47 +435,109 @@ def _key_file(cfg: Dict[str, Any]) -> Tuple[str, str]:
         return "", _scrub(f"私钥临时文件写不了：{type(exc).__name__} {exc}", cfg)
 
 
-def _run_remote(cfg: Dict[str, Any], command: str,
-                timeout: Optional[int] = None) -> Tuple[bool, str, str]:
-    """在 NAS 上跑一条命令，返回 (是否成功, 标准输出, 脱敏后的错误)。"""
-    host = str(cfg.get("ssh_host") or "").strip()
-    if not host:
-        return False, "", "还没填 SSH 地址"
-    limit = timeout or TIMEOUT
-    pm = paramiko_state()
-    if pm["available"]:
-        client, error = _client(cfg)
-        if client is None:
-            return False, "", error or "SSH 登录失败"
-        try:
-            _stdin, stdout, stderr = client.exec_command(command, timeout=limit)
-            out = stdout.read().decode("utf-8", "replace")[:_MAX_OUTPUT]
-            err = stderr.read().decode("utf-8", "replace")
-            code = stdout.channel.recv_exit_status()
-            text = _scrub(err.strip(), cfg)
-            if code not in (0, None):
-                return False, out, text or f"远端命令退出码 {code}"
-            return True, out, text
-        except Exception as exc:
-            close_session()
-            return False, "", _scrub(f"{type(exc).__name__}: {exc}", cfg)
+def _askpass_files(cfg: Dict[str, Any], password: str) -> Tuple[str, str, str]:
+    """askpass 脚本里不写密码，密码单独放 0600 临时文件，靠环境变量传路径。"""
+    script = pwfile = ""
+    try:
+        fd, pwfile = tempfile.mkstemp(prefix="ugn_pw_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(password + "\n")
+        os.chmod(pwfile, 0o600)
+        fd, script = tempfile.mkstemp(prefix="ugn_ask_", suffix=".sh")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write('#!/bin/sh\ncat "$UGN_ASKPASS_FILE"\n')
+        os.chmod(script, 0o700)
+        return script, pwfile, ""
+    except Exception as exc:
+        for path in (script, pwfile):
+            try:
+                if path:
+                    os.unlink(path)
+            except OSError:
+                pass
+        return "", "", _scrub(f"密码临时文件写不了：{type(exc).__name__} {exc}", cfg)
 
+
+def _cli_plan(cfg: Dict[str, Any], command: str,
+              limit: int) -> Tuple[List[str], Dict[str, str], List[str], str]:
+    """组装系统 ssh 命令：私钥走 -i，密码走 sshpass -e 或 SSH_ASKPASS。
+
+    两种情况密码都不会出现在命令行参数里（argv 可被同机其它进程看到）。
+    """
     cli = ssh_cli_state()
     if not cli["available"]:
-        return False, "", pm["reason"]
-    key_path, key_error = _key_file(cfg)
-    if not key_path:
-        return False, "", key_error or pm["reason"]
-    args = [
-        cli["path"], "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null", "-o", f"ConnectTimeout={min(limit, 8)}",
-        "-o", "IdentitiesOnly=yes", "-i", key_path,
-        "-p", str(_ssh_port(cfg)),
-        f"{str(cfg.get('ssh_user') or '').strip()}@{host}",
-        command,
+        return [], {}, [], cli["reason"] or "容器里没有 ssh 命令"
+    host = str(cfg.get("ssh_host") or "").strip()
+    user = str(cfg.get("ssh_user") or "").strip()
+    common = [
+        "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        "-o", f"ConnectTimeout={min(limit, 8)}", "-o", "ConnectionAttempts=1",
+        "-p", str(_ssh_port(cfg)), f"{user}@{host}", command,
     ]
+    temp: List[str] = []
+    env: Dict[str, str] = {}
+    prefix: List[str] = []
+    auth = auth_mode(cfg)
+    if auth == "私钥":
+        key_path, error = _key_file(cfg)
+        if not key_path:
+            return [], {}, [], error
+        temp.append(key_path)
+        opts = ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                "-o", "PreferredAuthentications=publickey", "-i", key_path]
+    elif auth == "密码":
+        password = str(cfg.get("ssh_password") or "")
+        opts = ["-o", "PreferredAuthentications=password",
+                "-o", "NumberOfPasswordPrompts=1"]
+        if cli.get("sshpass"):
+            prefix = [cli["sshpass"], "-e"]
+            env["SSHPASS"] = password
+        else:
+            script, pwfile, error = _askpass_files(cfg, password)
+            if not script:
+                return [], {}, [], error
+            temp.extend((script, pwfile))
+            env.update({
+                "SSH_ASKPASS": script,
+                "SSH_ASKPASS_REQUIRE": "force",
+                "UGN_ASKPASS_FILE": pwfile,
+                "DISPLAY": os.environ.get("DISPLAY") or ":0",
+            })
+    else:
+        return [], {}, [], "还没填 SSH 密码或私钥"
+    return prefix + [cli["path"]] + opts + common, env, temp, ""
+
+
+def _run_paramiko(cfg: Dict[str, Any], command: str,
+                  limit: int) -> Tuple[bool, str, str]:
+    client, error = _client(cfg)
+    if client is None:
+        return False, "", error or "SSH 登录失败"
     try:
-        done = subprocess.run(args, capture_output=True, timeout=limit, check=False)
+        _stdin, stdout, stderr = client.exec_command(command, timeout=limit)
+        out = stdout.read().decode("utf-8", "replace")[:_MAX_OUTPUT]
+        err = stderr.read().decode("utf-8", "replace")
+        code = stdout.channel.recv_exit_status()
+        text = _scrub(err.strip(), cfg)
+        if code not in (0, None):
+            return False, out, text or f"远端命令退出码 {code}"
+        return True, out, text
+    except Exception as exc:
+        close_session()
+        return False, "", _scrub(f"{type(exc).__name__}: {exc}", cfg)
+
+
+def _run_cli(cfg: Dict[str, Any], command: str,
+             limit: int) -> Tuple[bool, str, str]:
+    args, extra_env, temp, error = _cli_plan(cfg, command, limit)
+    if error:
+        return False, "", error
+    env = dict(os.environ)
+    env.update(extra_env)
+    try:
+        # start_new_session 让 ssh 脱离控制终端，SSH_ASKPASS 才会被真正调用
+        done = subprocess.run(args, capture_output=True, timeout=limit, check=False,
+                              env=env, start_new_session=True)
         out = done.stdout.decode("utf-8", "replace")[:_MAX_OUTPUT]
         err = _scrub(done.stderr.decode("utf-8", "replace").strip(), cfg)
         if done.returncode != 0:
@@ -440,10 +546,26 @@ def _run_remote(cfg: Dict[str, Any], command: str,
     except Exception as exc:
         return False, "", _scrub(f"{type(exc).__name__}: {exc}", cfg)
     finally:
-        try:
-            os.unlink(key_path)
-        except OSError:
-            pass
+        for path in temp:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _run_remote(cfg: Dict[str, Any], command: str,
+                timeout: Optional[int] = None) -> Tuple[bool, str, str]:
+    """在 NAS 上跑一条命令，返回 (是否成功, 标准输出, 脱敏后的错误)。"""
+    host = str(cfg.get("ssh_host") or "").strip()
+    if not host:
+        return False, "", "还没填 SSH 地址"
+    limit = timeout or TIMEOUT
+    tp = transport_state(cfg)
+    if not tp.get("available"):
+        return False, "", tp.get("reason") or "SSH 传输不可用"
+    if tp.get("preferred", "paramiko") == "paramiko":
+        return _run_paramiko(cfg, command, limit)
+    return _run_cli(cfg, command, limit)
 
 
 def probe_script() -> str:
@@ -614,6 +736,7 @@ def parse_probe(text: Any, cfg: Optional[Dict[str, Any]] = None) -> Tuple[Dict[s
         "uid": uid,
         "kernel": kernel,
         "transport": str((cfg or {}).get("_transport") or ""),
+        "auth": str((cfg or {}).get("_auth") or ""),
     }
     raw = {
         "ts": _now_text(),
@@ -633,15 +756,16 @@ def _read_ssh(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not host:
         return None
     tp = transport_state(cfg)
-    if not tp["available"]:
-        _LAST_SSH_ERROR["text"] = tp["reason"]
+    if not tp.get("available"):
+        _LAST_SSH_ERROR["text"] = tp.get("reason") or "SSH 传输不可用"
         return None
     ok, out, error = _run_remote(cfg, probe_script(), timeout=_PROBE_TIMEOUT)
     if not ok:
         _LAST_SSH_ERROR["text"] = error or "SSH 探针没跑通"
         return None
     probe_cfg = dict(cfg)
-    probe_cfg["_transport"] = tp["transport"]
+    probe_cfg["_transport"] = tp.get("transport") or ""
+    probe_cfg["_auth"] = tp.get("auth") or auth_mode(cfg)
     raw, _meta = parse_probe(out, probe_cfg)
     _LAST_SSH_ERROR["text"] = ""
     return raw
@@ -655,8 +779,9 @@ def ssh_diagnostics(cfg: Dict[str, Any]) -> Dict[str, Any]:
     tp = transport_state(cfg)
     report: Dict[str, Any] = {
         "ok": False, "checked_at": _now_text(), "host": host, "port": port,
-        "user": user, "transport": tp["transport"], "steps": [],
-        "sections": {}, "summary": "", "hint": "",
+        "user": user, "transport": tp.get("transport") or "",
+        "auth": tp.get("auth") or auth_mode(cfg), "prefer": tp.get("prefer") or "自动",
+        "steps": [], "sections": {}, "summary": "", "hint": "",
     }
 
     def step(name: str, ok: bool, detail: str) -> None:
@@ -680,17 +805,25 @@ def ssh_diagnostics(cfg: Dict[str, Any]) -> Dict[str, Any]:
         report["summary"] = "SSH 端口连不上"
         report["hint"] = "确认 NAS 已开启 SSH、端口没填错，MP 容器能访问到这个地址"
         return report
-    step("传输", tp["available"], tp["transport"] or tp["reason"])
-    if not tp["available"]:
-        report["summary"] = "缺少可用的 SSH 传输"
-        report["hint"] = tp["reason"] or _PARAMIKO_REASON
+    transport_text = tp.get("transport") or tp.get("reason") or ""
+    if tp.get("auth"):
+        transport_text += f"｜认证：{tp['auth']}"
+    step("传输", bool(tp.get("available")), transport_text)
+    if not tp.get("available"):
+        report["summary"] = "缺少可用的 SSH 传输或凭据"
+        report["hint"] = (tp.get("reason") or _PARAMIKO_REASON)
+        if tp.get("auth") == "未填":
+            report["hint"] = "在设置里填 SSH 密码或私钥；只填密码就能连，不需要私钥"
         return report
     ok, out, error = _run_remote(cfg, "echo UGN_OK", timeout=TIMEOUT)
     step("登录", ok and "UGN_OK" in out,
          "账号认证通过" if ok and "UGN_OK" in out else (error or "账号或密码不对"))
     if not (ok and "UGN_OK" in out):
         report["summary"] = "SSH 登录没通过"
-        report["hint"] = "检查账号、密码或私钥；绿联 NAS 需要在控制面板里开启 SSH 服务"
+        report["hint"] = ("检查账号和密码、NAS 是否开启 SSH 的密码登录；"
+                          "也可以改填私钥或在设置里把连接方式换成另一条"
+                          if tp.get("auth") == "密码" else
+                          "检查账号和私钥是否匹配，以及 NAS 是否允许公钥登录")
         return report
     ok, out, error = _run_remote(cfg, probe_script(), timeout=_PROBE_TIMEOUT)
     if not ok:
@@ -703,7 +836,7 @@ def ssh_diagnostics(cfg: Dict[str, Any]) -> Dict[str, Any]:
     got = [name for name in ("volumes", "cpu", "mem", "containers", "disks", "ups") if reported.get(name)]
     step("探针", True, "读到：" + ("、".join(got) if got else "没有可用段落"))
     report["ok"] = True
-    report["summary"] = f"连接正常（{tp['transport']}），读到 {len(got)}/6 段状态"
+    report["summary"] = f"连接正常（{tp.get('transport') or 'SSH'}），读到 {len(got)}/6 段状态"
     miss = [name for name in ("volumes", "cpu", "mem", "containers", "disks", "ups") if not reported.get(name)]
     report["hint"] = ("没读到的段落会在页面上标未上报；盘温和 UPS 通常需要 smartctl / NUT 或 root 权限"
                       if miss else "各段状态都读到了")

@@ -401,9 +401,9 @@
   },
   "UGreenGuard": {
     "name": "绿联 NAS 守护",
-    "description": "SSH 直连绿联 NAS 按秒级间隔持续巡检：一次连接读回磁盘占用空间、CPU、内存、容器、盘温、SMART 与 UPS，读不到的段落标未上报。带分步连接测试、私钥登录、paramiko 缺失时的 ssh 命令兜底与复用连接；支持按规则自动暂停/恢复下载、重启异常容器、执行一条自定义命令，远程动作默认全关、危险命令被拒、全程留日志。",
-    "labels": "绿联NAS,SSH,实时监控,磁盘占用空间,盘温,UPS,容器,自动处置,守护",
-    "version": "2.0.0",
+    "description": "SSH 直连绿联 NAS 按秒级间隔持续巡检：一次连接读回磁盘占用空间、CPU、内存、容器、盘温、SMART 与 UPS，读不到的段落标未上报。只填 SSH 账号和密码就能连，不需要私钥；paramiko 与系统 ssh 命令（sshpass -e / SSH_ASKPASS）二选一，密码不进命令行参数，可手动指定连接方式。异常经 V3 post_message 走 MP 自带通知模块（微信/Telegram/WebPush 等），仅提醒和试运行也会发，另有「测试通知」自检与发送回执。支持按规则自动暂停/恢复下载、重启异常容器、执行一条自定义命令，远程动作默认全关、危险命令被拒、全程留日志。",
+    "labels": "绿联NAS,SSH,密码登录,MP通知,微信,Telegram,WebPush,实时监控,自动处置,守护",
+    "version": "2.1.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -412,6 +412,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v2.1.0": "回答两个实际使用问题：① 只填 SSH 密码就能连，不需要私钥。修掉「没有 paramiko 时系统 ssh 命令只认私钥」的限制，新增 sshpass -e 与 SSH_ASKPASS_REQUIRE=force 两条零 Python 依赖的密码通道，密码不进 argv、只放环境变量或 0600 临时文件，用完即删；新增「用哪种方式连 SSH」下拉（自动 / paramiko / ssh 命令），连接测试报告显示实际传输与认证方式。② 通知改走 MP V3 自带通知模块：按宿主签名 post_message(channel=NotificationChannel, mtype=MessageType.Plugin, title, text)，渠道跟随 MP 设置或钉死微信/Telegram/WebPush 等，可读宿主已配置通知服务；仅提醒和试运行命中同样发通知，新增「测试通知」按钮与 /test_notify 接口、发送回执与通知页面区块，明确区分「已提交」和「已送达」。签名不认新参数时自动回退最简调用；通知回执不额外写日志以免打乱冷却计数。设置项加 3 项（连接方式、通知开关、通知渠道），两套离线用例扩到 88 + 74 例。",
       "v2.0.0": "SSH 从只跑 df -kP 升级成一次连接的复合只读探针，补齐 CPU、内存、docker 容器、盘温/SMART 与 UPS 采集；连接支持密码/私钥、复用会话、paramiko 缺失时走容器自带 ssh 命令，新增分步「测试连接」按钮与逐段上报清单。巡检改由宿主调度器按 10~120 秒间隔驱动，保存最近 40 帧趋势与数据新鲜度；新增 CPU/内存规则、按已上报项恢复、远程自动处置（重启关注容器 / 执行一条自定义命令），远程动作总开关默认关闭，命令含删除、关机、管道、重定向一律拒绝，容器名严格白名单化。设置项精简到 15 个并分组，支持 地址:端口 写法与免密 sudo 自动重试；新增连接诊断、实时趋势、自动处置三个页面区块，密码与私钥全链路脱敏。单插件 78 + 58 个离线用例。",
       "v1.1.0": "新增 SSH 采集模式：可填 NAS 地址、端口、账户和密码，读 df -kP 得到各挂载点的磁盘占用空间；paramiko 延迟加载，容器里没装时给出安装提示并自动降级到状态桥 / 本地文件 / 容器自检，不引入 pyproject 依赖以免安装被回滚。面向用户的「水位」全部改成「磁盘占用空间」，页面显示生效的采集来源与 SSH 主机（不显示密码）。所有按钮端点整体兜底。",
       "v1.0.1": "补上宿主基类的 stop_service 抽象方法（V3 是 ABCMeta，缺一个会导致插件重载不 ACTIVE、整次安装回滚）；页面渲染不再触发状态桥采集，调度器不可用时返回空任务。",

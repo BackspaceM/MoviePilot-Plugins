@@ -219,9 +219,12 @@ def _note_block(data: Dict[str, Any]) -> str:
     else:
         pstate = "paramiko 不可用" if "paramiko" in reason else "SSH 传输不可用"
         reason_line = f'；{_esc(reason)}' if reason else ""
+    auth = str(ssh.get("auth") or "")
+    auth_line = f'认证方式：{_esc(auth)}。' if auth else ""
     ssh_line = (
-        f'<p>采集设置：{mode}；当前生效来源：{source}。{pstate}{reason_line}。'
-        f'SSH 主机：{host}（密码和私钥只存插件配置，不写日志、不进快照、不显示在页面上）。{service_line}</p>'
+        f'<p>采集设置：{mode}；当前生效来源：{source}。{pstate}{reason_line}。{auth_line}'
+        f'SSH 主机：{host}（密码和私钥只存插件配置，不写日志、不进快照、不显示在页面上，'
+        f'也不会出现在 ssh 进程的命令行参数里）。{service_line}</p>'
     )
     probe_line = ""
     if probe:
@@ -240,6 +243,8 @@ def _note_block(data: Dict[str, Any]) -> str:
         'storage、taskmgr、ctl 这些节点在现有令牌下返回 403，MP 容器里不方便直连。</p>'
         '<p>所以走 SSH：一次连接跑一段只读探针，读磁盘占用空间、CPU、内存、容器、盘温、SMART 和 UPS；'
         '盘温和 UPS 需要 smartctl / NUT 或 root 权限，读不到就标未上报。'
+        '<b>只填账号和密码就能连，不需要私钥</b>：容器里有 paramiko 就用 paramiko，'
+        '没有就用系统自带的 ssh 命令（密码经 sshpass -e 或 SSH_ASKPASS 传入）。'
         '状态桥、本地状态文件、容器自检三路留作兜底，缺哪段都不会当成正常。</p>'
         '<p>状态桥大概给成这样就行，缺哪段就空着：'
         f'<code class="ugn-code">{_esc(_JSON_EXAMPLE)}</code></p>'
@@ -461,6 +466,67 @@ def _actions_block(data: Dict[str, Any]) -> str:
     )
 
 
+def _notify_block(data: Dict[str, Any]) -> str:
+    """通知模块自检：渠道、宿主通知服务、最近一次发送回执。"""
+    enabled = bool(data.get("notify_enabled", True))
+    label = str(data.get("notify_channel_label") or "跟随 MP 设置")
+    services = data.get("notify_services") if isinstance(data.get("notify_services"), list) else []
+    result = data.get("notify") if isinstance(data.get("notify"), dict) else {}
+
+    flags = (
+        ("通知开关", "开启" if enabled else "关闭"),
+        ("发送渠道", label),
+        ("消息类型", "插件"),
+    )
+    flag_rows = "".join(
+        f'<div class="ugn-flag"><span>{_esc(name)}</span><b>{_esc(value)}</b></div>'
+        for name, value in flags
+    )
+    svc_rows = []
+    for item in services[:12]:
+        if not isinstance(item, dict):
+            continue
+        svc_rows.append(
+            "<tr>"
+            f'<td class="ugn-name">{_esc(item.get("name"))}</td>'
+            f'<td>{_esc(item.get("type"))}</td>'
+            f'<td>{_esc(item.get("state"))}</td>'
+            "</tr>"
+        )
+    service_table = _table(["通知服务", "类型", "状态"], svc_rows,
+                           "没读到宿主已配置的通知服务，以「测试通知」结果为准")
+
+    if result:
+        ok = bool(result.get("ok"))
+        status_text = "已提交给 MP 通知模块" if ok else "调用失败"
+        tone = "ugn-ok" if ok else "ugn-bad"
+        receipt = (
+            '<div class="ugn-stat"><span class="ugn-label">最近一次'
+            + ("测试通知" if result.get("test") else "异常通知") + '</span>'
+            f'<b class="{tone}">{_esc(status_text)}</b></div>'
+        )
+        for name, key in (("时间", "at"), ("渠道", "channel_label"), ("调用", "via"), ("错误", "error")):
+            value = result.get(key) or ("无" if key == "error" else "-")
+            receipt += (f'<div class="ugn-stat"><span class="ugn-label">{_esc(name)}</span>'
+                        f'<b>{_esc(value)}</b></div>')
+    else:
+        receipt = ('<div class="ugn-empty">还没发过通知。点上面的「测试通知」立刻发一条；'
+                   '巡检命中时（含试运行、仅提醒）也会自动发。</div>')
+
+    return (
+        '<div class="ugn-flags">' + flag_rows + "</div>"
+        + '<div class="ugn-sec-title" style="margin-top:14px">宿主已配置的通知渠道'
+        + '<span class="ugn-sec-note">由 MP 设置决定</span></div>'
+        + service_table
+        + '<div class="ugn-sec-title" style="margin-top:14px">最近一次发送'
+        + '<span class="ugn-sec-note">回执</span></div>'
+        + receipt
+        + '<div class="ugn-foot">「已提交」只表示成功调用 post_message，'
+        '不等于微信 / Telegram / WebPush 已经送达；是否收到还要看 MP 通知设置里的渠道、'
+        '插件类消息开关和收件人。仅提醒和试运行同样会发通知，方便先验证通道再开自动处置。</div>'
+    )
+
+
 def render(data: Dict[str, Any]) -> str:
     status = data.get("status") if isinstance(data.get("status"), dict) else {}
     hits = data.get("hits") if isinstance(data.get("hits"), list) else []
@@ -521,6 +587,7 @@ def render(data: Dict[str, Any]) -> str:
         _section("UPS 与系统", "没上报就显示未上报", _ups_system_block(status)),
         "</div>",
         _section("SSH 连接", "分步诊断", _ssh_block(data)),
+        _section("通知", "走 MP 自带通知模块", _notify_block(data)),
         _section("自动处置", "默认全关", _actions_block(data)),
         _section("最近动作", f'保留最近 {min(len(logs), 10)} 条', _log_block(logs)),
         f'<div class="ugn-foot">{_esc(foot)}</div></div>',

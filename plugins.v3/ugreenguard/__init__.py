@@ -35,7 +35,7 @@ except Exception:  # 离线桩 / 文档检查时也要能加载
         def post_message(self, **kwargs: Any) -> None:
             return None
 
-from . import nas, renderer
+from . import nas, notify, renderer
 
 _COOLDOWN = 1800
 _STATE_KEY = "ugn_state"
@@ -44,6 +44,7 @@ _SNAPSHOT_KEY = "ugn_snapshot"
 _CLEAR_ARM_KEY = "ugn_clear_arm"
 _SERIES_KEY = "ugn_series"
 _SSH_TEST_KEY = "ugn_ssh_test"
+_NOTIFY_KEY = "ugn_notify"
 _MAX_LOG = 60
 _MAX_SERIES = 40
 _PAUSE_METHODS = ("pause_torrents", "stop_torrents", "pause_all")
@@ -90,12 +91,13 @@ class UGreenGuard(_PluginBase):
     plugin_name = "绿联 NAS 守护"
     plugin_desc = (
         "SSH 直连绿联 NAS 秒级巡检：一次连接读回磁盘占用空间、CPU、内存、容器、盘温、SMART 和 UPS，"
-        "读不到的段落标未上报，不装作正常。按规则自动暂停/恢复下载、重启异常容器或执行一条自定义命令；"
-        "远程动作默认全关，切到自动处置才会真动手，所有动作留日志。带分步连接测试，"
-        "paramiko 缺失时可用容器自带的 ssh 命令加私钥，也可降级到状态桥 / 本地文件 / 容器自检。"
+        "读不到的段落标未上报，不装作正常。只填账号和密码就能连（私钥可选）；paramiko 或容器自带的 "
+        "ssh 命令二选一，密码不会进命令行参数。异常经 MoviePilot 自带通知模块推送到微信 / Telegram / "
+        "WebPush 等渠道，试运行和仅提醒也会通知，另有「测试通知」自检。按规则自动暂停/恢复下载、"
+        "重启异常容器或执行一条自定义命令；远程动作默认全关，所有动作留日志。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.1.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "ugreenguard_"
@@ -115,6 +117,9 @@ class UGreenGuard(_PluginBase):
         self._ssh_password = ""
         self._ssh_key = ""
         self._ssh_sudo = False
+        self._ssh_transport = "自动"
+        self._notify_enabled = True
+        self._notify_channel = ""
         self._water = 88
         self._temp = 52
         self._cpu = 90
@@ -155,6 +160,11 @@ class UGreenGuard(_PluginBase):
         self._ssh_password = str(cfg.get("ssh_password") or "")
         self._ssh_key = str(cfg.get("ssh_key") or "").strip()
         self._ssh_sudo = _to_bool(cfg.get("ssh_sudo"), False)
+        transport = str(cfg.get("ssh_transport") or "自动").strip()
+        self._ssh_transport = transport if transport in nas.TRANSPORT_CHOICES else "自动"
+        self._notify_enabled = _to_bool(cfg.get("notify_enabled"), True)
+        channel = str(cfg.get("notify_channel") or "").strip()
+        self._notify_channel = channel if channel in notify.CHANNEL_VALUES else ""
         self._water = _clamp(_to_int(cfg.get("water_threshold"), 88), 50, 99)
         self._temp = _clamp(_to_int(cfg.get("temp_threshold"), 52), 20, 100)
         self._cpu = _clamp(_to_int(cfg.get("cpu_threshold"), 90), 30, 100)
@@ -197,6 +207,9 @@ class UGreenGuard(_PluginBase):
             "ssh_password": self._ssh_password,
             "ssh_key": self._ssh_key,
             "ssh_sudo": self._ssh_sudo,
+            "ssh_transport": self._ssh_transport,
+            "notify_enabled": self._notify_enabled,
+            "notify_channel": self._notify_channel,
             "water_threshold": self._water,
             "temp_threshold": self._temp,
             "cpu_threshold": self._cpu,
@@ -299,20 +312,29 @@ class UGreenGuard(_PluginBase):
                     {"title": "容器自检", "value": "容器自检"},
                 ], "默认自动，取到哪层算哪层")),
             ]},
-            head("② SSH 连接：密码或私钥二选一；私钥只存插件配置，不写日志、不进快照。"),
+            head("② SSH 连接：只填地址、账号、密码就能连，不需要私钥。密码或私钥二选一，"
+                 "都只存插件配置，不写日志、不进快照、不出现在进程命令行参数里。"),
             {"component": "VRow", "content": [
                 col(12, 6, field("ssh_host", "SSH 地址",
                                  "默认 22 端口；别的端口写成 192.168.1.10:2222", "192.168.1.10")),
                 col(12, 6, field("ssh_user", "SSH 账号", "能跑 df 的账号就够")),
             ]},
             {"component": "VRow", "content": [
-                col(12, 6, field("ssh_password", "SSH 密码", "密码只存插件配置，不会写进日志或快照", "", True)),
+                col(12, 6, field("ssh_password", "SSH 密码",
+                                 "填密码即可登录，不需要私钥；不会写进日志或快照", "", True)),
                 col(12, 6, {"component": "VTextarea", "props": {
                     "model": "ssh_key", "label": "SSH 私钥（可选）",
                     "placeholder": "-----BEGIN OPENSSH PRIVATE KEY-----",
                     "rows": 2, "autoGrow": True,
-                    "hint": "填了就优先用私钥；没装 paramiko 时也能走容器自带的 ssh 命令",
+                    "hint": "填了就优先用私钥；密码留空时必填这一项",
                     "persistentHint": True}}),
+            ]},
+            {"component": "VRow", "content": [
+                col(12, 12, select("ssh_transport", "用哪种方式连 SSH", [
+                    {"title": "自动（优先 paramiko，没有就用系统 ssh 命令）", "value": "自动"},
+                    {"title": "paramiko（需容器里装了 paramiko）", "value": "paramiko"},
+                    {"title": "系统 ssh 命令（密码走 sshpass / askpass，或填私钥）", "value": "ssh 命令"},
+                ], "两种实现都支持密码登录；点「测试连接」能看到实际用了哪条")),
             ]},
             head("③ 巡检与阈值：后台按间隔持续采集，页面点「刷新页面」看最新一帧。"),
             {"component": "VRow", "content": [
@@ -350,7 +372,16 @@ class UGreenGuard(_PluginBase):
                                   "留空最安全；只放行单条简单命令，禁止管道、重定向、删除和关机类命令",
                                   "/volume1/scripts/notify.sh")),
             ]},
-            head("⑤ 备用数据源（可留空）：SSH 连不上时按状态桥 → 本地文件 → 容器自检降级。"),
+            head("⑤ 通知：走 MoviePilot 自带的通知模块（微信 / Telegram / WebPush 等由 MP 设置决定），"
+                 "仅提醒和试运行命中时也会发。点详情页「测试通知」可以立刻验证通道。"),
+            {"component": "VRow", "content": [
+                col(12, 6, switch("notify_enabled", "发送 NAS 异常通知",
+                                  "关掉后巡检照跑，只是不再推送")),
+                col(12, 6, select("notify_channel", "发到哪个渠道", [
+                    {"title": title, "value": value} for value, title in notify.CHANNELS
+                ], "默认跟随 MP 设置；指定渠道只发给该渠道")),
+            ]},
+            head("⑥ 备用数据源（可留空）：SSH 连不上时按状态桥 → 本地文件 → 容器自检降级。"),
             {"component": "VRow", "content": [
                 col(12, 6, field("bridge_url", "状态桥地址", "留空就跳过状态桥",
                                  "http://127.0.0.1:8787/status")),
@@ -367,6 +398,9 @@ class UGreenGuard(_PluginBase):
             "ssh_password": self._ssh_password,
             "ssh_key": self._ssh_key,
             "ssh_sudo": self._ssh_sudo,
+            "ssh_transport": self._ssh_transport,
+            "notify_enabled": self._notify_enabled,
+            "notify_channel": self._notify_channel,
             "poll_seconds": self._poll_seconds,
             "water_threshold": self._water,
             "temp_threshold": self._temp,
@@ -395,6 +429,8 @@ class UGreenGuard(_PluginBase):
              "methods": ["POST"], "summary": "立即巡检一次"},
             {"path": "/test_ssh", "auth": "bear", "endpoint": self.api_test_ssh,
              "methods": ["POST"], "summary": "分步测试 SSH 连接与状态探针"},
+            {"path": "/test_notify", "auth": "bear", "endpoint": self.api_test_notify,
+             "methods": ["POST"], "summary": "发一条测试通知，验证 MP 通知模块"},
             {"path": "/resume", "auth": "bear", "endpoint": self.api_resume,
              "methods": ["POST"], "summary": "手动恢复下载"},
             {"path": "/clear", "auth": "bear", "endpoint": self.api_clear,
@@ -440,6 +476,34 @@ class UGreenGuard(_PluginBase):
             summary = str(report.get("summary") or "测试完成")
             self._append_log("INFO" if report.get("ok") else "WARN", f"[连接测试] {summary}")
             return self._payload_from(self._view(), summary, ssh_test=report)
+        except Exception as exc:
+            return self._fail(exc)
+
+    def api_test_notify(self) -> Response:
+        """不依赖异常状态，直接发一条测试消息，用来确认 MP 通知模块通不通。"""
+        try:
+            channel = self._notify_channel
+            label = notify.channel_label(channel)
+            title = "绿联 NAS 守护 · 通知测试"
+            text = (
+                "这是一条测试消息，用来确认 MP 通知模块是否打通。\n"
+                f"时间：{_now_text()}\n"
+                f"渠道：{label}\n"
+                "消息类型：插件（MessageType.Plugin）\n"
+                f"当前处置：{self._mode}\n"
+                "收到说明通道正常；没收到请检查 MP「设置 → 通知」里渠道是否启用、"
+                "插件类消息的开关与收件人。"
+            )
+            result = notify.send(self, title, text, channel)
+            result["test"] = True
+            self.save_data(_NOTIFY_KEY, result)
+            ok = bool(result.get("ok"))
+            self._append_log("INFO" if ok else "ERROR",
+                             f"[通知测试] {'已提交给 MP 通知模块' if ok else '调用失败'}："
+                             f"{result.get('via') or result.get('error') or ''}")
+            summary = ("已提交给 MP 通知模块，请去看微信 / Telegram / WebPush 有没有收到"
+                       if ok else f"通知调用失败：{result.get('error') or '未知原因'}")
+            return self._payload_from(self._view(), summary, notify_test=result)
         except Exception as exc:
             return self._fail(exc)
 
@@ -504,6 +568,7 @@ class UGreenGuard(_PluginBase):
             button("立即巡检", "mdi-refresh", "check", "post"),
             button("刷新页面", "mdi-page-refresh-outline", "refresh", "post", "info"),
             button("测试连接", "mdi-lan-connect", "test_ssh", "post", "info"),
+            button("测试通知", "mdi-bell-ring-outline", "test_notify", "post", "info"),
             button("查看快照", "mdi-code-json", "snapshot", "get", "info"),
             button("恢复下载", "mdi-play-outline", "resume", "post", "success"),
             button("清空日志", "mdi-delete-outline", "clear", "post", "warning", {"confirm": "yes"}),
@@ -536,8 +601,16 @@ class UGreenGuard(_PluginBase):
             pass
 
     def _notify(self, title: str, text: str) -> None:
+        """把异常交给 MP 自带通知模块；仅提醒 / 试运行时同样会调，用来验证通道。
+
+        这里不额外写日志，免得一次告警记两条，影响冷却和日志计数；
+        发送回执单独存起来，在详情页「通知」区块展示。
+        """
+        if not self._notify_enabled:
+            return
         try:
-            self.post_message(title=title, text=self._scrub(text))
+            result = notify.send(self, title, self._scrub(text), self._notify_channel)
+            self.save_data(_NOTIFY_KEY, result)
         except Exception:
             pass
 
@@ -791,6 +864,8 @@ class UGreenGuard(_PluginBase):
         series = list(series) if isinstance(series, list) else []
         ssh_test = self.get_data(_SSH_TEST_KEY)
         ssh_test = dict(ssh_test) if isinstance(ssh_test, dict) else {}
+        notify_result = self.get_data(_NOTIFY_KEY)
+        notify_result = dict(notify_result) if isinstance(notify_result, dict) else {}
         ssh = collected.get("ssh") if isinstance(collected.get("ssh"), dict) \
             else nas.ssh_info(cfg)
         last_epoch = stored.get("last_check_epoch")
@@ -810,6 +885,11 @@ class UGreenGuard(_PluginBase):
             "log": logs,
             "series": series,
             "ssh_test": ssh_test,
+            "notify": notify_result,
+            "notify_enabled": self._notify_enabled,
+            "notify_channel": self._notify_channel,
+            "notify_channel_label": notify.channel_label(self._notify_channel),
+            "notify_services": notify.services(),
             "age_seconds": age,
             "poll_seconds": self._poll_seconds,
             "paused": bool(state.get("paused")),

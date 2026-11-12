@@ -7,6 +7,7 @@ import importlib.util
 import os
 import pathlib
 import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -225,7 +226,7 @@ class TestParamikoAndCollect(unittest.TestCase):
              patch.object(nas, "_read_status_file", return_value={"volumes": [{"name": "f", "percent": 1}]}), \
              patch.object(nas, "local_raw", return_value={"volumes": [{"name": "l", "percent": 1}]}):
             result = nas.collect({
-                "source_mode": "自动", "ssh_host": "10.0.0.2",
+                "source_mode": "自动", "ssh_host": "10.0.0.2", "ssh_password": "pw",
                 "bridge_url": "http://x", "status_file": "/tmp/x.json",
             })
         self.assertEqual(result["source"], "SSH")
@@ -235,7 +236,8 @@ class TestParamikoAndCollect(unittest.TestCase):
         raw = {"ts": "x", "volumes": [{"name": "/volume1", "total": 1024, "used": 900, "percent": 87.9}]}
         with patch.object(nas, "paramiko_state", return_value={"available": True, "reason": ""}), \
              patch.object(nas, "_read_ssh", return_value=raw):
-            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2"})
+            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2",
+                                  "ssh_password": "pw"})
         self.assertEqual(result["source"], "SSH")
         self.assertEqual(result["status"]["disks"], [])
         self.assertEqual(result["status"]["containers"], [])
@@ -246,7 +248,8 @@ class TestParamikoAndCollect(unittest.TestCase):
         with patch.object(nas, "paramiko_state", return_value={"available": True, "reason": ""}), \
              patch.object(nas, "_read_ssh", return_value=None), \
              patch.object(nas, "local_raw", return_value={"volumes": [{"name": "/", "percent": 5}]}):
-            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2"})
+            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2",
+                                  "ssh_password": "pw"})
         self.assertEqual(result["source"], "容器自检")
 
     def test_explicit_modes_still_keep_three_original_paths(self):
@@ -553,12 +556,41 @@ class TestTransportAndDiagnostics(unittest.TestCase):
         self.assertIn("ssh 命令", state["transport"])
         self.assertFalse(state["paramiko"])
 
-    def test_paramiko_missing_and_no_key_has_clear_reason(self):
+    def test_no_credentials_has_clear_reason(self):
         with patch.dict(sys.modules, {"paramiko": None}), \
              patch.object(nas, "ssh_cli_state", return_value={"available": True, "path": "/usr/bin/ssh", "reason": ""}):
             state = nas.transport_state({})
         self.assertFalse(state["available"])
-        self.assertIn("paramiko", state["reason"])
+        self.assertEqual(state["auth"], "未填")
+        self.assertIn("没填", state["reason"])
+
+    def test_paramiko_missing_but_password_uses_ssh_cli(self):
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "ssh_cli_state", return_value={
+                 "available": True, "path": "/usr/bin/ssh", "sshpass": "", "reason": ""}):
+            state = nas.transport_state({"ssh_password": "S3cr3tPW"})
+        self.assertTrue(state["available"])
+        self.assertEqual(state["auth"], "密码")
+        self.assertEqual(state["preferred"], "ssh 命令")
+        self.assertIn("askpass", state["transport"])
+
+    def test_explicit_preference_is_honoured(self):
+        with patch.object(nas, "paramiko_state", return_value={"available": True, "reason": ""}), \
+             patch.object(nas, "ssh_cli_state", return_value={
+                 "available": True, "path": "/usr/bin/ssh", "sshpass": "", "reason": ""}):
+            forced = nas.transport_state({"ssh_password": "pw", "ssh_transport": "ssh 命令"})
+        self.assertEqual(forced["preferred"], "ssh 命令")
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "ssh_cli_state", return_value={
+                 "available": True, "path": "/usr/bin/ssh", "sshpass": "", "reason": ""}):
+            blocked = nas.transport_state({"ssh_password": "pw", "ssh_transport": "paramiko"})
+        self.assertFalse(blocked["available"])
+        self.assertIn("paramiko", blocked["reason"])
+
+    def test_private_key_wins_over_password(self):
+        self.assertEqual(nas.auth_mode({"ssh_key": "KEY", "ssh_password": "pw"}), "私钥")
+        self.assertEqual(nas.auth_mode({"ssh_password": "pw"}), "密码")
+        self.assertEqual(nas.auth_mode({}), "未填")
 
     def test_ssh_info_never_leaks_credentials(self):
         cfg = {"ssh_host": "10.0.0.2", "ssh_password": "S3cr3tPW", "ssh_key": "KEYLINE-secrets"}
@@ -642,6 +674,125 @@ class TestTransportAndDiagnostics(unittest.TestCase):
         self.assertTrue(result["ssh"]["used"])
         self.assertTrue(result["probe"]["volumes"])
         self.assertEqual(result["status"]["ups"]["on_battery"], False)
+
+
+class TestPasswordOverSshCli(unittest.TestCase):
+    """没有 paramiko 时，系统 ssh 命令也必须能用密码，且密码不进 argv。"""
+
+    def setUp(self):
+        self.cfg = {"ssh_host": "10.0.0.2", "ssh_port": 22,
+                    "ssh_user": "admin", "ssh_password": "S3cr3tPW"}
+
+    @staticmethod
+    def _cli(sshpass=""):
+        return {"available": True, "path": "/usr/bin/ssh",
+                "sshpass": sshpass, "reason": ""}
+
+    @staticmethod
+    def _clean(paths):
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def test_sshpass_password_only_in_env(self):
+        with patch.object(nas, "ssh_cli_state", return_value=self._cli("/usr/bin/sshpass")):
+            args, env, temp, error = nas._cli_plan(self.cfg, "df -kP", 8)
+        self.assertEqual(error, "")
+        self.assertEqual(args[:2], ["/usr/bin/sshpass", "-e"])
+        self.assertEqual(env["SSHPASS"], "S3cr3tPW")
+        self.assertNotIn("S3cr3tPW", repr(args))
+        self.assertEqual(temp, [])
+
+    def test_askpass_script_never_contains_password(self):
+        with patch.object(nas, "ssh_cli_state", return_value=self._cli()):
+            args, env, temp, error = nas._cli_plan(self.cfg, "df -kP", 8)
+        try:
+            self.assertEqual(error, "")
+            self.assertEqual(env["SSH_ASKPASS_REQUIRE"], "force")
+            self.assertNotIn("S3cr3tPW", repr(args))
+            self.assertNotIn("S3cr3tPW", pathlib.Path(env["SSH_ASKPASS"]).read_text())
+            self.assertEqual(len(temp), 2)
+            pwfile = pathlib.Path(env["UGN_ASKPASS_FILE"])
+            self.assertIn("S3cr3tPW", pwfile.read_text())
+            self.assertEqual(pwfile.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(pathlib.Path(env["SSH_ASKPASS"]).stat().st_mode & 0o777, 0o700)
+        finally:
+            self._clean(temp)
+
+    def test_private_key_plan_stays_batch(self):
+        cfg = dict(self.cfg, ssh_key="-----BEGIN KEY-----\nABC\n-----END KEY-----")
+        with patch.object(nas, "ssh_cli_state", return_value=self._cli()):
+            args, env, temp, error = nas._cli_plan(cfg, "df -kP", 8)
+        try:
+            self.assertEqual(error, "")
+            self.assertIn("-i", args)
+            self.assertIn("BatchMode=yes", args)
+            self.assertEqual(env, {})
+            self.assertEqual(len(temp), 1)
+        finally:
+            self._clean(temp)
+
+    def test_password_login_runs_and_cleans_temp_files(self):
+        class Done:
+            returncode = 0
+            stdout = b"UGN_OK\n"
+            stderr = b""
+
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "ssh_cli_state", return_value=self._cli()), \
+             patch.object(nas.subprocess, "run", return_value=Done()) as run:
+            ok, out, err = nas._run_remote(self.cfg, "echo UGN_OK", timeout=8)
+        self.assertTrue(ok)
+        self.assertIn("UGN_OK", out)
+        kwargs = run.call_args[1]
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertIn("SSH_ASKPASS", kwargs["env"])
+        self.assertNotIn("S3cr3tPW", repr(run.call_args[0][0]))
+        self.assertFalse(os.path.exists(kwargs["env"]["SSH_ASKPASS"]))
+        self.assertFalse(os.path.exists(kwargs["env"]["UGN_ASKPASS_FILE"]))
+
+    def test_password_is_scrubbed_from_cli_error(self):
+        class Done:
+            returncode = 255
+            stdout = b""
+            stderr = b"Permission denied (password S3cr3tPW)"
+
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "ssh_cli_state", return_value=self._cli()), \
+             patch.object(nas.subprocess, "run", return_value=Done()):
+            ok, _out, err = nas._run_remote(self.cfg, "echo UGN_OK", timeout=8)
+        self.assertFalse(ok)
+        self.assertNotIn("S3cr3tPW", err)
+        self.assertIn("***", err)
+
+    def test_paramiko_still_supports_password_directly(self):
+        fake = types.SimpleNamespace()
+        calls = {}
+
+        def connect(**kwargs):
+            calls.update(kwargs)
+
+        class FakeClient:
+            def set_missing_host_key_policy(self, policy):
+                pass
+
+            def connect(self, **kwargs):
+                connect(**kwargs)
+
+            def close(self):
+                pass
+
+        fake.SSHClient = FakeClient
+        fake.RSAKey = fake.Ed25519Key = fake.ECDSAKey = object()
+        fake.AutoAddPolicy = lambda: None
+        with patch.dict(sys.modules, {"paramiko": fake}):
+            client, error = nas._new_paramiko_client(self.cfg)
+        self.assertEqual(error, "")
+        self.assertIsNotNone(client)
+        self.assertEqual(calls["password"], "S3cr3tPW")
+        self.assertNotIn("pkey", calls)
 
 
 class TestCommandGuard(unittest.TestCase):

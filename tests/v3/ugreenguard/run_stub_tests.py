@@ -52,7 +52,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self):
         self.assertEqual(PLUGIN_ID, "UGreenGuard")
         self.assertEqual(PLUGIN_CLS.plugin_name, "绿联 NAS 守护")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "2.0.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "2.1.0")
         self.assertEqual(PLUGIN_CLS.plugin_author, "BackspaceM")
         self.assertEqual(PLUGIN_CLS.plugin_config_prefix, "ugreenguard_")
         self.assertEqual(PLUGIN_CLS.plugin_color, "#6366F1")
@@ -98,7 +98,7 @@ class TestContract(unittest.TestCase):
         }
         prefix = f"plugin/{PLUGIN_ID}/"
         clicks = cc.collect_click_events(self.plugin.get_page())
-        self.assertEqual(len(clicks), 6)
+        self.assertEqual(len(clicks), 7)
         for click in list(clicks) + cc.collect_page_clicks(PLUGIN_CLS()):
             self.assertTrue(click["api"].startswith(prefix), click["api"])
             action = click["api"][len(prefix):].split("?", 1)[0].split("/", 1)[0]
@@ -121,7 +121,7 @@ class TestContract(unittest.TestCase):
 
     def test_api_returns_three_part_envelope(self):
         for name in ("api_snapshot", "api_check", "api_refresh", "api_resume",
-                     "api_clear", "api_test_ssh"):
+                     "api_clear", "api_test_ssh", "api_test_notify"):
             result = getattr(self.plugin, name)()
             self.assertIsInstance(result, MODULE.Response)
             self.assertIsInstance(result.success, bool)
@@ -129,7 +129,8 @@ class TestContract(unittest.TestCase):
             self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
         snap = self.plugin.api_snapshot()
         for key in ("status", "hits", "log", "source", "mode", "ssh", "source_mode",
-                    "series", "age_seconds", "ssh_test", "probe", "actions", "poll_seconds"):
+                    "series", "age_seconds", "ssh_test", "probe", "actions", "poll_seconds",
+                    "notify", "notify_enabled", "notify_services"):
             self.assertIn(key, snap.data)
 
 
@@ -145,11 +146,15 @@ class TestEndpointErrors(unittest.TestCase):
             ("api_refresh", "_refresh_view", {}),
             ("api_clear", "save_data", {"confirm": "yes"}),
         ]
-        # ssh_diagnostics 在 nas 模块上，单独注入异常
-        with patch.object(NAS, "ssh_diagnostics", side_effect=RuntimeError("炸了")):
-            result = self.plugin.api_test_ssh()
-        self.assertIs(result.success, False)
-        self.assertIn("具体原因", result.message)
+        # ssh_diagnostics / notify.send 在子模块上，单独注入异常
+        for endpoint, target, exc in (
+            ("api_test_ssh", NAS, "ssh_diagnostics"),
+            ("api_test_notify", MODULE.notify, "send"),
+        ):
+            with patch.object(target, exc, side_effect=RuntimeError("炸了")):
+                result = getattr(self.plugin, endpoint)()
+            self.assertIs(result.success, False)
+            self.assertIn("具体原因", result.message)
         for name, broken, kwargs in cases:
             with self.subTest(endpoint=name):
                 with patch.object(self.plugin, broken, side_effect=RuntimeError("炸了")):
@@ -174,9 +179,10 @@ class TestEndpointErrors(unittest.TestCase):
         for value in ("text", 1, True, [{"x": 1}], {"status": 3, "hits": "bad"}):
             with self.subTest(value=value):
                 for key in ("ugn_snapshot", "ugn_series", "ugn_ssh_test",
-                            "ugn_log", "ugn_state"):
+                            "ugn_notify", "ugn_log", "ugn_state"):
                     self.plugin.save_data(key, value)
-                for name in ("api_snapshot", "api_refresh", "api_check", "api_test_ssh"):
+                for name in ("api_snapshot", "api_refresh", "api_check",
+                             "api_test_ssh", "api_test_notify"):
                     result = getattr(self.plugin, name)()
                     self.assertIsInstance(result, MODULE.Response)
                     self.assertIsInstance(result.message, str)
@@ -219,7 +225,7 @@ class TestPageAndForm(unittest.TestCase):
     def test_page_has_buttons_and_one_html_node(self):
         self.assertIsInstance(self.page, list)
         components = [item.get("component") for item in self.page]
-        self.assertEqual(components.count("VBtn"), 6)
+        self.assertEqual(components.count("VBtn"), 7)
         html_nodes = [item for item in self.page if item.get("html")]
         self.assertEqual(len(html_nodes), 1)
         self.assertIn("绿联 NAS 守护", html_nodes[0]["html"])
@@ -245,22 +251,26 @@ class TestPageAndForm(unittest.TestCase):
                     walk(value)
 
         walk(form)
-        self.assertEqual(len(controls), 15, f"设置项要精简，实际 {controls}")
-        self.assertEqual(controls.count("VSwitch"), 3)
+        self.assertEqual(len(controls), 18, f"设置项要精简，实际 {controls}")
+        self.assertEqual(controls.count("VSwitch"), 4)
         self.assertEqual(controls.count("VTextField"), 6)
         self.assertEqual(controls.count("VTextarea"), 1)
-        self.assertEqual(controls.count("VSelect"), 5)
+        self.assertEqual(controls.count("VSelect"), 7)
         # 老配置键仍然留在 defaults 里，升级不会丢设置
         self.assertTrue({
             "enabled", "source_mode", "ssh_host", "ssh_port", "ssh_user", "ssh_password",
-            "ssh_key", "ssh_sudo", "bridge_url", "status_file", "water_threshold",
-            "temp_threshold", "cpu_threshold", "mem_threshold", "mode", "poll_seconds",
-            "resume_scope", "interval_minutes", "watch_containers", "cooldown",
-            "allow_remote_action", "restart_containers", "alert_command",
+            "ssh_key", "ssh_sudo", "ssh_transport", "bridge_url", "status_file",
+            "water_threshold", "temp_threshold", "cpu_threshold", "mem_threshold",
+            "mode", "poll_seconds", "resume_scope", "interval_minutes",
+            "watch_containers", "cooldown", "allow_remote_action",
+            "restart_containers", "alert_command", "notify_enabled", "notify_channel",
         }.issubset(defaults))
         self.assertEqual(defaults["water_threshold"], 88)
         self.assertFalse(defaults["allow_remote_action"])
         self.assertEqual(defaults["mode"], "试运行")
+        self.assertTrue(defaults["notify_enabled"])
+        self.assertEqual(defaults["notify_channel"], "")
+        self.assertEqual(defaults["ssh_transport"], "自动")
 
     def test_form_source_mode_options_and_password_field(self):
         form, _ = PLUGIN_CLS().get_form()
@@ -282,7 +292,13 @@ class TestPageAndForm(unittest.TestCase):
         self.assertEqual(items, {"自动", "状态桥", "本地文件", "SSH", "容器自检"})
         self.assertEqual(models["ssh_password"].get("type"), "password")
         self.assertIn("不会写进日志或快照", models["ssh_password"]["hint"])
+        self.assertIn("不需要私钥", models["ssh_password"]["hint"])
         self.assertEqual(models["water_threshold"]["label"], "磁盘占用到多少就暂停")
+        self.assertEqual({item["value"] for item in models["ssh_transport"]["items"]},
+                         {"自动", "paramiko", "ssh 命令"})
+        self.assertIn("WebPush", {item["value"] for item in models["notify_channel"]["items"]})
+        self.assertIn("Telegram", {item["value"] for item in models["notify_channel"]["items"]})
+        self.assertIn("", {item["value"] for item in models["notify_channel"]["items"]})
 
     def test_get_service_registers_cron(self):
         services = PLUGIN_CLS().get_service()
@@ -341,7 +357,10 @@ class TestSSH(unittest.TestCase):
         plugin = PLUGIN_CLS()
         plugin.init_plugin({"source_mode": "自动", "ssh_host": "10.0.0.2",
                             "ssh_password": "S3cr3tPW", "bridge_url": "http://x/status"})
+        # 两条 SSH 实现都没有时，才该降级到状态桥
         with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(NAS, "ssh_cli_state", return_value={
+                 "available": False, "path": "", "sshpass": "", "reason": "没有 ssh 命令"}), \
              patch.object(NAS, "_read_bridge", return_value=raw):
             result = NAS.collect(plugin._cfg())
         self.assertEqual(result["source"], "状态桥")
@@ -349,6 +368,23 @@ class TestSSH(unittest.TestCase):
         self.assertEqual(result["ssh"]["reason"],
                          "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件")
         self.assertEqual(result["ssh"]["host"], "10.0.0.2")
+        self.assertNotIn("S3cr3tPW", repr(result["ssh"]))
+
+    def test_password_keeps_ssh_alive_without_paramiko(self):
+        raw = full_raw()
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"source_mode": "自动", "ssh_host": "10.0.0.2",
+                            "ssh_password": "S3cr3tPW"})
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(NAS, "ssh_cli_state", return_value={
+                 "available": True, "path": "/usr/bin/ssh",
+                 "sshpass": "/usr/bin/sshpass", "reason": ""}), \
+             patch.object(NAS, "_read_ssh", return_value=raw):
+            result = NAS.collect(plugin._cfg())
+        self.assertEqual(result["source"], "SSH")
+        self.assertIs(result["ssh"]["available"], True)
+        self.assertEqual(result["ssh"]["auth"], "密码")
+        self.assertIn("ssh 命令", result["ssh"]["transport"])
         self.assertNotIn("S3cr3tPW", repr(result["ssh"]))
 
     def test_paramiko_state_shape_when_missing(self):
@@ -682,6 +718,153 @@ class TestSSHTestEndpoint(unittest.TestCase):
         self.assertEqual(self.plugin.get_data("ugn_log")[0]["level"], "WARN")
 
 
+class TestNotificationBridge(unittest.TestCase):
+    """通知走 V3 宿主 post_message(channel, mtype, title, text)，试运行也要发。"""
+
+    class Recorder:
+        def __init__(self, fail_first=False, fail_all=False):
+            self.calls = []
+            self.fail_first = fail_first
+            self.fail_all = fail_all
+
+        def post_message(self, **kwargs):
+            self.calls.append(kwargs)
+            if self.fail_all or (self.fail_first and len(self.calls) == 1):
+                raise TypeError("unexpected keyword argument")
+
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+        self.notify = MODULE.notify
+
+    def test_message_kwargs_use_real_v3_enums(self):
+        class FakeEnum:
+            Plugin = "插件枚举"
+            WebPush = "WebPush 枚举"
+
+        with patch.object(self.notify, "enums", return_value=(FakeEnum, FakeEnum)):
+            kwargs = self.notify.message_kwargs("WebPush")
+        self.assertEqual(kwargs, {"mtype": "插件枚举", "channel": "WebPush 枚举"})
+
+    def test_default_channel_only_sends_mtype(self):
+        class FakeEnum:
+            Plugin = "插件枚举"
+
+        with patch.object(self.notify, "enums", return_value=(FakeEnum, FakeEnum)):
+            kwargs = self.notify.message_kwargs("")
+        self.assertEqual(kwargs, {"mtype": "插件枚举"})
+
+    def test_unknown_channel_is_ignored(self):
+        class FakeEnum:
+            Plugin = "插件枚举"
+
+        with patch.object(self.notify, "enums", return_value=(FakeEnum, FakeEnum)):
+            kwargs = self.notify.message_kwargs("NotAChannel")
+        self.assertEqual(kwargs, {"mtype": "插件枚举"})
+
+    def test_enums_missing_falls_back_to_no_kwargs(self):
+        with patch.object(self.notify, "enums", return_value=(None, None)):
+            self.assertEqual(self.notify.message_kwargs("WebPush"), {})
+
+    def test_send_passes_channel_and_mtype(self):
+        recorder = self.Recorder()
+        with patch.object(self.notify, "message_kwargs", return_value={
+                "mtype": "插件", "channel": "Telegram"}):
+            result = self.notify.send(recorder, "标题", "正文", "Telegram")
+        self.assertTrue(result["ok"])
+        self.assertEqual(recorder.calls[0]["mtype"], "插件")
+        self.assertEqual(recorder.calls[0]["channel"], "Telegram")
+        self.assertEqual(recorder.calls[0]["title"], "标题")
+        self.assertEqual(result["channel_label"], "Telegram")
+
+    def test_send_falls_back_to_plain_call(self):
+        recorder = self.Recorder(fail_first=True)
+        with patch.object(self.notify, "message_kwargs", return_value={"mtype": "插件"}):
+            result = self.notify.send(recorder, "标题", "正文")
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(recorder.calls), 2)
+        self.assertEqual(set(recorder.calls[1]), {"title", "text"})
+        self.assertIn("回退", result["via"])
+
+    def test_send_reports_failure_and_missing_hook(self):
+        recorder = self.Recorder(fail_all=True)
+        with patch.object(self.notify, "message_kwargs", return_value={}):
+            result = self.notify.send(recorder, "标题", "正文")
+        self.assertFalse(result["ok"])
+        self.assertIn("简版也失败", result["error"])
+        self.assertFalse(self.notify.send(object(), "标题", "正文")["ok"])
+
+    def test_services_never_raises(self):
+        self.assertIsInstance(self.notify.services(), list)
+
+    def test_test_notify_endpoint_saves_receipt(self):
+        result = self.plugin.api_test_notify()
+        self.assertTrue(result.success)
+        self.assertTrue(result.data["notify_test"]["test"])
+        self.assertEqual(self.plugin.get_data("ugn_notify")["test"], True)
+        self.assertIn("通知测试", self.plugin.get_data("ugn_log")[0]["message"])
+        self.assertIn("通知", result.data["html"])
+
+    def test_trial_mode_sends_notification(self):
+        """用户明确要求：试运行时也要发通知，用来验证通知模块。"""
+        self.plugin.init_plugin({"mode": "试运行", "cooldown": 0})
+        high = full_raw()
+        high["volumes"][0]["percent"] = 95.0
+        with patch.object(NAS, "collect", return_value=bridge_collected(high)), \
+             patch.object(self.notify, "send", return_value={
+                 "ok": True, "via": "post_message", "error": ""}) as send:
+            self.plugin.run_check("试运行巡检")
+        self.assertEqual(send.call_count, 1)
+        self.assertIn("试运行", send.call_args[0][2])
+        self.assertTrue(self.plugin.get_data("ugn_notify")["ok"])
+
+    def test_remind_only_mode_sends_notification(self):
+        self.plugin.init_plugin({"mode": "仅提醒", "cooldown": 0})
+        high = full_raw()
+        high["volumes"][0]["percent"] = 95.0
+        with patch.object(NAS, "collect", return_value=bridge_collected(high)), \
+             patch.object(self.notify, "send", return_value={
+                 "ok": True, "via": "post_message", "error": ""}) as send:
+            self.plugin.run_check("仅提醒巡检")
+        self.assertEqual(send.call_count, 1)
+
+    def test_notification_can_be_turned_off(self):
+        self.plugin.init_plugin({"mode": "试运行", "cooldown": 0, "notify_enabled": False})
+        high = full_raw()
+        high["volumes"][0]["percent"] = 95.0
+        with patch.object(NAS, "collect", return_value=bridge_collected(high)), \
+             patch.object(self.notify, "send", side_effect=AssertionError("不该发通知")):
+            self.plugin.run_check("关通知")
+        self.assertEqual(self.plugin.get_data("ugn_notify"), None)
+
+    def test_channel_setting_is_forwarded(self):
+        self.plugin.init_plugin({"notify_channel": "WebPush"})
+        result = self.plugin.api_test_notify()
+        self.assertEqual(result.data["notify_test"]["channel"], "WebPush")
+        self.assertEqual(self.plugin.get_data("ugn_notify")["channel_label"], "WebPush 浏览器推送")
+
+    def test_failed_notification_shows_on_page(self):
+        with patch.object(self.notify, "send", return_value={
+                "ok": False, "error": "宿主没有 post_message", "via": ""}):
+            result = self.plugin.api_test_notify()
+        self.assertFalse(result.data["notify_test"]["ok"])
+        self.assertEqual(self.plugin.get_data("ugn_log")[0]["level"], "ERROR")
+        html = RENDERER.render(result.data)
+        self.assertIn("调用失败", html)
+        self.assertIn("宿主没有 post_message", html)
+
+    def test_notify_block_escapes_dynamic_text(self):
+        dirty = "<img src=x onerror=alert(1)>"
+        view = self.plugin.api_snapshot().data
+        view["notify"] = {"ok": False, "at": "10:00:00", "channel_label": dirty,
+                          "via": "", "error": dirty, "test": True}
+        view["notify_services"] = [{"name": dirty, "type": "微信", "state": "启用"}]
+        html = RENDERER.render(view)
+        self.assertNotIn(dirty, html)
+        self.assertIn("&lt;img", html)
+        for marker in ("<script", "onclick=", "onload=", "javascript:"):
+            self.assertNotIn(marker, html, marker)
+
+
 class TestRealHostSignature(unittest.TestCase):
     """宿主 _PluginBase.get_data(key=None, plugin_id=None) 没有 default 参数，
     数据不存在时返回 None；桩里的 get_data(key, default) 会把这个 bug 盖住。"""
@@ -694,8 +877,9 @@ class TestRealHostSignature(unittest.TestCase):
 
     def test_all_endpoints_work_when_nothing_is_stored(self):
         for name, kwargs in (("api_snapshot", {}), ("api_check", {}),
-                             ("api_test_ssh", {}), ("api_resume", {}),
-                             ("api_refresh", {}), ("api_clear", {"confirm": "yes"})):
+                             ("api_test_ssh", {}), ("api_test_notify", {}),
+                             ("api_resume", {}), ("api_refresh", {}),
+                             ("api_clear", {"confirm": "yes"})):
             with self.subTest(name=name):
                 result = getattr(self.plugin, name)(**kwargs)
                 self.assertIsInstance(result, MODULE.Response)
@@ -717,7 +901,8 @@ class TestButtonWording(unittest.TestCase):
     def test_buttons_are_short_and_plain(self):
         page = PLUGIN_CLS().get_page()
         labels = [item.get("text") for item in page if item.get("component") == "VBtn"]
-        self.assertEqual(labels, ["立即巡检", "刷新页面", "测试连接", "查看快照", "恢复下载", "清空日志"])
+        self.assertEqual(labels, ["立即巡检", "刷新页面", "测试连接", "测试通知",
+                                  "查看快照", "恢复下载", "清空日志"])
         for label in labels:
             self.assertLessEqual(len(label), 5)
             for word in ("第一步", "三步走", "智能", "一键"):
