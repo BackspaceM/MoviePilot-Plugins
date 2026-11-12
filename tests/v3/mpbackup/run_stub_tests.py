@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import pathlib
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 PLUGIN_DIR = ROOT / "plugins.v3" / "mpbackup"
@@ -21,6 +23,55 @@ cc.install_stubs()
 MODULE, PLUGIN_CLS, PLUGIN_ID = cc.load_plugin(PLUGIN_DIR)
 BACKUP = MODULE.backup
 RENDERER = MODULE.renderer
+RESTORE = MODULE.restore
+
+
+def make_data_snapshot(directory: pathlib.Path, name: str) -> pathlib.Path:
+    """造一份各类都有内容的快照，用来测预览和试运行清单。"""
+    path = directory / name
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("manifest.json", json.dumps({
+            "schema": 2, "contains_secrets": True, "counts": {"users": 2},
+        }))
+        zf.writestr("users.json", json.dumps([
+            {"name": "u1", "hashed_password": "$2b$abc"},
+            {"name": "<img src=x onerror=alert(1)>", "email": "a@b.c"},
+        ]))
+        zf.writestr("subscriptions.json", json.dumps([
+            {"name": "A", "media_source": "tmdb", "media_id": 1, "season": True},
+        ]))
+        zf.writestr("subscription_history.json", "[]")
+        zf.writestr("sites.json", json.dumps([{"name": "s", "domain": "d.com"}]))
+        zf.writestr("site_secrets.json", json.dumps([
+            {"domain": "d.com", "cookie": "C", "ua": "U", "apikey": "K", "token": "T"},
+        ]))
+        zf.writestr("system_config.json", json.dumps({"Downloaders": {"a": 1}}))
+        zf.writestr("plugin_configs.json", json.dumps([
+            {"instance_id": "p1", "config_data": {"x": 1}},
+        ]))
+        zf.writestr("download_history.json", json.dumps([
+            {"download_hash": "h1", "title": "t"},
+        ]))
+        zf.writestr("transfer_history.json", "[]")
+        zf.writestr("services.json", "[]")
+        zf.writestr("settings.json", "{}")
+        zf.writestr("plugin_data/", "")
+        zf.writestr("plugin_data/demo/k.json", json.dumps({"v": 1}))
+    return path
+
+
+def assert_json_safe(node) -> None:
+    """页面组件只能由 dict/list/标量组成，不能混进 datetime/Path/set/tuple/对象。"""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            assert isinstance(key, str)
+            assert not isinstance(value, (datetime.datetime, pathlib.Path, set, tuple))
+            assert_json_safe(value)
+    elif isinstance(node, list):
+        for value in node:
+            assert_json_safe(value)
+    else:
+        assert isinstance(node, (str, int, float, bool, type(None))), type(node)
 
 
 class TestContract(unittest.TestCase):
@@ -37,7 +88,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self) -> None:
         self.assertEqual(PLUGIN_ID, "MPBackup")
         expected = {
-            "plugin_name": "MP 备份迁移", "plugin_version": "1.0.0",
+            "plugin_name": "MP 备份迁移", "plugin_version": "1.1.0",
             "plugin_author": "BackspaceM", "plugin_config_prefix": "mpbackup_",
             "plugin_color": "#6366F1", "system_version": ">=3.0.0", "plugin_order": 95,
         }
@@ -82,10 +133,19 @@ class TestContract(unittest.TestCase):
             self.assertIn(action, declared, click["api"])
             self.assertIn(click["method"].upper(), declared[action], click["api"])
             actions.add(action)
-        for action in ("backup", "compare", "restore-guide", "clean", "refresh"):
+        for action in ("backup", "compare", "restore-guide", "clean", "refresh",
+                       "import-preview", "import", "import-guide"):
             self.assertIn(action, actions)
         for api in self.plugin.get_api():
             self.assertEqual(api.get("auth"), "bear")
+
+    def test_new_endpoints_are_relative_and_bear(self) -> None:
+        paths = {str(a["path"]) for a in self.plugin.get_api()}
+        for path in ("/import-preview", "/import", "/import-guide"):
+            self.assertIn(path, paths)
+            self.assertTrue(path.startswith("/"))
+        for api in self.plugin.get_api():
+            self.assertFalse(str(api["path"]).startswith("plugin/"))
 
     def test_button_text_is_toplevel_not_in_props(self) -> None:
         def walk(node):
@@ -109,9 +169,41 @@ class TestContract(unittest.TestCase):
         self.assertIn("MP 备份迁移", divs[0]["html"])
         self.assertIn("mpbk-grid", divs[0]["html"])
 
+    def test_page_components_are_json_safe(self) -> None:
+        assert_json_safe(self.plugin.get_page())
+
+    def test_get_page_does_not_touch_host_or_disk(self) -> None:
+        with mock.patch.object(BACKUP, "list_snapshots",
+                               side_effect=AssertionError("页面期不该读目录")), \
+             mock.patch.object(BACKUP, "load_manifest",
+                               side_effect=AssertionError("页面期不该读 zip")), \
+             mock.patch.object(BACKUP, "compare_snapshots",
+                               side_effect=AssertionError("页面期不该对比")), \
+             mock.patch.object(BACKUP, "host_ready",
+                               side_effect=AssertionError("页面期不该碰宿主")):
+            page = self.plugin.get_page()
+        self.assertTrue(page)
+        assert_json_safe(page)
+
+    def test_get_page_and_form_never_raise_on_bad_cache(self) -> None:
+        self.plugin._cache = {
+            "snapshots": [{"name": pathlib.Path("x.zip"), "mtime": {1, 2},
+                           "size_text": object(), "count": 3}],
+            "sources": {"users": datetime.datetime.now()},
+            "diff": {"sections": {"subscriptions": {"added": [{"x": object()}]}}},
+        }
+        page = self.plugin.get_page()
+        self.assertIsInstance(page, list)
+        self.assertTrue(page)
+        with mock.patch.object(BACKUP, "CRON_CHOICES", None):
+            form, defaults = self.plugin.get_form()
+        self.assertIsInstance(form, list)
+        self.assertIsInstance(defaults, dict)
+
     def test_api_returns_three_part_envelope(self) -> None:
         for name in ("api_snapshot", "api_backup", "api_compare", "api_restore_guide",
-                     "api_clean", "api_refresh"):
+                     "api_clean", "api_refresh", "api_import_preview", "api_import",
+                     "api_import_guide"):
             result = getattr(self.plugin, name)()
             self.assertTrue(hasattr(result, "success"))
             self.assertIsInstance(result.message, str)
@@ -139,9 +231,10 @@ class TestContract(unittest.TestCase):
                     walk(value)
 
         walk(form)
-        self.assertLessEqual(len(controls), 6, f"设置项应保持精简，实际为 {controls}")
+        self.assertLessEqual(len(controls), 8, f"设置项应精简，实际为 {controls}")
         self.assertEqual(set(defaults),
-                         {"enabled", "backup_dir", "keep", "schedule", "sections", "notify"})
+                         {"enabled", "backup_dir", "keep", "schedule", "sections",
+                          "notify", "include_secrets", "import_strategy"})
 
 
 class TestBackupFiles(unittest.TestCase):
@@ -158,25 +251,88 @@ class TestBackupFiles(unittest.TestCase):
         self.data_tmp.cleanup()
 
     def test_offline_snapshot_is_structurally_complete(self) -> None:
-        # 全选，好让每个宿主来源都真正尝试一次，离线时统一记成 unavailable
         result = BACKUP.write_snapshot(self.dir, str(self.data),
                                        list(BACKUP.TOGGLEABLE), 3)
         path = self.dir / result["file"]
         self.assertTrue(path.is_file())
         with zipfile.ZipFile(path) as zf:
             names = set(zf.namelist())
-        for name in ("manifest.json", "settings.json", "subscriptions.json",
-                     "download_history.json", "transfer_history.json", "sites.json",
-                     "services.json", "plugins.json"):
-            self.assertIn(name, names)
-        self.assertIn("plugin_data/", names)
-
-        sources = result["manifest"]["sources"]
         for name in BACKUP.ALL_SOURCES:
-            self.assertIn(name, sources)
+            if name == "plugin_data":
+                self.assertIn("plugin_data/", names)
+            else:
+                self.assertIn(name + ".json", names)
+        self.assertIn("manifest.json", names)
+        self.assertNotIn("site_secrets.json", names)
+
+        manifest = result["manifest"]
+        self.assertEqual(manifest["schema"], 2)
+        self.assertIn("version", manifest)
+        self.assertFalse(manifest["contains_secrets"])
+        for name in BACKUP.ALL_SOURCES:
+            self.assertIn(name, manifest["sources"])
+            self.assertIn(name, manifest["counts"])
+        self.assertIn("site_secrets", manifest["counts"])
+
+        sources = manifest["sources"]
         for name in BACKUP.HOST_SOURCES:
             self.assertEqual(sources[name]["status"], "unavailable", name)
             self.assertTrue(sources[name]["reason"])
+
+    def test_new_sections_have_own_json(self) -> None:
+        result = BACKUP.write_snapshot(self.dir, str(self.data),
+                                       list(BACKUP.DEFAULT_SECTIONS), 3)
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            names = set(zf.namelist())
+        for name in ("users.json", "subscription_history.json", "plugin_configs.json",
+                     "system_config.json", "download_history.json", "transfer_history.json"):
+            self.assertIn(name, names)
+
+    def test_history_defaults_are_full(self) -> None:
+        self.assertIn("download_history", BACKUP.DEFAULT_SECTIONS)
+        self.assertIn("transfer_history", BACKUP.DEFAULT_SECTIONS)
+        self.assertEqual(BACKUP.HISTORY_LIMIT, 5000)
+        self.assertEqual(BACKUP.SUBSCRIPTION_HISTORY_LIMIT, 2000)
+
+    def test_secrets_switch_off_by_default(self) -> None:
+        result = BACKUP.write_snapshot(self.dir, str(self.data),
+                                       list(BACKUP.DEFAULT_SECTIONS), 3)
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            self.assertNotIn("site_secrets.json", zf.namelist())
+        self.assertFalse(result["manifest"]["contains_secrets"])
+
+    def test_secrets_switch_on_writes_plaintext_credentials(self) -> None:
+        rows = [{"name": "s", "domain": "d.com", "url": "u", "pri": 1,
+                 "is_active": True, "cookie": "COOKIE123", "ua": "UA",
+                 "apikey": "AK", "token": "TK"}]
+        with mock.patch.object(BACKUP, "host_ready", return_value=True), \
+             mock.patch.object(BACKUP, "_sites", return_value=rows):
+            result = BACKUP.write_snapshot(self.dir, str(self.data),
+                                           list(BACKUP.DEFAULT_SECTIONS), 3, True)
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            self.assertIn("site_secrets.json", zf.namelist())
+            sites = json.loads(zf.read("sites.json"))
+            secrets = json.loads(zf.read("site_secrets.json"))
+        self.assertNotIn("cookie", sites[0])
+        self.assertNotIn("token", sites[0])
+        self.assertNotIn("COOKIE123", json.dumps(sites))
+        self.assertEqual(secrets[0]["cookie"], "COOKIE123")
+        self.assertEqual(secrets[0]["token"], "TK")
+        self.assertTrue(result["manifest"]["contains_secrets"])
+        self.assertGreaterEqual(result["manifest"]["counts"]["site_secrets"], 1)
+
+    def test_users_password_hash_kept_plain(self) -> None:
+        with mock.patch.object(BACKUP, "host_ready", return_value=True), \
+             mock.patch.object(BACKUP, "_users", return_value=[
+                 {"id": 1, "name": "admin", "hashed_password": "$2b$abc",
+                  "otp_secret": "S"}]):
+            result = BACKUP.write_snapshot(self.dir, str(self.data),
+                                           list(BACKUP.DEFAULT_SECTIONS), 3)
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            users = json.loads(zf.read("users.json"))
+        self.assertEqual(users[0]["hashed_password"], "$2b$abc")
+        self.assertEqual(users[0]["otp_secret"], "S")
+        self.assertNotIn("***", json.dumps(users[0]))
 
     def test_plugin_data_is_masked_and_size_limited(self) -> None:
         (self.data / "one.json").write_text(
@@ -274,13 +430,32 @@ class TestBackupFiles(unittest.TestCase):
             "offline": True, "enabled": True, "generated_at": "2026-01-01 00:00:00",
             "backup_dir": "/tmp", "cron_label": "每天凌晨 4 点", "keep": 7,
             "sections": [], "sources": {}, "diff": None, "diff_a": "", "diff_b": "",
-            "guide": None, "total_size_text": "1.0 KB",
+            "guide": None, "total_size_text": "1.0 KB", "contains_secrets": True,
             "snapshots": [{"name": "<img src=x onerror=alert(1)>.zip",
                            "size_text": "1.0 KB", "mtime": "2026-01-01 00:00:00"}],
+            "preview": {
+                "ok": True, "file": "<script>bad</script>.zip", "schema": 2,
+                "message": "<b>预览</b>", "contains_secrets": True,
+                "sections": [{"label": "<img src=y>", "total": 1, "current": "无法核对",
+                              "will_add": 1, "will_skip": 0, "will_overwrite": 0,
+                              "status": "无法核对"}],
+            },
+            "restore": {
+                "mode": "<i>试运行</i>", "dry_run": True, "strategy": "skip",
+                "message": "<script>alert(1)</script>",
+                "totals": {"planned": 1},
+                "log": ["[用户] 试运行 · <img src=z> · 将新增"],
+            },
         }
         html = RENDERER.render(state)
-        self.assertNotIn("<img src=x", html)
+        for bad in ("<img src=x", "<script>bad", "<b>预览</b>", "<img src=y>",
+                    "<i>试运行</i>", "<script>alert(1)", "<img src=z>"):
+            self.assertNotIn(bad, html)
         self.assertIn("&lt;img", html)
+        self.assertIn("&lt;script", html)
+        self.assertIn("mpbk-grid", html)
+        self.assertIn("导入预览", html)
+        self.assertIn("导入结果", html)
 
 
 class TestApiFlow(unittest.TestCase):
@@ -323,6 +498,145 @@ class TestApiFlow(unittest.TestCase):
         refresh = self.plugin.api_refresh()
         self.assertTrue(refresh.success)
         self.assertIn("html", refresh.data)
+
+    def test_import_preview_dry_run_and_execute(self) -> None:
+        name = self.plugin.api_backup().data["file"]
+
+        preview = self.plugin.api_import_preview({"name": name})
+        self.assertTrue(preview.success)
+        self.assertIn("preview", preview.data)
+        self.assertEqual(preview.data["preview"]["schema"], 2)
+        self.assertTrue(preview.data["preview"]["sections"])
+
+        dry = self.plugin.api_import({"name": name, "dry_run": True})
+        self.assertTrue(dry.success)
+        self.assertTrue(dry.data["restore"]["dry_run"])
+        self.assertEqual(dry.data["restore"]["mode"], "试运行")
+
+        run = self.plugin.api_import({
+            "name": name, "dry_run": False, "confirm": RESTORE.CONFIRM,
+            "strategy": "skip", "sections": list(RESTORE.IMPORT_SECTIONS),
+        })
+        self.assertTrue(run.success)
+        self.assertFalse(run.data["restore"]["dry_run"])
+        statuses = {sec["status"] for sec in run.data["restore"]["sections"]}
+        self.assertEqual(statuses, {"unavailable"})
+
+        self.assertIn("html", preview.data)
+        self.assertIn("html", run.data)
+
+    def test_import_bad_zip_is_tolerated(self) -> None:
+        (self.dir / "mpbackup_bad.zip").write_bytes(b"not a zip")
+        preview = self.plugin.api_import_preview({"name": "mpbackup_bad.zip"})
+        self.assertFalse(preview.success)
+        run = self.plugin.api_import({"name": "mpbackup_bad.zip",
+                                      "dry_run": False, "confirm": RESTORE.CONFIRM})
+        self.assertFalse(run.success)
+
+    def test_import_unknown_name_rejected(self) -> None:
+        preview = self.plugin.api_import_preview({"name": "../evil.zip"})
+        self.assertFalse(preview.success)
+
+    def test_import_guide(self) -> None:
+        result = self.plugin.api_import_guide()
+        self.assertTrue(result.success)
+        self.assertIn("试运行", result.data["text"])
+        self.assertIn("html", result.data)
+
+
+class TestRestore(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.path = make_data_snapshot(self.dir, "mpbackup_20260101_000000_000001.zip")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_preview_is_readonly_and_structured(self) -> None:
+        result = RESTORE.preview(self.path)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["schema"], 2)
+        self.assertEqual(len(result["sections"]), len(RESTORE.IMPORT_SECTIONS))
+        for sec in result["sections"]:
+            for field in ("total", "current", "will_add", "will_skip",
+                          "will_overwrite", "status"):
+                self.assertIn(field, sec)
+            self.assertEqual(sec["status"], "无法核对")
+        self.assertIn("全程只读", result["message"])
+
+    def test_preview_totals_match_content(self) -> None:
+        result = RESTORE.preview(self.path)
+        users = next(s for s in result["sections"] if s["key"] == "users")
+        self.assertEqual(users["total"], 2)
+        self.assertEqual(users["will_add"], 2)
+
+    def test_dry_run_never_writes(self) -> None:
+        with mock.patch.object(RESTORE, "_write_section",
+                               side_effect=AssertionError("试运行不该写库")):
+            result = RESTORE.restore(self.path, dry_run=True)
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["mode"], "试运行")
+        self.assertFalse(result["confirm_ok"])
+        self.assertTrue(result["log"], "试运行要列逐条清单")
+        for sec in result["sections"]:
+            self.assertEqual(sec["status"], "dry_run")
+            self.assertEqual(sec["added"], 0)
+
+    def test_execute_requires_confirm(self) -> None:
+        without = RESTORE.restore(self.path, dry_run=False, confirm="")
+        self.assertTrue(without["dry_run"])
+        self.assertFalse(without["confirm_ok"])
+        wrong = RESTORE.restore(self.path, dry_run=False, confirm="随便")
+        self.assertTrue(wrong["dry_run"])
+        with_word = RESTORE.restore(self.path, dry_run=False, confirm=RESTORE.CONFIRM)
+        self.assertFalse(with_word["dry_run"])
+        self.assertTrue(with_word["confirm_ok"])
+
+    def test_execute_in_stub_goes_unavailable_without_crash(self) -> None:
+        result = RESTORE.restore(self.path, dry_run=False, confirm=RESTORE.CONFIRM)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "执行")
+        statuses = {sec["status"] for sec in result["sections"]}
+        self.assertEqual(statuses, {"unavailable"})
+        self.assertTrue(result["log"])
+
+    def test_section_failure_does_not_stop_others(self) -> None:
+        with mock.patch.object(RESTORE, "_host_ready", return_value=True), \
+             mock.patch.object(RESTORE, "_write_users",
+                               side_effect=RuntimeError("boom")):
+            result = RESTORE.restore(self.path, sections=["users", "sites"],
+                                     dry_run=False, confirm=RESTORE.CONFIRM)
+        self.assertEqual(len(result["sections"]), 2)
+        self.assertEqual(result["sections"][0]["status"], "error")
+        self.assertNotEqual(result["sections"][1]["status"], "error")
+
+    def test_preview_bad_zip_and_missing_items(self) -> None:
+        bad = self.dir / "mpbackup_bad.zip"
+        bad.write_bytes(b"nope")
+        self.assertFalse(RESTORE.preview(bad)["ok"])
+
+        partial = self.dir / "mpbackup_partial.zip"
+        with zipfile.ZipFile(partial, "w") as zf:
+            zf.writestr("users.json", json.dumps([{"name": "a"}]))
+        got = RESTORE.preview(partial)
+        self.assertTrue(got["ok"])
+        users = next(s for s in got["sections"] if s["key"] == "users")
+        sites = next(s for s in got["sections"] if s["key"] == "sites")
+        self.assertEqual(users["total"], 1)
+        self.assertEqual(sites["total"], 0)
+
+    def test_restore_bad_zip_is_reported(self) -> None:
+        bad = self.dir / "mpbackup_bad.zip"
+        bad.write_bytes(b"nope")
+        result = RESTORE.restore(bad, dry_run=False, confirm=RESTORE.CONFIRM)
+        self.assertFalse(result["ok"])
+        self.assertIn("快照打不开", result["message"])
+
+    def test_import_guide_text(self) -> None:
+        text = RESTORE.import_guide("overwrite")
+        self.assertIn("覆盖已存在", text)
+        self.assertIn(RESTORE.CONFIRM, text)
 
 
 def main() -> int:

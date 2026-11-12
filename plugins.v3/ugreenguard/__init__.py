@@ -82,7 +82,7 @@ class UGreenGuard(_PluginBase):
         "可切到自动处置去暂停或恢复下载。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "ugreenguard_"
@@ -124,6 +124,9 @@ class UGreenGuard(_PluginBase):
     def get_state(self) -> bool:
         return self._enabled
 
+    def stop_service(self) -> None:
+        return None
+
     def _cfg(self) -> Dict[str, Any]:
         return {
             "enabled": self._enabled,
@@ -144,8 +147,8 @@ class UGreenGuard(_PluginBase):
         try:
             from apscheduler.triggers.cron import CronTrigger
             trigger = CronTrigger.from_crontab(expr)
-        except Exception:  # 没有调度器时至少把巡检表达式留着
-            trigger = expr
+        except Exception:
+            return []
         return [{
             "id": "UGreenGuard",
             "name": "绿联 NAS 守护 · 周期巡检",
@@ -158,6 +161,13 @@ class UGreenGuard(_PluginBase):
         self.run_check(trigger="定时巡检")
 
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        try:
+            return self._form()
+        except Exception:
+            return [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                     "text": "配置暂时读不出来，插件还是能跑；重开一次页面再试。"}], {}
+
+    def _form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         def col(cols: int, md: int, component: Dict[str, Any]) -> Dict[str, Any]:
             return {"component": "VCol", "props": {"cols": cols, "md": md}, "content": [component]}
 
@@ -253,8 +263,6 @@ class UGreenGuard(_PluginBase):
         return self._payload_from(self._refresh_view(), "页面已刷新")
 
     def get_page(self) -> List[Dict[str, Any]]:
-        self._ensure_snapshot()
-        data = self._view()
         prefix = f"plugin/{self.__class__.__name__}/"
 
         def button(text: str, icon: str, action: str, method: str,
@@ -277,7 +285,13 @@ class UGreenGuard(_PluginBase):
             button("恢复下载", "mdi-play-outline", "resume", "post", "success"),
             button("清空日志", "mdi-delete-outline", "clear", "post", "warning", {"confirm": "yes"}),
         ]
-        return buttons + [{"component": "div", "props": {"class": "ugn-root"}, "html": renderer.render(data)}]
+        try:
+            body: Dict[str, Any] = {"component": "div", "props": {"class": "ugn-root"},
+                                    "html": renderer.render(self._view())}
+        except Exception:
+            body = {"component": "div", "props": {"class": "ugn-root"},
+                    "html": "<div class='ugn'>已装好，点「立即巡检」读一次 NAS 状态。</div>"}
+        return buttons + [body]
 
     # 巡检与处置
 
@@ -435,9 +449,8 @@ class UGreenGuard(_PluginBase):
         return self._view(status=status, hits=hits, collected=collected)
 
     def _ensure_snapshot(self) -> None:
-        snap = self.get_data(_SNAPSHOT_KEY)
-        if not isinstance(snap, dict) or not snap:
-            self.run_check(trigger="打开页面")
+        # 页面加载不做采集，状态一律等用户点巡检或定时任务来更新
+        return None
 
     def _view(self, status: Any = None, hits: Any = None,
               collected: Any = None) -> Dict[str, Any]:

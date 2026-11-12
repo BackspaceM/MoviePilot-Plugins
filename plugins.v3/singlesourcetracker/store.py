@@ -1,4 +1,4 @@
-"""绑定表、订阅站点范围和下载记录的读写。"""
+"""订阅、下载记录和站点范围的读写，外加一轮巡检。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ import datetime
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import fingerprint
+from . import rules
 
-BINDINGS_KEY = "sst_bindings"
-LAST_KEY = "sst_last"
+SNAPSHOT_KEY = "sst_snapshot"
+BINDINGS_KEY = "sst_site_backup"
 LOG_KEY = "sst_log"
+TEMPLATE_KEY = "sst_template"
 
 
 def _getter(row: Any):
@@ -33,24 +34,41 @@ def _as_list(value: Any) -> List[Any]:
     return []
 
 
-def bindings(plugin: Any) -> List[Dict[str, Any]]:
-    raw = plugin.get_data(BINDINGS_KEY, [])
-    if not isinstance(raw, list):
-        return []
-    return [dict(item) for item in raw if isinstance(item, dict)]
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return str(value)
 
 
-def save_bindings(plugin: Any, items: List[Dict[str, Any]]) -> None:
-    plugin.save_data(BINDINGS_KEY, list(items))
+def bindings(plugin: Any) -> Dict[str, Any]:
+    raw = plugin.get_data(BINDINGS_KEY, {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def save_bindings(plugin: Any, items: Dict[str, Any]) -> None:
+    plugin.save_data(BINDINGS_KEY, _jsonable(items))
 
 
 def last_snapshot(plugin: Any) -> Dict[str, Any]:
-    raw = plugin.get_data(LAST_KEY, {})
+    raw = plugin.get_data(SNAPSHOT_KEY, {})
     return dict(raw) if isinstance(raw, dict) else {}
 
 
 def save_snapshot(plugin: Any, data: Dict[str, Any]) -> None:
-    plugin.save_data(LAST_KEY, data)
+    plugin.save_data(SNAPSHOT_KEY, _jsonable(data))
+
+
+def template(plugin: Any) -> str:
+    raw = plugin.get_data(TEMPLATE_KEY, "")
+    return str(raw) if isinstance(raw, str) else ""
+
+
+def save_template(plugin: Any, text: str) -> None:
+    plugin.save_data(TEMPLATE_KEY, str(text))
 
 
 def log_lines(plugin: Any, limit: int = 40) -> List[str]:
@@ -59,9 +77,8 @@ def log_lines(plugin: Any, limit: int = 40) -> List[str]:
 
 
 def append_log(plugin: Any, text: str, limit: int = 40) -> None:
-    lines = log_lines(plugin, limit)
     stamp = datetime.datetime.now().strftime("%m-%d %H:%M")
-    plugin.save_data(LOG_KEY, [f"{stamp} {text}"] + lines[: max(0, limit - 1)])
+    plugin.save_data(LOG_KEY, [f"{stamp} {text}"] + log_lines(plugin, limit)[: max(0, limit - 1)])
 
 
 def site_options() -> List[Dict[str, Any]]:
@@ -78,24 +95,21 @@ def site_options() -> List[Dict[str, Any]]:
         sid = get("id")
         if not name or sid is None:
             continue
-        out.append({
-            "id": sid,
-            "name": name,
-            "domain": str(get("domain") or "").strip(),
-            "pri": get("pri") or 0,
-        })
+        out.append({"id": sid, "name": name,
+                    "domain": str(get("domain") or "").strip()})
     return out
 
 
 def find_site(sites: List[Dict[str, Any]], value: Any) -> Optional[Dict[str, Any]]:
-    text = str(value or "").strip()
+    text = str(value or "").strip().lower()
     if not text:
         return None
     for site in sites:
-        if text in (str(site.get("id")), str(site.get("name")), str(site.get("domain"))):
+        if text in (str(site.get("id")), str(site.get("name") or "").lower(),
+                    str(site.get("domain") or "").lower()):
             return site
     for site in sites:
-        if text.lower() in str(site.get("name") or "").lower():
+        if str(site.get("name") or "").lower().find(text) >= 0:
             return site
     return None
 
@@ -121,14 +135,13 @@ def subscriptions(max_pages: int = 10) -> List[Dict[str, Any]]:
             if sid is None:
                 continue
             out.append({
-                "id": sid,
+                "id": _jsonable(sid),
                 "name": str(get("name") or "").strip(),
-                "season": get("season"),
+                "season": _jsonable(get("season")),
                 "type": str(get("type") or "").strip(),
                 "state": str(get("state") or "").strip(),
-                "sites": _as_list(get("sites")),
-                "total_episode": get("total_episode"),
-                "lack_episode": get("lack_episode"),
+                "sites": _jsonable(_as_list(get("sites"))),
+                "lack_episode": _jsonable(get("lack_episode")),
             })
         total = int(getattr(page, "total", 0) or 0)
         if (total and len(out) >= total) or len(items) < 200:
@@ -137,7 +150,7 @@ def subscriptions(max_pages: int = 10) -> List[Dict[str, Any]]:
     return out
 
 
-def downloads(max_items: int = 2000) -> List[Dict[str, Any]]:
+def downloads(max_items: int = 3000) -> List[Dict[str, Any]]:
     try:
         from app.sdk import queries
     except Exception:
@@ -162,7 +175,6 @@ def downloads(max_items: int = 2000) -> List[Dict[str, Any]]:
                 "torrent_site": str(get("torrent_site") or "").strip(),
                 "download_hash": str(get("download_hash") or "").strip(),
                 "downloader": str(get("downloader") or "").strip(),
-                "media_id": str(get("media_id") or "").strip(),
                 "date": str(get("date") or "").strip(),
             })
         total = int(getattr(page, "total", 0) or 0)
@@ -184,113 +196,154 @@ def set_sites(sid: Any, sites: Any) -> Tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"[:160]
 
 
-def record_matches(record: Dict[str, Any], binding: Dict[str, Any]) -> bool:
-    name = fingerprint.normalize(binding.get("name"))
-    title = fingerprint.normalize(record.get("title"))
+def record_matches(record: Dict[str, Any], sub: Dict[str, Any]) -> bool:
+    name = rules.normalize(sub.get("name"))
+    title = rules.normalize(record.get("title"))
     if not name or not title:
         return False
     if name not in title and title not in name:
         return False
-    season = binding.get("season")
+    season = sub.get("season")
     if season in (None, "", 0):
         return True
     seasons = re.findall(r"\d+", str(record.get("seasons") or ""))
     if not seasons:
         return True
-    return str(int(season)) in [str(int(num)) for num in seasons]
-
-
-def site_state(raw: Any, binding: Dict[str, Any]) -> Optional[bool]:
-    text = fingerprint.normalize(raw)
-    if not text:
-        return None
-    choices = [
-        str(binding.get("site_id") or ""),
-        fingerprint.normalize(binding.get("site_name")),
-        fingerprint.normalize(binding.get("domain")),
-    ]
-    choices = [item for item in choices if item]
-    if not choices:
-        return None
-    if text in choices:
+    try:
+        return str(int(season)) in [str(int(item)) for item in seasons]
+    except (TypeError, ValueError):
         return True
-    for choice in choices:
-        if len(choice) >= 3 and (choice in text or text in choice):
-            return True
-    return False
 
 
-def pick_baseline(records: List[Dict[str, Any]], dimensions: List[str]) -> Dict[str, str]:
-    for record in reversed(records):
-        fp = fingerprint.parse(record.get("torrent_name") or "")
-        if any(fp.get(dim) for dim in dimensions):
-            return fp
-    return {key: "" for key in fingerprint.DIMENSION_LABELS}
+def sites_text(sub: Dict[str, Any], sites: List[Dict[str, Any]]) -> str:
+    values = sub.get("sites") if isinstance(sub.get("sites"), list) else []
+    if not values:
+        return "未限制"
+    names = []
+    for value in values:
+        for site in sites:
+            if str(site.get("id")) == str(value):
+                names.append(str(site.get("name")))
+                break
+        else:
+            names.append(str(value))
+    return "、".join(names[:4]) + ("…" if len(names) > 4 else "")
 
 
-def inspect(bound: List[Dict[str, Any]], subs: List[Dict[str, Any]],
-            records: List[Dict[str, Any]], dimensions: List[str]) -> Dict[str, Any]:
-    rows: List[Dict[str, Any]] = []
+def inspect(rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
+            records: List[Dict[str, Any]], sites: List[Dict[str, Any]],
+            rule_errors: Optional[List[str]] = None) -> Dict[str, Any]:
+    sub_rows: List[Dict[str, Any]] = []
     issues: List[Dict[str, Any]] = []
-    for binding in bound:
-        matched = [item for item in records if record_matches(item, binding)]
-        conflict_count = 0
-        for record in matched:
-            state = site_state(record.get("torrent_site"), binding)
-            diffs = fingerprint.compare(
-                binding.get("baseline") or {},
-                fingerprint.parse(record.get("torrent_name") or ""),
-                dimensions,
-            )
-            hard = [item for item in diffs if item["level"] == "conflict"]
-            soft = [item for item in diffs if item["level"] in ("missing", "extra")]
-            if state is False:
-                hard.append({"dimension": "site", "label": "站点", "level": "conflict",
-                             "baseline": str(binding.get("site_name") or ""),
-                             "actual": str(record.get("torrent_site") or ""),
-                             "text": f"站点不符：来自 {record.get('torrent_site') or '其他站点'}"})
-            if not hard and not soft and state is not False:
+    rule_rows: List[Dict[str, Any]] = []
+    ruled = 0
+
+    for rule in rule_list:
+        matched = [sub for sub in subs if rules.rule_matches(rule, sub)]
+        rule_rows.append({
+            "line": rule.get("line"),
+            "target": rule.get("target"),
+            "site": rule.get("site") or "不限",
+            "summary": rules.brief(rule),
+            "matched": len(matched),
+            "errors": list(rule.get("errors") or []),
+        })
+
+    for sub in subs:
+        picked = next((rule for rule in rule_list if rules.rule_matches(rule, sub)), None)
+        if picked:
+            ruled += 1
+        matched_records = [item for item in records if record_matches(item, sub)]
+        problems = 0
+        for record in matched_records:
+            if not picked:
                 continue
-            if hard:
-                conflict_count += 1
+            reasons: List[str] = []
+            site_state = rules.check_site(picked, record.get("torrent_site"), sites)
+            if site_state is False:
+                reasons.append(f"站点不符：来自 {record.get('torrent_site') or '其他站点'}，"
+                               f"规则要 {picked.get('site')}")
+            title = record.get("torrent_name") or record.get("title") or ""
+            reasons.extend(rules.check_title(picked, title))
+            if not reasons:
+                continue
+            problems += 1
             issues.append({
-                "sid": binding.get("sid"),
-                "name": binding.get("name"),
-                "season": binding.get("season"),
+                "sid": sub.get("id"),
+                "name": sub.get("name"),
+                "season": sub.get("season"),
                 "episode": record.get("episodes") or record.get("seasons") or "-",
                 "site": record.get("torrent_site") or "未记录",
-                "title": record.get("torrent_name") or record.get("title") or "",
+                "title": title,
                 "hash": record.get("download_hash") or "",
                 "downloader": record.get("downloader") or "",
-                "level": "conflict" if hard else "warn",
-                "reasons": [item["text"] for item in hard + soft][:5],
+                "reasons": reasons[:6],
             })
-        rows.append({
-            "sid": binding.get("sid"),
-            "name": binding.get("name"),
-            "season": binding.get("season"),
-            "site_name": binding.get("site_name"),
-            "baseline": fingerprint.brief(binding.get("baseline") or {}, dimensions),
-            "records": len(matched),
-            "conflicts": conflict_count,
-            "locked": bool(binding.get("locked")),
+        sub_rows.append({
+            "id": sub.get("id"),
+            "name": sub.get("name"),
+            "season": sub.get("season"),
+            "state": sub.get("state") or "-",
+            "sites": sites_text(sub, sites),
+            "rule": rules.brief(picked) if picked else "",
+            "rule_target": picked.get("target") if picked else "",
+            "records": len(matched_records),
+            "problems": problems,
         })
-    stats = {
-        "bindings": len(bound),
-        "locked": sum(1 for row in rows if row["locked"]),
-        "conflicts": sum(1 for item in issues if item["level"] == "conflict"),
-        "warnings": sum(1 for item in issues if item["level"] == "warn"),
-        "records": len(records),
-        "subscriptions": len(subs),
-    }
-    pending = [sub for sub in subs if not any(str(b.get("sid")) == str(sub.get("id")) for b in bound)]
+
     return {
-        "rows": rows,
+        "subscriptions": sub_rows,
+        "rules": rule_rows,
         "issues": issues,
-        "pending": pending,
-        "stats": stats,
+        "errors": list(rule_errors or []),
+        "stats": {
+            "subscriptions": len(subs),
+            "ruled": ruled,
+            "rules": len(rule_list),
+            "records": len(records),
+            "problems": len(issues),
+        },
         "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+
+def lock_sites(plugin: Any, rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
+               sites: List[Dict[str, Any]]) -> Tuple[int, List[str]]:
+    saved = bindings(plugin)
+    done, messages = 0, []
+    for sub in subs:
+        rule = next((item for item in rule_list if rules.rule_matches(item, sub)), None)
+        if not rule or not str(rule.get("site") or "").strip():
+            continue
+        site = find_site(sites, rule.get("site"))
+        if not site:
+            messages.append(f"《{sub.get('name')}》的站点「{rule.get('site')}」没在站点列表里找到")
+            continue
+        key = str(sub.get("id"))
+        if key not in saved:
+            saved[key] = _jsonable(sub.get("sites") or [])
+        ok, reason = set_sites(sub.get("id"), [site.get("id")])
+        if ok:
+            done += 1
+            append_log(plugin, f"《{sub.get('name')}》站点范围锁定为 {site.get('name')}")
+        else:
+            messages.append(f"《{sub.get('name')}》写入失败：{reason}")
+    save_bindings(plugin, saved)
+    return done, messages
+
+
+def unlock_sites(plugin: Any) -> Tuple[int, List[str]]:
+    saved = bindings(plugin)
+    done, messages = 0, []
+    for key, original in saved.items():
+        ok, reason = set_sites(key, original)
+        if ok:
+            done += 1
+        else:
+            messages.append(f"订阅 {key} 还原失败：{reason}")
+    save_bindings(plugin, {})
+    append_log(plugin, f"还原了 {done} 条订阅的站点范围")
+    return done, messages
 
 
 def remove_torrent(issue: Dict[str, Any]) -> Tuple[bool, str]:

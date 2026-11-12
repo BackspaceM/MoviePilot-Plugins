@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""MP 备份迁移：纯函数测试（脱敏 / 归一 / 漂移对比），不依赖宿主。"""
+"""MP 备份迁移：纯函数测试（脱敏 / 归一 / 漂移对比 / 导入清洗），不依赖宿主。"""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
+import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 _spec = importlib.util.spec_from_file_location(
     "mpbackup_backup", ROOT / "plugins.v3" / "mpbackup" / "backup.py")
 mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
+
+_rspec = importlib.util.spec_from_file_location(
+    "mpbackup_restore", ROOT / "plugins.v3" / "mpbackup" / "restore.py")
+rmod = importlib.util.module_from_spec(_rspec)
+_rspec.loader.exec_module(rmod)
 
 
 class _ModelDump:
@@ -109,6 +117,99 @@ class TestDiff(unittest.TestCase):
     def test_no_drift(self):
         same = {"subscriptions": [{"id": 1}], "sites": [], "services": [], "plugins": []}
         self.assertFalse(mod.build_diff(same, same)["has_drift"])
+
+
+class TestPayloadClean(unittest.TestCase):
+    """导入前的白名单过滤与 payload 清洗，全是纯函数。"""
+
+    def test_drop_host_managed_keys(self):
+        row = {"id": 1, "name": "u", "identity_key": "x", "activity_key": "y",
+               "date": "2026", "notification_identity": "z"}
+        self.assertEqual(rmod.filter_fields(row, ("name",)), {"name": "u"})
+
+    def test_unknown_columns_removed(self):
+        out = rmod.clean_payload("subscriptions",
+                                 {"name": "A", "season": 1, "bogus": 9, "id": 3})
+        self.assertEqual(out, {"name": "A", "season": 1})
+
+    def test_bool_not_written_into_int_column(self):
+        out = rmod.clean_payload("subscriptions",
+                                 {"name": "A", "season": True, "episode": False})
+        self.assertEqual(out["season"], 1)
+        self.assertEqual(out["episode"], 0)
+        self.assertIsInstance(out["season"], int)
+        self.assertNotIsInstance(out["season"], bool)
+
+    def test_users_keep_password_hash(self):
+        out = rmod.clean_payload("users", {
+            "name": "admin", "hashed_password": "$2b$xxx",
+            "id": 5, "notification_identity": "n",
+        })
+        self.assertEqual(out["hashed_password"], "$2b$xxx")
+        self.assertNotIn("id", out)
+        self.assertNotIn("notification_identity", out)
+
+    def test_sites_keep_credentials(self):
+        out = rmod.clean_payload("sites", {
+            "name": "s", "domain": "d.com", "cookie": "c", "ua": "u",
+            "apikey": "k", "token": "t", "weird": 1,
+        })
+        self.assertEqual(out["cookie"], "c")
+        self.assertEqual(out["token"], "t")
+        self.assertNotIn("weird", out)
+
+    def test_subscription_identity_parts(self):
+        row = {"media_source": "tmdb", "media_id": 123, "season": 2,
+               "episode_group": "g", "music_type": "", "type": "电视剧"}
+        self.assertEqual(rmod.subscription_identity(row), "tmdb|123|2|g||电视剧")
+
+    def test_filter_fields_extra_drop(self):
+        out = rmod.filter_fields({"a": 1, "b": 2, "id": 3}, drop=("b",))
+        self.assertEqual(out, {"a": 1})
+
+
+class TestReadSnapshot(unittest.TestCase):
+    def test_missing_sections_are_tolerated(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "mpbackup_x.zip"
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr("users.json", json.dumps([{"name": "a"}]))
+                zf.writestr("manifest.json", json.dumps({"schema": 2}))
+            got = rmod.read_snapshot(path)
+            self.assertTrue(got["ok"])
+            self.assertEqual(len(got["sections"]["users"]), 1)
+            self.assertEqual(got["sections"]["sites"], [])
+            self.assertEqual(got["manifest"].get("schema"), 2)
+
+    def test_bad_zip_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "mpbackup_bad.zip"
+            path.write_bytes(b"not a zip at all")
+            got = rmod.read_snapshot(path)
+            self.assertFalse(got["ok"])
+            self.assertIn("快照打不开", got["message"])
+
+    def test_broken_json_is_tolerated(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "mpbackup_broken.zip"
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr("users.json", "{not json")
+            got = rmod.read_snapshot(path)
+            self.assertTrue(got["ok"])
+            self.assertEqual(got["sections"]["users"], [])
+
+    def test_site_secrets_merged_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = pathlib.Path(td) / "mpbackup_sec.zip"
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr("sites.json", json.dumps([{"name": "s", "domain": "d.com"}]))
+                zf.writestr("site_secrets.json", json.dumps([
+                    {"domain": "d.com", "cookie": "C", "ua": "U",
+                     "apikey": "K", "token": "T"}]))
+            got = rmod.read_snapshot(path)
+            site = got["sections"]["sites"][0]
+            self.assertEqual(site["cookie"], "C")
+            self.assertEqual(site["token"], "T")
 
 
 def main() -> int:

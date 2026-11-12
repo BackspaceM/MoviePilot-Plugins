@@ -1,9 +1,11 @@
-"""把巡检结果画成详情页里那一段 HTML。"""
+"""把订阅、规则和巡检结果画成详情页里那一段 HTML。"""
 
 from __future__ import annotations
 
 import html
 from typing import Any, Dict, List
+
+from . import rules
 
 _STYLE = """
 <style>
@@ -42,9 +44,12 @@ _STYLE = """
 .sst-tag.warn{background:rgba(245,158,11,.14);color:#F59E0B}
 .sst-tag.bad{background:rgba(239,68,68,.14);color:#EF4444}
 .sst-empty{font-size:12px;opacity:.5;padding:16px;text-align:center}
-.sst-note{font-size:12px;line-height:1.8;padding:12px 14px;border-radius:12px;
+.sst-note{font-size:12px;line-height:1.85;padding:12px 14px;border-radius:12px;
   background:rgba(127,127,127,.07);border:1px solid rgba(127,127,127,.14)}
 .sst-note b{font-weight:650}
+.sst-pre{font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11.5px;
+  line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0;padding:12px 14px;border-radius:10px;
+  background:rgba(127,127,127,.08);border:1px solid rgba(127,127,127,.18)}
 .sst-log{font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11.5px;
   line-height:1.8;opacity:.72;white-space:pre-wrap;overflow-wrap:anywhere}
 .sst-foot{font-size:11px;opacity:.46;margin-top:14px;line-height:1.7}
@@ -76,124 +81,139 @@ def _rows(items: Any) -> List[Dict[str, Any]]:
 
 
 def _kpi(label: str, value: Any, hint: str) -> str:
-    return (
-        f'<div class="sst-card"><div class="sst-label">{_e(label)}</div>'
-        f'<div class="sst-num">{_e(value)}</div>'
-        f'<div class="sst-hint">{_e(hint)}</div></div>'
-    )
+    return (f'<div class="sst-card"><div class="sst-label">{_e(label)}</div>'
+            f'<div class="sst-num">{_e(value)}</div>'
+            f'<div class="sst-hint">{_e(hint)}</div></div>')
 
 
 def _table(headers: List[str], body: str, empty: str) -> str:
     head = "".join(f"<th>{_e(item)}</th>" for item in headers)
     if not body:
-        return f'<div class="sst-scroll"><table class="sst-table"><thead><tr>{head}</tr></thead></table>' \
-               f'<div class="sst-empty">{_e(empty)}</div></div>'
-    return f'<div class="sst-scroll"><table class="sst-table"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+        return ('<div class="sst-scroll"><table class="sst-table"><thead><tr>'
+                + head + '</tr></thead></table>'
+                + f'<div class="sst-empty">{_e(empty)}</div></div>')
+    return ('<div class="sst-scroll"><table class="sst-table"><thead><tr>'
+            + head + '</tr></thead><tbody>' + body + '</tbody></table></div>')
 
 
 def render(data: Dict[str, Any]) -> str:
     payload = data if isinstance(data, dict) else {}
     stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
-    rows = _rows(payload.get("rows"))
+    subs = _rows(payload.get("subscriptions"))
+    rule_rows = _rows(payload.get("rules"))
     issues = _rows(payload.get("issues"))
-    pending = _rows(payload.get("pending"))
+    errors = [str(item) for item in (payload.get("errors") or []) if isinstance(item, str)]
+    checked = str(payload.get("checked_at") or "")
     mode = str(payload.get("mode") or "notice")
-    checked = str(payload.get("checked_at") or "还没巡检过")
 
     parts = [_STYLE, '<div class="sst">']
     parts.append(
         '<div class="sst-head"><div class="sst-brand">'
         f'<div class="sst-logo">{_LOGO}</div><div>'
         '<div class="sst-title">单源追剧</div>'
-        '<div class="sst-sub">一部剧固定一个站，画质跟着第一集走</div>'
+        '<div class="sst-sub">每部剧自己定站点，标题该有什么、不该有什么</div>'
         '</div></div>'
-        f'<div class="sst-time">最近巡检 {_e(checked)}</div>'
+        f'<div class="sst-time">{_e(checked or "还没巡检过，点下面的按钮读一次")}</div>'
         f'<div class="sst-pill">{"自动移除" if mode == "remove" else "只提醒，不动任务"}</div>'
         '</div>'
     )
 
     parts.append('<div class="sst-grid">')
-    parts.append(_kpi("已绑定剧集", stats.get("bindings", 0), "绑定后订阅站点范围锁定为单站"))
-    parts.append(_kpi("已锁定站点", stats.get("locked", 0), "成功写入订阅站点范围的数量"))
-    parts.append(_kpi("来源 / 画质冲突", stats.get("conflicts", 0), "需要处理的下载记录"))
-    parts.append(_kpi("待处理提示", stats.get("warnings", 0), "标题没标全的维度，仅供参考"))
+    parts.append(_kpi("MP 当前订阅", stats.get("subscriptions", 0), "从订阅列表实时读出"))
+    parts.append(_kpi("已配规则", stats.get("ruled", 0), f"共 {len(rule_rows)} 条规则"))
+    parts.append(_kpi("不合规则的下载", stats.get("problems", 0), "站点不符或标题没过规则"))
+    parts.append(_kpi("已扫描下载记录", stats.get("records", 0), "来自下载历史"))
+    parts.append('</div>')
+
+    if errors:
+        parts.append('<div class="sst-section"><div class="sst-note sst-tag warn">'
+                     + _e("；".join(errors[:4])) + '</div></div>')
+
+    body = ""
+    for sub in subs[:40]:
+        label = _STATE_LABELS.get(str(sub.get("state") or "").upper(), sub.get("state") or "-")
+        rule_text = str(sub.get("rule") or "")
+        rule_badge = (f'<span class="sst-tag ok">{_e(rule_text[:38])}</span>' if rule_text
+                      else '<span class="sst-tag warn">未配规则</span>')
+        problems = int(sub.get("problems") or 0)
+        status = (f'<span class="sst-tag bad">{problems} 条</span>' if problems
+                  else '<span class="sst-tag ok">正常</span>')
+        body += (
+            '<tr>'
+            f'<td class="sst-name">{_e(sub.get("name"))}'
+            f'<div class="sst-muted">ID {_e(sub.get("id"))} · 第 {_e(sub.get("season") or "-")} 季 · {_e(label)}</div></td>'
+            f'<td>{_e(sub.get("sites"))}</td>'
+            f'<td>{rule_badge}<div class="sst-muted">{_e(sub.get("records") or 0)} 条下载记录</div></td>'
+            f'<td>{status}</td>'
+            '</tr>'
+        )
+    if len(subs) > 40:
+        body += f'<tr><td colspan="4" class="sst-muted">只列前 40 条，共 {len(subs)} 条订阅</td></tr>'
+    parts.append('<div class="sst-section"><div class="sst-sec-title">MP 当前订阅'
+                 '<span class="sst-sec-note">在设置页写规则，用剧名或 #订阅ID 对上</span></div>')
+    parts.append(_table(["剧集", "当前站点范围", "规则", "巡检"],
+                        body, "还没读到订阅，点「立即巡检」"))
     parts.append('</div>')
 
     body = ""
-    for row in rows:
-        state = ('<span class="sst-tag ok">已锁定</span>' if row.get("locked")
-                 else '<span class="sst-tag warn">仅巡检</span>')
-        conflict = int(row.get("conflicts") or 0)
-        badge = (f'<span class="sst-tag bad">{conflict} 条冲突</span>' if conflict
-                 else '<span class="sst-tag ok">一致</span>')
+    for row in rule_rows[:20]:
+        err = row.get("errors") if isinstance(row.get("errors"), list) else []
+        badge = (f'<span class="sst-tag bad">{_e("；".join(str(x) for x in err[:2]))}</span>' if err
+                 else f'<span class="sst-tag ok">匹配 {_e(row.get("matched") or 0)} 条订阅</span>')
         body += (
             '<tr>'
-            f'<td class="sst-name">{_e(row.get("name"))}'
-            f'<div class="sst-muted">第 {_e(row.get("season") or "-")} 季 · {_e(row.get("records") or 0)} 条记录</div></td>'
-            f'<td>{_e(row.get("site_name"))}<div class="sst-muted">{state}</div></td>'
-            f'<td>{_e(row.get("baseline"))}</td>'
+            f'<td class="sst-name">{_e(row.get("target"))}'
+            f'<div class="sst-muted">第 {_e(row.get("line"))} 行 · 站点 {_e(row.get("site"))}</div></td>'
+            f'<td>{_e(row.get("summary"))}</td>'
             f'<td>{badge}</td>'
             '</tr>'
         )
-    parts.append('<div class="sst-section"><div class="sst-sec-title">已绑定'
-                 '<span class="sst-sec-note">画质基线来自该订阅最近一条下载记录</span></div>')
-    parts.append(_table(["剧集", "目标站点", "画质基线", "状态"], body, "还没有绑定剧集，在下面挑一部试试"))
+    parts.append('<div class="sst-section"><div class="sst-sec-title">生效中的规则'
+                 '<span class="sst-sec-note">必含项要全满足，排除项命中一个就否掉</span></div>')
+    parts.append(_table(["匹配目标", "条件", "状态"], body, "设置页还没写规则"))
     parts.append('</div>')
 
     body = ""
-    for sub in pending[:12]:
-        site_count = len(sub.get("sites") or []) if isinstance(sub.get("sites"), list) else 0
-        site_text = f"{site_count} 个站点" if site_count else "未限制"
-        label = _STATE_LABELS.get(str(sub.get("state") or "").upper(), sub.get("state") or "-")
-        body += (
-            '<tr>'
-            f'<td class="sst-name">{_e(sub.get("name"))}<div class="sst-muted">第 {_e(sub.get("season") or "-")} 季</div></td>'
-            f'<td>{_e(label)}</td>'
-            f'<td>{_e(site_text)}</td>'
-            '</tr>'
-        )
-    if len(pending) > 12:
-        body += f'<tr><td colspan="3" class="sst-muted">还有 {len(pending) - 12} 部，点「锁定全部未绑定」可一次处理</td></tr>'
-    parts.append('<div class="sst-section"><div class="sst-sec-title">待绑定'
-                 '<span class="sst-sec-note">按钮一次锁定一部，或批量锁定</span></div>')
-    parts.append(_table(["剧集", "订阅状态", "当前站点范围"], body, "所有订阅都绑定好了"))
-    parts.append('</div>')
-
-    body = ""
-    for issue in issues[:20]:
-        badge = ('<span class="sst-tag bad">冲突</span>' if issue.get("level") == "conflict"
-                 else '<span class="sst-tag warn">提示</span>')
+    for issue in issues[:25]:
         reasons = issue.get("reasons") if isinstance(issue.get("reasons"), list) else []
-        reason_text = "；".join(str(item) for item in reasons[:3])
         body += (
             '<tr>'
             f'<td class="sst-name">{_e(issue.get("name"))}'
-            f'<div class="sst-muted">第 {_e(issue.get("episode"))} 集 · {_e(issue.get("site"))}</div></td>'
-            f'<td>{badge}<div class="sst-muted">{_e(reason_text)}</div></td>'
+            f'<div class="sst-muted">第 {_e(issue.get("episode"))} 集 · 来自 {_e(issue.get("site"))}</div></td>'
+            f'<td>{_e("；".join(str(item) for item in reasons[:4]))}</td>'
             f'<td>{_e(issue.get("title"))}</td>'
             '</tr>'
         )
-    if len(issues) > 20:
-        body += f'<tr><td colspan="3" class="sst-muted">仅显示最近 20 条，共 {len(issues)} 条</td></tr>'
-    parts.append('<div class="sst-section"><div class="sst-sec-title">最近异常'
-                 '<span class="sst-sec-note">未标注的维度只作提示，不算冲突</span></div>')
-    parts.append(_table(["剧集 / 来源", "问题", "种子标题"], body, "暂没发现来源或画质不一致"))
+    if len(issues) > 25:
+        body += f'<tr><td colspan="3" class="sst-muted">只列前 25 条，共 {len(issues)} 条</td></tr>'
+    parts.append('<div class="sst-section"><div class="sst-sec-title">不合规则'
+                 '<span class="sst-sec-note">标题没标全的项也会算进来</span></div>')
+    parts.append(_table(["剧集 / 来源", "原因", "种子标题"], body, "目前没有异常"))
     parts.append('</div>')
 
     parts.append(
-        '<div class="sst-note"><b>怎么起作用：</b>绑定时把这条订阅的站点范围写成你选的那一个站，'
-        '之后只从它下载；同时记下第一集标题里的画质标记（杜比视界 / HDR、H.264 / H.265、'
-        '60fps、高码、分辨率、来源），后面每一集都拿来对。解除绑定会还原原来的站点范围。'
-        '<br>站点对不上或画质硬冲突会列在上面。默认只提醒；想让它自己移除任务，去设置里改「异常处置」。'
-        '</div>'
+        '<div class="sst-section"><div class="sst-sec-title">规则怎么写'
+        '<span class="sst-sec-note">设置页的「规则表」，一行一部剧</span></div>'
+        '<div class="sst-note"><b>格式：</b>匹配目标 => 站点 => 纳入 => 排除<br>'
+        '匹配目标写剧名（模糊匹配）或 <b>#订阅ID</b>，加 <b>#S1</b> 只管某一季；'
+        '站点写站点名 / ID / 域名，留空就是不限站点。<br>'
+        '纳入和排除都用 <b>;;</b> 分开写多项：普通文字按标题包含判断，'
+        '前面加 <b>re:</b> 就按正则判断（忽略大小写）。纳入项要全部满足，排除项命中一个就不要。<br>'
+        f'<pre class="sst-pre">{_e(rules.EXAMPLE)}</pre></div></div>'
     )
+
+    template_text = str(payload.get("template") or "")
+    if template_text:
+        parts.append('<div class="sst-section"><div class="sst-sec-title">未配规则的订阅，可以复制去改'
+                     '<span class="sst-sec-note">点「生成规则模板」重新生成</span></div>'
+                     f'<pre class="sst-pre">{_e(template_text)}</pre></div>')
 
     log = payload.get("log") if isinstance(payload.get("log"), list) else []
     if log:
-        parts.append('<div class="sst-section" style="margin-top:14px"><div class="sst-sec-title">最近动作</div>')
-        parts.append('<div class="sst-log">' + _e("\n".join(str(item) for item in log[:12])) + '</div></div>')
+        parts.append('<div class="sst-section"><div class="sst-sec-title">最近动作</div>'
+                     '<div class="sst-log">' + _e("\n".join(str(item) for item in log[:12])) + '</div></div>')
 
-    parts.append('<div class="sst-foot">站点范围写入失败时不会拦下载，只保留巡检；'
-                 '清理任务需要二次确认，且不会删媒体库里的文件。</div>')
+    parts.append('<div class="sst-foot">锁定站点范围会记下原来的范围，点「还原站点范围」可退回；'
+                 '自动移除只动下载器任务，不删媒体库文件。规则写错的行会在上面标出来，不影响其他行。</div>')
     parts.append('</div>')
     return "".join(parts)

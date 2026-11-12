@@ -51,7 +51,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self):
         self.assertEqual(PLUGIN_ID, "UGreenGuard")
         self.assertEqual(PLUGIN_CLS.plugin_name, "绿联 NAS 守护")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.0.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.0.1")
         self.assertEqual(PLUGIN_CLS.plugin_author, "BackspaceM")
         self.assertEqual(PLUGIN_CLS.plugin_config_prefix, "ugreenguard_")
         self.assertEqual(PLUGIN_CLS.plugin_color, "#6366F1")

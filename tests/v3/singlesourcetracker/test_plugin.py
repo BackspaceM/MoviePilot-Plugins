@@ -1,4 +1,4 @@
-"""单源追剧的纯函数用例，跑的时候不需要 MoviePilot。"""
+"""规则和巡检的纯函数用例，跑的时候不需要 MoviePilot。"""
 
 import sys
 import unittest
@@ -7,156 +7,173 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "plugins.v3"))
 
-from singlesourcetracker import fingerprint, renderer, store  # noqa: E402
-
-DIMS = list(fingerprint.DEFAULT_DIMENSIONS)
+from singlesourcetracker import renderer, rules, store  # noqa: E402
 
 
-class FingerprintTests(unittest.TestCase):
-    def test_dolby_vision_is_not_hdr(self):
-        dv = fingerprint.parse("Show.S01E01.2160p.WEB-DL.DV.HDR10+.H.265.Atmos-GROUP")
-        hdr = fingerprint.parse("Show.S01E02.2160p.WEB-DL.HDR.H.265.Atmos-GROUP")
-        self.assertEqual(dv["hdr"], "DV")
-        self.assertEqual(hdr["hdr"], "HDR")
-        self.assertNotEqual(dv["hdr"], hdr["hdr"])
+class FakePlugin:
+    def __init__(self):
+        self._data = {}
 
-    def test_chinese_dolby_vision(self):
-        fp = fingerprint.parse("某剧 第1集 杜比视界 4K HEVC")
-        self.assertEqual(fp["hdr"], "DV")
-        self.assertEqual(fp["codec"], "H.265")
-        self.assertEqual(fp["resolution"], "2160p")
+    def get_data(self, key, default=None):
+        return self._data.get(key, default)
 
-    def test_codec_variants(self):
-        cases = {
-            "Movie.2024.1080p.x264.AAC": "H.264",
-            "Movie.2024.1080p.H 264.AAC": "H.264",
-            "Movie.2024.1080p.x265.AAC": "H.265",
-            "Movie.2024.1080p.H.265.10bit": "H.265",
-            "Movie.2024.1080p.AV1": "AV1",
-        }
-        for title, expected in cases.items():
-            self.assertEqual(fingerprint.parse(title)["codec"], expected, title)
-
-    def test_fps_and_bitrate(self):
-        fp = fingerprint.parse("Show.S01E03.1080p.60fps.高码.WEB-DL.H264")
-        self.assertEqual(fp["fps"], "60fps")
-        self.assertEqual(fp["bitrate"], "高码")
-        self.assertEqual(fp["codec"], "H.264")
-
-    def test_ten_bit_suffix(self):
-        fp = fingerprint.parse("Show.S01E01.2160p.10bit.HDR.x265.Remux")
-        self.assertIn("10bit", fp["bitrate"])
-        self.assertEqual(fp["source"], "Remux")
-
-    def test_source_priority(self):
-        self.assertEqual(fingerprint.parse("A.BluRay.Remux.1080p")["source"], "Remux")
-        self.assertEqual(fingerprint.parse("A.WEB-DL.1080p")["source"], "WEB-DL")
-        self.assertEqual(fingerprint.parse("A.HDTV.720p")["source"], "HDTV")
-
-    def test_empty_and_noise(self):
-        fp = fingerprint.parse("")
-        self.assertTrue(all(value == "" for value in fp.values()))
-        self.assertEqual(fingerprint.parse("随便一个中文剧名")["hdr"], "")
-
-    def test_compare_levels(self):
-        baseline = fingerprint.parse("Show.S01E01.2160p.DV.H.265.WEB-DL")
-        actual = fingerprint.parse("Show.S01E02.1080p.HDR.H.264.WEBRip")
-        issues = fingerprint.compare(baseline, actual, DIMS)
-        self.assertTrue(any(item["level"] == "conflict" for item in issues))
-        self.assertGreaterEqual(len([i for i in issues if i["level"] == "conflict"]), 4)
-
-    def test_missing_is_not_conflict(self):
-        baseline = fingerprint.parse("Show.S01E01.2160p.DV.H.265.WEB-DL")
-        actual = fingerprint.parse("Show.S01E02.2160p.H.265.WEB-DL")
-        issues = fingerprint.compare(baseline, actual, DIMS)
-        self.assertTrue(any(item["level"] == "missing" for item in issues))
-        self.assertFalse(any(item["level"] == "conflict" for item in issues))
-
-    def test_identical_titles(self):
-        fp = fingerprint.parse("Show.S01E01.2160p.DV.H.265.WEB-DL")
-        self.assertEqual(fingerprint.compare(fp, dict(fp), DIMS), [])
-        self.assertIn("2160p", fingerprint.brief(fp, DIMS))
+    def save_data(self, key, value):
+        self._data[key] = value
 
 
-class StoreTests(unittest.TestCase):
-    def _binding(self):
-        return {
-            "sid": 12, "name": "夜航西飞", "season": 1,
-            "site_id": 3, "site_name": "某某站", "domain": "example.org",
-            "original_sites": [1, 2], "locked": True,
-            "baseline": fingerprint.parse("夜航西飞.S01E01.2160p.DV.H.265.WEB-DL"),
-        }
+SITES = [
+    {"id": 1, "name": "A站", "domain": "a.example.org"},
+    {"id": 2, "name": "B站", "domain": "b.example.org"},
+]
 
-    def test_record_matches(self):
-        binding = self._binding()
-        self.assertTrue(store.record_matches(
-            {"title": "夜航西飞", "seasons": "1", "episodes": "1"}, binding))
-        self.assertTrue(store.record_matches(
-            {"title": "夜航西飞 第一季", "seasons": "S01", "episodes": "2"}, binding))
-        self.assertFalse(store.record_matches(
-            {"title": "夜航西飞", "seasons": "2", "episodes": "1"}, binding))
-        self.assertFalse(store.record_matches(
-            {"title": "别的剧", "seasons": "1"}, binding))
+RULES_TEXT = (
+    "海贼王 => A站 => HDR;;DDP5.1;;XX制作组 => re:(?i)x264;;CAM\n"
+    "火影忍者 => B站 => 杜比视界;;HDR;;H.265 => re:(?i)(HDTV|TS)\n"
+    "#12 => B站 => 2160p => 低码\n"
+)
 
-    def test_site_state(self):
-        binding = self._binding()
-        self.assertTrue(store.site_state("3", binding))
-        self.assertTrue(store.site_state("某某站", binding))
-        self.assertTrue(store.site_state("example.org", binding))
-        self.assertFalse(store.site_state("别的站", binding))
-        self.assertIsNone(store.site_state("", binding))
 
-    def test_pick_baseline_uses_latest_record(self):
-        records = [
-            {"torrent_name": "夜航西飞.S01E01.2160p.DV.H.265.WEB-DL"},
-            {"torrent_name": "夜航西飞.S01E02.1080p.HDR.H.264.WEBRip"},
+class RuleTests(unittest.TestCase):
+    def test_parse_rules(self):
+        parsed, errors = rules.parse_rules(RULES_TEXT)
+        self.assertEqual(len(parsed), 3)
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed[0]["site"], "A站")
+        self.assertEqual(len(parsed[0]["include"]), 3)
+        self.assertEqual(parsed[0]["exclude"][0]["kind"], "regex")
+        self.assertEqual(parsed[2]["target_kind"], "id")
+
+    def test_bad_lines_are_reported(self):
+        parsed, errors = rules.parse_rules("只有一段\n剧名 => A站 => re:[( => 排除\n# 注释")
+        self.assertEqual(len(parsed), 1)
+        self.assertTrue(any("少了分段" in item for item in errors))
+        self.assertTrue(any("正则写错了" in item for item in errors))
+
+    def test_target_variants(self):
+        self.assertEqual(rules.parse_target("#12")["kind"], "id")
+        self.assertEqual(rules.parse_target("海贼王#S1")["season"], 1)
+        self.assertEqual(rules.parse_target("海贼王#2")["season"], 2)
+        self.assertEqual(rules.parse_target("海贼王")["kind"], "name")
+
+    def test_match_by_name_id_and_season(self):
+        parsed, _ = rules.parse_rules(RULES_TEXT)
+        self.assertTrue(rules.rule_matches(parsed[0], {"id": 1, "name": "海贼王", "season": 1}))
+        self.assertTrue(rules.rule_matches(parsed[2], {"id": 12, "name": "别的剧", "season": 1}))
+        self.assertFalse(rules.rule_matches(parsed[2], {"id": 13, "name": "别的剧", "season": 1}))
+        season_rule, _ = rules.parse_rules("海贼王#S2 => A站 => HDR => ")
+        self.assertFalse(rules.rule_matches(season_rule[0], {"id": 1, "name": "海贼王", "season": 1}))
+        self.assertTrue(rules.rule_matches(season_rule[0], {"id": 1, "name": "海贼王", "season": 2}))
+
+    def test_include_all_exclude_any(self):
+        parsed, _ = rules.parse_rules(RULES_TEXT)
+        rule = parsed[0]
+        self.assertEqual(rules.check_title(rule, "One.Piece.S01E01.HDR.DDP5.1.XX制作组.1080p"), [])
+        problems = rules.check_title(rule, "One.Piece.S01E02.DDP5.1.XX制作组.1080p")
+        self.assertTrue(any("缺少必含" in item for item in problems))
+        problems = rules.check_title(rule, "One.Piece.S01E03.HDR.DDP5.1.XX制作组.x264")
+        self.assertTrue(any("命中排除" in item for item in problems))
+
+    def test_chinese_and_dolby(self):
+        parsed, _ = rules.parse_rules(RULES_TEXT)
+        rule = parsed[1]
+        self.assertEqual(rules.check_title(rule, "火影.S01E01.杜比视界.HDR.H.265.2160p"), [])
+        self.assertTrue(rules.check_title(rule, "火影.S01E02.杜比视界.HDR.H.265.HDTV"))
+
+    def test_site_check(self):
+        parsed, _ = rules.parse_rules(RULES_TEXT)
+        rule = parsed[0]
+        self.assertTrue(rules.check_site(rule, "A站", SITES))
+        self.assertTrue(rules.check_site(rule, "1", SITES))
+        self.assertFalse(rules.check_site(rule, "B站", SITES))
+        self.assertIsNone(rules.check_site(rule, "", SITES))
+        plain, _ = rules.parse_rules("剧名 =>  => HDR => ")
+        self.assertIsNone(rules.check_site(plain[0], "任意站", SITES))
+
+    def test_template_skips_configured(self):
+        parsed, _ = rules.parse_rules(RULES_TEXT)
+        text = rules.template_for([
+            {"id": 1, "name": "海贼王", "season": 1},
+            {"id": 9, "name": "没配的剧", "season": 3},
+        ], parsed)
+        self.assertNotIn("海贼王", text)
+        self.assertIn("没配的剧#S3", text)
+
+
+class InspectTests(unittest.TestCase):
+    def _data(self):
+        parsed, errors = rules.parse_rules(RULES_TEXT)
+        subs = [
+            {"id": 1, "name": "海贼王", "season": 1, "state": "R", "sites": []},
+            {"id": 2, "name": "火影忍者", "season": 1, "state": "R", "sites": [2]},
+            {"id": 3, "name": "没配的剧", "season": 1, "state": "N", "sites": []},
         ]
-        fp = store.pick_baseline(records, DIMS)
-        self.assertEqual(fp["codec"], "H.264")
-
-    def test_inspect_reports_site_and_quality(self):
-        binding = self._binding()
         records = [
-            {"title": "夜航西飞", "seasons": "1", "episodes": "1",
-             "torrent_site": "某某站", "torrent_name": "夜航西飞.S01E01.2160p.DV.H.265.WEB-DL",
-             "download_hash": "aaa", "downloader": "qb"},
-            {"title": "夜航西飞", "seasons": "1", "episodes": "2",
-             "torrent_site": "别的站", "torrent_name": "夜航西飞.S01E02.1080p.HDR.H.264.WEBRip",
-             "download_hash": "bbb", "downloader": "qb"},
+            {"title": "海贼王", "seasons": "1", "episodes": "1",
+             "torrent_site": "A站", "download_hash": "aaa", "downloader": "qb",
+             "torrent_name": "One.Piece.S01E01.HDR.DDP5.1.XX制作组.1080p"},
+            {"title": "海贼王", "seasons": "1", "episodes": "2",
+             "torrent_site": "B站", "download_hash": "bbb", "downloader": "qb",
+             "torrent_name": "One.Piece.S01E02.HDR.DDP5.1.XX制作组.x264"},
+            {"title": "没配的剧", "seasons": "1", "episodes": "1",
+             "torrent_site": "A站", "download_hash": "ccc", "downloader": "qb",
+             "torrent_name": "随便什么标题"},
         ]
-        result = store.inspect([binding], [{"id": 12, "name": "夜航西飞", "season": 1}], records, DIMS)
-        self.assertEqual(result["stats"]["bindings"], 1)
-        self.assertGreaterEqual(result["stats"]["conflicts"], 1)
+        return parsed, errors, subs, records
+
+    def test_inspect_finds_site_and_title_problems(self):
+        parsed, errors, subs, records = self._data()
+        result = store.inspect(parsed, subs, records, SITES, errors)
+        self.assertEqual(result["stats"]["subscriptions"], 3)
+        self.assertEqual(result["stats"]["ruled"], 2)
+        self.assertEqual(len(result["issues"]), 1)
         issue = result["issues"][0]
-        self.assertEqual(issue["level"], "conflict")
-        self.assertIn("站点", " ".join(issue["reasons"]))
-        self.assertTrue(result["pending"] == [])
+        self.assertIn("站点不符", " ".join(issue["reasons"]))
+        self.assertTrue(any("命中排除" in item for item in issue["reasons"]))
+        self.assertEqual(result["subscriptions"][2]["rule"], "")
 
-    def test_inspect_clean_library(self):
-        binding = self._binding()
-        records = [
-            {"title": "夜航西飞", "seasons": "1", "episodes": "1",
-             "torrent_site": "3", "torrent_name": "夜航西飞.S01E01.2160p.DV.H.265.WEB-DL"},
-        ]
-        result = store.inspect([binding], [], records, DIMS)
-        self.assertEqual(result["stats"]["conflicts"], 0)
-        self.assertEqual(result["issues"], [])
+    def test_inspect_jsonable(self):
+        parsed, errors, subs, records = self._data()
+        result = store.inspect(parsed, subs, records, SITES, errors)
+        restored = store._jsonable(result)
+        self.assertEqual(restored["stats"], result["stats"])
+        self.assertIn("单源追剧", renderer.render(restored))
+
+    def test_lock_and_unlock(self):
+        parsed, _, subs, _ = self._data()
+        plugin = FakePlugin()
+        original = {"set_sites": store.set_sites, "append_log": store.append_log}
+        calls = []
+        store.set_sites = lambda sid, sites: (calls.append((str(sid), sites)) or (True, ""))
+        store.append_log = lambda p, text, limit=40: None
+        try:
+            done, messages = store.lock_sites(plugin, parsed, subs, SITES)
+            self.assertEqual(done, 2)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(len(sites) == 1 for _, sites in calls))
+            saved = store.bindings(plugin)
+            self.assertIn("2", saved)
+            unlocked, _ = store.unlock_sites(plugin)
+            self.assertEqual(unlocked, 2)
+        finally:
+            store.set_sites = original["set_sites"]
+            store.append_log = original["append_log"]
 
 
 class RenderTests(unittest.TestCase):
     def test_escape(self):
         html = renderer.render({
-            "stats": {"bindings": 1, "conflicts": 0},
-            "rows": [{"name": "<script>alert(1)</script>", "site_name": "A&B", "baseline": "DV"}],
-            "issues": [], "pending": [], "log": ["<b>x</b>"],
+            "subscriptions": [{"name": "<script>alert(1)</script>", "sites": "A&B"}],
+            "rules": [{"target": "<img src=x>", "summary": "DV"}],
+            "issues": [{"name": "<b>x</b>", "reasons": ["<i>y</i>"], "title": "z"}],
+            "log": ["<u>log</u>"],
         })
         self.assertNotIn("<script>", html)
         self.assertIn("&lt;script&gt;", html)
         self.assertIn("A&amp;B", html)
-        self.assertNotIn("<b>x</b>", html)
+        self.assertNotIn("<img src=x>", html)
 
     def test_weird_payload(self):
-        for value in ({}, {"rows": "oops", "stats": 5}, {"issues": [1, 2]}):
+        for value in ({}, {"subscriptions": "oops", "stats": 5}, {"issues": [1, 2]}):
             self.assertIn("单源追剧", renderer.render(value))
 
 

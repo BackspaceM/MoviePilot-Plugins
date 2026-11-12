@@ -362,9 +362,9 @@
   },
   "SingleSourceTracker": {
     "name": "单源追剧",
-    "description": "一条剧集订阅只从一个站下：绑定时把订阅的站点范围写成单站，解除绑定会还原原来的范围。同时记下第一集标题里的画质标记，后面每一集都对一遍杜比视界 / HDR、H.264 / H.265、帧率、高码、分辨率与来源，来源或画质混了就列成清单。标题没写的维度只作提示，不算冲突。默认只提醒，可选自动移除冲突的下载任务，不碰媒体库文件。",
-    "labels": "订阅,单站点,站点锁定,画质一致,杜比视界,HDR,追剧,下载",
-    "version": "1.0.0",
+    "description": "读取 MP 当前订阅，按剧名或 #订阅ID 逐条写规则：只从哪个站下、标题必须含什么、不能含什么。纳入和排除都支持普通关键词与 re: 正则，多个条件用 ;; 分开；巡检下载历史，来源或标题不合规则就列成清单。可选把订阅站点范围锁定成单站，一键还原原来的范围。详情页直接列出当前订阅、生效中的规则和没配规则的订阅模板。默认只提醒，不动媒体库文件。",
+    "labels": "订阅,单站点,站点锁定,正则,标题过滤,追剧,制作组,下载",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/singlesourcetracker.png",
     "author": "BackspaceM",
     "level": 1,
@@ -373,14 +373,15 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：绑定表存插件数据目录，绑定时记下订阅原有 sites，再用 SubscribeOper 单字段写回单站；画质基线取该订阅最近一条下载记录的标题解析结果，巡检按剧名和季集关联下载历史，逐条比对站点与画质指纹。支持逐剧绑定 / 解除、批量锁定、重取基线、二次确认清理；注册 DownloadAdded 事件与 /single_source 命令，巡检间隔可选。响应模型用 Pydantic BaseModel，按钮路径与方法已纳入全仓 API 契约校验。"
+      "v1.1.0": "改成按订阅配置规则：读取 MP 当前订阅，匹配目标写剧名或 #订阅ID（可加 #S1 限定季），每条规则指定站点、纳入项与排除项；纳入/排除支持关键词和 re: 正则，用 ;; 分隔，必含项全部满足、排除项命中一个就否掉。巡检下载历史逐集核对站点与种子标题，支持按规则把订阅 sites 写成单站并保存原值以便还原。同时修掉详情页「插件数据加载失败」：页面渲染期不再调用宿主 SDK，只读插件缓存，get_page / get_form 全部兜底；详情页新增规则表、异常明细与可复制模板。",
+      "v1.0.0": "首个版本：自动画质基线 + 单站绑定，绑定时把订阅站点范围写成单站，逐集比对杜比视界 / HDR、H.264 / H.265、帧率、高码、分辨率与来源。"
     }
   },
   "MPBackup": {
     "name": "MP 备份迁移",
-    "description": "把 MoviePilot 里能读到的东西打成一个 zip：订阅、下载与整理历史、站点、媒体服务器 / 下载器配置、插件清单和插件数据。Cookie、Token 一类字段统一脱敏。支持定时备份、保留份数轮转、两份快照的配置漂移对比，以及一份写清楚恢复顺序的清单；只导出，不写回数据库。",
-    "labels": "备份,迁移,快照,脱敏,配置漂移,恢复清单,cron",
-    "version": "1.0.0",
+    "description": "把 MoviePilot 的用户、订阅、订阅历史、插件配置与插件数据、站点、系统配置、下载与整理历史打成一个 zip；Cookie、Token 一类字段默认脱敏，可选导出明文凭据。支持定时备份、轮转、两份快照的配置漂移对比，以及导入迁移：先预览每类将新增/跳过/覆盖多少，再确认写回，默认试运行不碰数据库。恢复清单同步给出手工步骤。",
+    "labels": "备份,迁移,导入恢复,用户,订阅历史,插件配置,脱敏,配置漂移",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/mpbackup.png",
     "author": "BackspaceM",
     "level": 1,
@@ -389,14 +390,15 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：宿主 SDK 一律延迟导入，任一来源读不到就在 manifest 里记 unavailable，不中断打包；zip 内含 manifest 与分项 JSON，敏感键递归替换为 ***，站点只留名称与域名。快照按 mpbackup_*.zip 命名并轮转，删除只认本插件产物；漂移对比覆盖订阅 / 站点 / 服务 / 插件的新增删除与字段变化；恢复清单只给步骤不动数据库。详情页含快照列表与差异表，设置页六项。"
+      "v1.1.0": "补齐全量备份：用户、订阅历史、插件实例配置、插件数据、系统配置（含下载器/媒体服务器配置）、站点可选明文凭据，下载与整理历史默认全量；manifest 升 schema 2 并记每类条数与 contains_secrets。新增导入迁移：/import-preview 只读预览各类将新增/跳过/覆盖，/import 默认试运行且必须确认才写回，冲突策略可选跳过或覆盖，逐类独立容错并记动作日志；写回走 V3 各 Oper，剔除自动维护字段并按白名单过滤未知列。页面渲染期只读缓存并整体兜底，避免宿主把异常吞成「数据加载失败」。",
+      "v1.0.0": "首个版本：订阅、下载与整理历史、站点、服务、插件清单和插件数据打包成 zip，敏感字段脱敏；定时备份、保留份数轮转、两份快照漂移对比与恢复清单。"
     }
   },
   "UGreenGuard": {
     "name": "绿联 NAS 守护",
     "description": "绿联 NAS 的开放 CLI 是 protobuf 网关，插件不直连，改由一个只读状态桥提供 JSON；没配桥就用容器内磁盘自检兜底。按存储水位、盘温、SMART、容器状态和 UPS 盯住下载：超阈值可暂停下载器任务，恢复正常后再恢复；默认试运行，只记动作不改动任何任务。",
     "labels": "绿联NAS,状态桥,磁盘水位,温度,UPS,容器,暂停下载,守护",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -405,7 +407,8 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
-      "v1.0.0": "首个版本：三条采集路径自动降级（状态桥 URL / 本地状态文件 / shutil.disk_usage 容器自检），缺字段一律标未上报，绝不把查不到当正常；规则引擎是纯函数，命中水位、温度、SMART、容器异常与市电中断，同类动作 30 分钟冷却。暂停 / 恢复通过 DownloaderHelper 容错探测下载器方法，不支持时仅告警；动作日志持久化，详情页给出状态桥 JSON 示例。"
+      "v1.0.1": "装上就能用：补齐宿主基类的 stop_service 抽象方法（V3 是 ABCMeta，缺一个会导致插件重载不 ACTIVE、整次安装回滚）；页面渲染不再触发状态桥采集，get_page / get_form 全部兜底，调度器不可用时直接不注册任务而不是塞一个字符串 trigger。",
+      "v1.0.0": "首个版本：状态桥 URL / 本地状态文件 / 容器内磁盘自检三路降级，水位、盘温、SMART、容器状态与 UPS 规则，默认试运行，30 分钟冷却，暂停与恢复下载器任务走容错方法探测。"
     }
   }
 }

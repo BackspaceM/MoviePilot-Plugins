@@ -1,8 +1,7 @@
-"""单源追剧：让一条订阅只从一个站下，画质跟着第一集走。"""
+"""单源追剧：每部剧自己定站点和标题规则。"""
 
 from __future__ import annotations
 
-import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body
@@ -50,7 +49,7 @@ def _register(event_type: Any):
     return eventmanager.register(event_type)
 
 
-from . import fingerprint, renderer, store
+from . import renderer, rules, store
 
 _BODY_DEFAULT = Body(default=None)
 _CRON = {15: "*/15 * * * *", 30: "*/30 * * * *", 60: "0 * * * *", 120: "0 */2 * * *"}
@@ -65,13 +64,13 @@ class Response(BaseModel):
 class SingleSourceTracker(_PluginBase):
     plugin_name = "单源追剧"
     plugin_desc = (
-        "一条剧集订阅只从一个 PT 站下载，绑定时把订阅的站点范围写成单站；"
-        "同时记下第一集标题里的画质标记，后面每一集都比对杜比视界 / HDR、"
-        "H.264 / H.265、帧率、高码、分辨率与来源，混用会列出来提醒。"
-        "解除绑定会还原原来的站点范围，默认只提醒不删任务。"
+        "读取 MP 当前订阅，按剧名或订阅 ID 逐条配置：只从哪个站下、标题必须含什么、"
+        "不能含什么。纳入和排除都支持普通关键词与 re: 正则，多个条件用 ;; 分开。"
+        "巡检下载历史，来源或标题不合规则就列出来；可选把订阅站点范围锁定成单站，"
+        "解除时还原。默认只提醒，不动媒体库文件。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/singlesourcetracker.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "singlesource_"
@@ -82,8 +81,10 @@ class SingleSourceTracker(_PluginBase):
     def __init__(self) -> None:
         super().__init__()
         self._enabled = True
-        self._target_site: Any = ""
-        self._dimensions: List[str] = list(fingerprint.DEFAULT_DIMENSIONS)
+        self._rules_text = ""
+        self._rules: List[Dict[str, Any]] = []
+        self._rule_errors: List[str] = []
+        self._lock_sites = True
         self._action_mode = "notice"
         self._interval = 30
         self._notify = True
@@ -91,12 +92,10 @@ class SingleSourceTracker(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = dict(config or {})
         self._enabled = bool(cfg.get("enabled", True))
-        self._target_site = cfg.get("target_site") or ""
-        raw_dimensions = cfg.get("dimensions")
-        if not isinstance(raw_dimensions, (list, tuple)):
-            raw_dimensions = [raw_dimensions] if raw_dimensions else []
-        picked = [item for item in raw_dimensions if item in fingerprint.DIMENSION_LABELS]
-        self._dimensions = picked or list(fingerprint.DEFAULT_DIMENSIONS)
+        raw = cfg.get("rules_text") or ""
+        self._rules_text = raw if isinstance(raw, str) else str(raw)
+        self._rules, self._rule_errors = rules.parse_rules(self._rules_text)
+        self._lock_sites = bool(cfg.get("lock_sites", True))
         self._action_mode = "remove" if str(cfg.get("action_mode") or "") == "remove" else "notice"
         try:
             self._interval = int(cfg.get("interval") or 30)
@@ -113,113 +112,100 @@ class SingleSourceTracker(_PluginBase):
         return None
 
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        sites = store.site_options()
-        site_items = [
-            {"title": f"{item['name']}（{item['domain']}）" if item.get("domain") else item["name"],
-             "value": item.get("id")}
-            for item in sites
-        ]
-        if not site_items:
-            site_items = [{"title": "没读到站点，先去 MoviePilot 站点管理里配置", "value": 0}]
-        dimension_items = [
-            {"title": label, "value": key} for key, label in fingerprint.DIMENSION_LABELS.items()
-        ]
-        form = [
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    {"component": "VSwitch", "props": {
-                        "model": "enabled", "label": "启用插件",
-                        "hint": "关掉后不再定时巡检，也不拦截",
-                    }},
+        try:
+            form = [
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12}, "content": [
+                        {"component": "VTextarea", "props": {
+                            "model": "rules_text", "label": "规则表（一行一部剧）",
+                            "rows": 8, "autoGrow": True,
+                            "placeholder": rules.EXAMPLE,
+                            "hint": "匹配目标 => 站点 => 纳入 => 排除；多项用 ;; 分开，正则前面加 re:",
+                            "persistentHint": True,
+                        }},
+                    ]},
                 ]},
-                {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "target_site", "label": "固定用哪个站",
-                        "items": site_items,
-                        "hint": "绑定剧集时把订阅的站点范围写成这一站",
-                        "persistentHint": True,
-                    }},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSwitch", "props": {
+                            "model": "enabled", "label": "启用插件",
+                            "hint": "关掉后不巡检也不处置",
+                        }},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSwitch", "props": {
+                            "model": "lock_sites", "label": "按规则锁定站点范围",
+                            "hint": "把订阅的站点范围写成规则里的那一站",
+                        }},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSwitch", "props": {
+                            "model": "notify", "label": "发现异常时通知",
+                        }},
+                    ]},
                 ]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "dimensions", "label": "画质比对哪些项",
-                        "items": dimension_items, "multiple": True, "chips": True,
-                        "hint": "标题里没写的项只作提示，不算冲突",
-                        "persistentHint": True,
-                    }},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSelect", "props": {
+                            "model": "action_mode", "label": "发现异常怎么办",
+                            "items": [
+                                {"title": "只提醒（推荐）", "value": "notice"},
+                                {"title": "自动移除下载任务", "value": "remove"},
+                            ],
+                        }},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSelect", "props": {
+                            "model": "interval", "label": "多久巡检一次",
+                            "items": [
+                                {"title": "15 分钟", "value": 15},
+                                {"title": "30 分钟（推荐）", "value": 30},
+                                {"title": "1 小时", "value": 60},
+                                {"title": "2 小时", "value": 120},
+                            ],
+                        }},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
+                         "text": "规则在详情页也能看到，写错的行会标出来，不影响其他行。"},
+                    ]},
                 ]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "action_mode", "label": "发现异常怎么办",
-                        "items": [
-                            {"title": "只提醒（推荐）", "value": "notice"},
-                            {"title": "自动移除下载任务", "value": "remove"},
-                        ],
-                    }},
-                ]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    {"component": "VSelect", "props": {
-                        "model": "interval", "label": "多久巡检一次",
-                        "items": [
-                            {"title": "15 分钟", "value": 15},
-                            {"title": "30 分钟（推荐）", "value": 30},
-                            {"title": "1 小时", "value": 60},
-                            {"title": "2 小时", "value": 120},
-                        ],
-                    }},
-                ]},
-                {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                    {"component": "VSwitch", "props": {
-                        "model": "notify", "label": "发现冲突时通知",
-                    }},
-                ]},
-            ]},
-            {"component": "VRow", "content": [
-                {"component": "VCol", "props": {"cols": 12}, "content": [
-                    {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text": (
-                        "设置只管全局规则。具体哪部剧要锁定，在插件详情页点剧名旁边的按钮；"
-                        "解除绑定会把原来的站点范围还回去。清理任务要二次确认，不会动媒体库里的文件。"
-                    )},
-                ]},
-            ]},
-        ]
-        return form, {
-            "enabled": self._enabled,
-            "target_site": self._target_site,
-            "dimensions": self._dimensions,
-            "action_mode": self._action_mode,
-            "interval": self._interval,
-            "notify": self._notify,
-        }
+            ]
+            defaults = {
+                "enabled": self._enabled,
+                "rules_text": self._rules_text,
+                "lock_sites": self._lock_sites,
+                "action_mode": self._action_mode,
+                "interval": self._interval,
+                "notify": self._notify,
+            }
+            return form, defaults
+        except Exception:
+            return [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                     "text": "配置暂时读不出来，插件还是能跑；重开一次页面再试。"}], {}
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
             {"path": "/snapshot", "auth": "bear", "endpoint": self.api_snapshot,
              "methods": ["GET"], "summary": "读取最近一次巡检结果"},
             {"path": "/check", "auth": "bear", "endpoint": self.api_check,
-             "methods": ["POST"], "summary": "立即巡检来源与画质"},
-            {"path": "/bind", "auth": "bear", "endpoint": self.api_bind,
-             "methods": ["POST"], "summary": "把一条订阅锁定到目标站点"},
-            {"path": "/unbind", "auth": "bear", "endpoint": self.api_unbind,
-             "methods": ["POST"], "summary": "解除绑定并还原站点范围"},
-            {"path": "/apply", "auth": "bear", "endpoint": self.api_apply,
-             "methods": ["POST"], "summary": "批量锁定所有未绑定订阅"},
-            {"path": "/baseline", "auth": "bear", "endpoint": self.api_baseline,
-             "methods": ["POST"], "summary": "重新取一条订阅的画质基线"},
-            {"path": "/clean", "auth": "bear", "endpoint": self.api_clean,
-             "methods": ["POST"], "summary": "清理冲突的下载任务"},
+             "methods": ["POST"], "summary": "读取订阅与下载历史并巡检"},
             {"path": "/refresh", "auth": "bear", "endpoint": self.api_refresh,
              "methods": ["POST"], "summary": "重新绘制详情页"},
+            {"path": "/template", "auth": "bear", "endpoint": self.api_template,
+             "methods": ["POST"], "summary": "为未配规则的订阅生成模板"},
+            {"path": "/lock", "auth": "bear", "endpoint": self.api_lock,
+             "methods": ["POST"], "summary": "按规则锁定订阅站点范围"},
+            {"path": "/unlock", "auth": "bear", "endpoint": self.api_unlock,
+             "methods": ["POST"], "summary": "还原订阅原来的站点范围"},
+            {"path": "/clean", "auth": "bear", "endpoint": self.api_clean,
+             "methods": ["POST"], "summary": "清理不合规则的下载任务"},
         ]
 
     def get_command(self) -> List[Dict[str, Any]]:
         return [{
             "cmd": "/single_source", "event": EventType.PluginAction,
-            "desc": "巡检单源追剧的来源与画质", "category": "订阅",
+            "desc": "按规则巡检单源追剧", "category": "订阅",
             "data": {"action": "check"},
         }]
 
@@ -263,76 +249,77 @@ class SingleSourceTracker(_PluginBase):
             return
 
     def _collect(self, notify: bool = True) -> Dict[str, Any]:
+        errors: List[str] = list(self._rule_errors)
         try:
-            snapshot = store.inspect(
-                store.bindings(self), store.subscriptions(),
-                store.downloads(), self._dimensions,
-            )
+            subs = store.subscriptions()
+            records = store.downloads()
+            sites = store.site_options()
         except Exception as exc:
-            snapshot = store.inspect([], [], [], self._dimensions)
-            snapshot["error"] = f"{type(exc).__name__}: {exc}"[:160]
+            subs, records, sites = [], [], []
+            errors.append(f"读取宿主数据失败：{type(exc).__name__}")
+        snapshot = store.inspect(self._rules, subs, records, sites, errors)
         snapshot["mode"] = self._action_mode
+        snapshot["lock_sites"] = self._lock_sites
         snapshot["log"] = store.log_lines(self)
+        snapshot["template"] = store.template(self)
         store.save_snapshot(self, snapshot)
-        if notify and self._notify and snapshot["stats"]["conflicts"]:
+        if notify and self._notify and snapshot["stats"]["problems"]:
             self.post_message(
                 title="单源追剧",
-                text=f"发现 {snapshot['stats']['conflicts']} 条来源或画质不一致，去插件详情页看看。",
+                text=f"有 {snapshot['stats']['problems']} 条下载不合规则，去详情页看看。",
             )
         return snapshot
 
-    def _button(self, text: str, action: str, params: Optional[Dict[str, Any]] = None,
-                color: str = "primary", icon: str = "", confirm: str = "") -> Dict[str, Any]:
-        props: Dict[str, Any] = {
-            "color": color, "variant": "tonal", "size": "small", "class": "ma-1 mb-3",
-        }
-        if icon:
-            props["prependIcon"] = icon
+    def _page_data(self) -> Dict[str, Any]:
+        cached = store.last_snapshot(self)
+        if isinstance(cached, dict) and cached.get("checked_at"):
+            data = dict(cached)
+        else:
+            try:
+                subs = store.subscriptions()
+            except Exception:
+                subs = []
+            data = store.inspect(self._rules, subs, [], [], self._rule_errors)
+            data["checked_at"] = ""
+        data["mode"] = self._action_mode
+        data["lock_sites"] = self._lock_sites
+        data["log"] = store.log_lines(self)
+        data["template"] = store.template(self)
+        return data
+
+    def _button(self, text: str, action: str, color: str = "primary",
+                icon: str = "", params: Optional[Dict[str, Any]] = None,
+                confirm: str = "") -> Dict[str, Any]:
         click: Dict[str, Any] = {
             "api": f"plugin/SingleSourceTracker/{action}",
             "method": "post", "params": dict(params or {}),
         }
         if confirm:
             click["confirm"] = confirm
+        props: Dict[str, Any] = {
+            "color": color, "variant": "tonal", "size": "small", "class": "ma-1 mb-3",
+        }
+        if icon:
+            props["prependIcon"] = icon
         return {"component": "VBtn", "text": text, "props": props, "events": {"click": click}}
 
-    def _page_data(self) -> Dict[str, Any]:
-        cached = store.last_snapshot(self)
-        if not cached.get("checked_at"):
-            try:
-                cached = self._collect(notify=False)
-            except Exception:
-                cached = {}
-        cached["mode"] = self._action_mode
-        cached["log"] = store.log_lines(self)
-        return cached
-
     def get_page(self) -> List[Dict[str, Any]]:
-        data = self._page_data()
-        page: List[Dict[str, Any]] = [{"component": "div", "html": renderer.render(data)}]
-        page.append(self._button("立即巡检", "check", color="primary", icon="mdi-refresh"))
-        page.append(self._button("刷新页面", "refresh", icon="mdi-reload"))
-        page.append(self._button("锁定全部未绑定", "apply", color="primary",
-                                 icon="mdi-lock", confirm="把当前所有未绑定订阅都锁定到目标站点？"))
-        page.append(self._button("清理异常任务", "clean", color="error", icon="mdi-delete-outline",
-                                 params={"confirm": "清理"}, confirm="确认移除冲突的下载任务？"))
-
-        pending = data.get("pending") if isinstance(data.get("pending"), list) else []
-        for sub in [dict(item) for item in pending if isinstance(item, dict)][:8]:
-            name = str(sub.get("name") or "未命名")
-            page.append(self._button(f"锁定 {name[:14]}", "bind",
-                                     params={"sid": sub.get("id")}, color="primary"))
-        rows = data.get("rows") if isinstance(data.get("rows"), list) else []
-        bound = [dict(item) for item in rows if isinstance(item, dict)]
-        for row in bound[:6]:
-            name = str(row.get("name") or "未命名")
-            page.append(self._button(f"解除 {name[:14]}", "unbind",
-                                     params={"sid": row.get("sid")}))
-        for row in [item for item in bound if int(item.get("conflicts") or 0) > 0][:4]:
-            name = str(row.get("name") or "未命名")
-            page.append(self._button(f"重取基线 {name[:10]}", "baseline",
-                                     params={"sid": row.get("sid")}))
-        return page
+        try:
+            html = renderer.render(self._page_data())
+        except Exception:
+            html = '<div class="sst">单源追剧已就绪，点「立即巡检」读取 MP 订阅。</div>'
+        buttons = [
+            self._button("立即巡检", "check", icon="mdi-refresh"),
+            self._button("刷新页面", "refresh", icon="mdi-reload"),
+            self._button("生成规则模板", "template", icon="mdi-text-box-outline"),
+            self._button("按规则锁定站点", "lock", color="primary", icon="mdi-lock",
+                         confirm="把已配规则订阅的站点范围改成规则里的那一站？"),
+            self._button("还原站点范围", "unlock", icon="mdi-lock-open-outline",
+                         confirm="把所有锁定过的订阅还原成原来的站点范围？"),
+            self._button("清理异常任务", "clean", color="error", icon="mdi-delete-outline",
+                         params={"confirm": "清理"}, confirm="确认移除不合规则的下载任务？"),
+        ]
+        return buttons + [{"component": "div", "html": html}]
 
     def api_snapshot(self) -> Response:
         return Response(success=True, data=self._page_data())
@@ -340,107 +327,50 @@ class SingleSourceTracker(_PluginBase):
     def api_check(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         data = self._collect()
         return Response(success=True,
-                        message=f"巡检完成，{data['stats']['conflicts']} 条冲突",
+                        message=f"读到 {data['stats']['subscriptions']} 条订阅，"
+                                f"{data['stats']['problems']} 条下载不合规则",
                         data={"html": renderer.render(data), "stats": data["stats"]})
 
     def api_refresh(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        data = self._page_data()
         return Response(success=True, message="页面已刷新",
-                        data={"html": renderer.render(data)})
+                        data={"html": renderer.render(self._page_data())})
 
-    def _bind_one(self, sid: Any) -> Tuple[bool, str]:
-        sites = store.site_options()
-        site = store.find_site(sites, self._target_site)
-        if not site:
-            return False, "先在设置里选好目标站点"
-        sub = next((item for item in store.subscriptions()
-                    if str(item.get("id")) == str(sid)), None)
-        if not sub:
-            return False, "这条订阅找不到了"
-        bound = store.bindings(self)
-        if any(str(item.get("sid")) == str(sid) for item in bound):
-            return False, "已经绑定过了"
-        records = [item for item in store.downloads()
-                   if store.record_matches(item, {"name": sub.get("name"), "season": sub.get("season")})]
-        ok, reason = store.set_sites(sid, [site.get("id")])
-        bound.append({
-            "sid": sid,
-            "name": sub.get("name"),
-            "season": sub.get("season"),
-            "site_id": site.get("id"),
-            "site_name": site.get("name"),
-            "domain": site.get("domain") or "",
-            "original_sites": list(sub.get("sites") or []),
-            "baseline": store.pick_baseline(records, self._dimensions),
-            "locked": ok,
-            "locked_note": reason,
-            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-        store.save_bindings(self, bound)
-        note = "" if ok else "（站点范围写入失败，只做巡检）"
-        store.append_log(self, f"绑定《{sub.get('name')}》到 {site.get('name')}{note}")
-        return True, f"已绑定《{sub.get('name')}》{note}"
+    def api_template(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        try:
+            subs = store.subscriptions()
+        except Exception:
+            subs = []
+        text = rules.template_for(subs, self._rules)
+        store.save_template(self, text)
+        store.append_log(self, f"生成 {len(text.splitlines())} 行规则模板")
+        return Response(success=True, message=f"生成 {len(text.splitlines())} 行，复制去设置页改",
+                        data={"template": text, "html": renderer.render(self._page_data())})
 
-    def api_bind(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        sid = (payload or {}).get("sid")
-        if sid in (None, ""):
-            return Response(success=False, message="缺少订阅 ID")
-        ok, message = self._bind_one(sid)
-        data = self._collect(notify=False) if ok else self._page_data()
-        return Response(success=ok, message=message, data={"html": renderer.render(data)})
-
-    def api_unbind(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        sid = (payload or {}).get("sid")
-        if sid in (None, ""):
-            return Response(success=False, message="缺少订阅 ID")
-        bound = store.bindings(self)
-        target = next((item for item in bound if str(item.get("sid")) == str(sid)), None)
-        if not target:
-            return Response(success=False, message="这条订阅没有绑定")
-        store.set_sites(sid, target.get("original_sites") or [])
-        store.save_bindings(self, [item for item in bound if str(item.get("sid")) != str(sid)])
-        store.append_log(self, f"解除《{target.get('name')}》，站点范围已还原")
-        data = self._collect(notify=False)
-        return Response(success=True, message=f"已解除《{target.get('name')}》",
-                        data={"html": renderer.render(data)})
-
-    def api_apply(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        subs = store.subscriptions()
-        bound = store.bindings(self)
-        bound_ids = {str(item.get("sid")) for item in bound}
-        pending = [item for item in subs if str(item.get("id")) not in bound_ids][:20]
-        if not pending:
-            return Response(success=True, message="没有待绑定的订阅",
-                            data={"html": renderer.render(self._page_data())})
-        done, messages = 0, []
-        for sub in pending:
-            ok, message = self._bind_one(sub.get("id"))
-            if ok:
-                done += 1
-            else:
-                messages.append(message)
-        text = f"已锁定 {done} 部" if done else "一部都没锁定"
+    def api_lock(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        if not self._lock_sites:
+            return Response(success=False, message="设置里没开「按规则锁定站点范围」")
+        try:
+            subs = store.subscriptions()
+            sites = store.site_options()
+            done, messages = store.lock_sites(self, self._rules, subs, sites)
+        except Exception as exc:
+            return Response(success=False, message=f"锁定失败：{type(exc).__name__}")
+        text = f"锁定 {done} 条订阅的站点范围"
         if messages:
             text += "；" + messages[0]
-        data = self._collect(notify=False)
         return Response(success=done > 0, message=text,
-                        data={"html": renderer.render(data)})
+                        data={"html": renderer.render(self._collect(notify=False))})
 
-    def api_baseline(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        sid = (payload or {}).get("sid")
-        bound = store.bindings(self)
-        target = next((item for item in bound if str(item.get("sid")) == str(sid)), None)
-        if not target:
-            return Response(success=False, message="这条订阅没有绑定")
-        records = [item for item in store.downloads() if store.record_matches(item, target)]
-        if not records:
-            return Response(success=False, message="还没有可参照的下载记录")
-        target["baseline"] = store.pick_baseline(records, self._dimensions)
-        store.save_bindings(self, bound)
-        store.append_log(self, f"重取《{target.get('name')}》画质基线")
-        data = self._collect(notify=False)
-        return Response(success=True, message="基线已更新",
-                        data={"html": renderer.render(data)})
+    def api_unlock(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        try:
+            done, messages = store.unlock_sites(self)
+        except Exception as exc:
+            return Response(success=False, message=f"还原失败：{type(exc).__name__}")
+        text = f"还原了 {done} 条订阅"
+        if messages:
+            text += "；" + messages[0]
+        return Response(success=True, message=text,
+                        data={"html": renderer.render(self._collect(notify=False))})
 
     def api_clean(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         if str((payload or {}).get("confirm") or "") != "清理":
@@ -448,17 +378,14 @@ class SingleSourceTracker(_PluginBase):
         if self._action_mode != "remove":
             return Response(success=False, message="当前是只提醒模式，没有移除任何任务")
         data = self._collect(notify=False)
-        targets = [item for item in data.get("issues", [])
-                   if item.get("level") == "conflict" and item.get("hash")][:20]
+        targets = [item for item in data.get("issues", []) if item.get("hash")][:20]
         done, failed = 0, 0
         for issue in targets:
             ok, note = store.remove_torrent(issue)
-            if ok:
-                done += 1
-            else:
-                failed += 1
+            done += 1 if ok else 0
+            failed += 0 if ok else 1
             store.append_log(self, f"清理 {issue.get('name')}：{note}")
-        text = f"移除 {done} 个任务" + (f"，{failed} 个没成功" if failed else "")
-        data = self._collect(notify=False)
-        return Response(success=True, message=text,
-                        data={"html": renderer.render(data), "removed": done})
+        return Response(success=True, message=f"移除 {done} 个任务" +
+                        (f"，{failed} 个没成功" if failed else ""),
+                        data={"html": renderer.render(self._collect(notify=False)),
+                              "removed": done})

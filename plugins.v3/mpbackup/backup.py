@@ -12,7 +12,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
+SCHEMA = 2
 SNAPSHOT_PREFIX = "mpbackup_"
 RESTORE_PREFIX = "restore_"
 CLEAN_CONFIRM = "CLEAN_MPBACKUP"
@@ -22,13 +23,32 @@ SETTINGS_KEYS = (
     "LIBRARY_PATHS", "MEDIA_PATH", "TRANSFER_PATH",
 )
 
+USER_FIELDS = (
+    "id", "name", "email", "hashed_password", "is_active", "is_superuser",
+    "avatar", "is_otp", "otp_secret", "permissions", "settings",
+)
+
+SYSTEM_CONFIG_KEYS = (
+    "Downloaders", "MediaServers", "Notifications", "NotificationSwitchs",
+    "IndexerSites", "RssSites", "Directories", "Storages",
+    "CustomReleaseGroups", "CustomIdentifiers", "TransferExcludeWords",
+    "TorrentsPriority", "SearchFilterRuleGroups", "SubscribeFilterRuleGroups",
+    "BestVersionFilterRuleGroups", "UserSiteAuthParams", "MediaClassificationPolicy",
+)
+
+SITE_PUBLIC_FIELDS = ("name", "domain", "url", "pri", "is_active")
+SITE_SECRET_FIELDS = ("name", "domain", "cookie", "ua", "apikey", "token")
+
 TOGGLEABLE = ("subscriptions", "download_history", "transfer_history",
               "sites", "services", "plugin_data")
-ALWAYS_ON = ("settings", "plugins")
-ALL_SOURCES = ("settings", "subscriptions", "download_history", "transfer_history",
-               "sites", "services", "plugins", "plugin_data")
-HOST_SOURCES = ("settings", "subscriptions", "download_history", "transfer_history",
-                "sites", "services", "plugins")
+ALWAYS_ON = ("settings", "plugins", "users", "subscription_history",
+             "plugin_configs", "system_config")
+ALL_SOURCES = ("settings", "users", "subscriptions", "subscription_history",
+               "sites", "services", "system_config", "plugin_configs",
+               "download_history", "transfer_history", "plugins", "plugin_data")
+HOST_SOURCES = ("settings", "users", "subscriptions", "subscription_history",
+                "sites", "services", "system_config", "plugin_configs",
+                "download_history", "transfer_history", "plugins")
 DIFF_SECTIONS = ("subscriptions", "sites", "services", "plugins")
 
 DIFF_KEYS = {
@@ -46,7 +66,8 @@ SECTION_OPTIONS = (
     ("transfer_history", "整理历史"), ("sites", "站点"),
     ("services", "服务"), ("plugin_data", "插件数据"),
 )
-DEFAULT_SECTIONS = ("subscriptions", "sites", "services", "plugin_data")
+# 历史两类以前默认不导，现在默认全开，配合「所有的都备份」
+DEFAULT_SECTIONS = tuple(TOGGLEABLE)
 
 CRON_CHOICES = (
     ("0 2 * * *", "每天凌晨 2 点"),
@@ -58,7 +79,8 @@ CRON_CHOICES = (
 )
 DEFAULT_CRON = "0 4 * * *"
 
-HISTORY_LIMIT = 2000
+HISTORY_LIMIT = 5000
+SUBSCRIPTION_HISTORY_LIMIT = 2000
 PAGE_SIZE = 200
 MAX_PAGES = 40
 PLUGIN_FILE_LIMIT = 1024 * 1024
@@ -86,6 +108,7 @@ _GUIDE = """# MP 备份迁移 · 恢复清单
 对照着手动恢复，插件不会替你改配置，也不会往数据库里写任何记录。
 Cookie、Token、密码、Passkey、Authorization、UA 这类字段已经剔除或打码，
 站点和服务的密钥请重新到对应后台获取后再填。
+现在也能改用详情页的「导入迁移」按钮让插件帮忙写回，这份清单留给手工核对。
 
 建议按下面的顺序来，先对齐目录，再挂服务，最后补订阅和历史：
 
@@ -253,6 +276,13 @@ def _settings() -> Dict[str, Any]:
     return out
 
 
+def _users() -> List[Dict[str, Any]]:
+    from app.db.oper.user import UserOper
+
+    rows = UserOper().list() or []
+    return [{key: _plain(as_dict(row).get(key)) for key in USER_FIELDS} for row in rows]
+
+
 def _subscriptions() -> List[Dict[str, Any]]:
     from app.sdk import queries
 
@@ -272,15 +302,35 @@ def _subscriptions() -> List[Dict[str, Any]]:
     return rows
 
 
-def _history(method: str) -> List[Dict[str, Any]]:
+def _subscription_history() -> List[Dict[str, Any]]:
     from app.sdk import queries
 
+    fn = getattr(queries, "list_subscription_history", None)
+    if not callable(fn):
+        raise RuntimeError("list_subscription_history 不可用")
+    rows: List[Dict[str, Any]] = []
+    page_no = 1
+    while len(rows) < SUBSCRIPTION_HISTORY_LIMIT and page_no <= MAX_PAGES:
+        batch = _page_items(fn(page={"page": page_no, "count": 200}))
+        if not batch:
+            break
+        rows.extend(as_dict(item) for item in batch)
+        if len(batch) < 200:
+            break
+        page_no += 1
+    return rows[:SUBSCRIPTION_HISTORY_LIMIT]
+
+
+def _history(method: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    from app.sdk import queries
+
+    cap = limit or HISTORY_LIMIT
     fn = getattr(queries, method, None)
     if not callable(fn):
         raise RuntimeError(f"{method} 不可用")
     rows: List[Dict[str, Any]] = []
     page_no = 1
-    while len(rows) < HISTORY_LIMIT and page_no <= MAX_PAGES:
+    while len(rows) < cap and page_no <= MAX_PAGES:
         batch = _page_items(fn(page={"page": page_no, "count": PAGE_SIZE}))
         if not batch:
             break
@@ -288,15 +338,17 @@ def _history(method: str) -> List[Dict[str, Any]]:
         if len(batch) < PAGE_SIZE:
             break
         page_no += 1
-    return rows[:HISTORY_LIMIT]
+    return rows[:cap]
 
 
 def _sites() -> List[Dict[str, Any]]:
     from app.db.oper.site import SiteOper
 
-    rows = SiteOper().list_order_by_pri() or []
-    keep = ("name", "domain", "url", "pri", "is_active")
-    return [{key: as_dict(row).get(key) for key in keep} for row in rows]
+    oper = SiteOper()
+    fn = getattr(oper, "list_order_by_pri", None) or getattr(oper, "list", None)
+    if not callable(fn):
+        raise RuntimeError("SiteOper 没有可用的列表方法")
+    return [as_dict(row) for row in (fn() or [])]
 
 
 def _services() -> List[Dict[str, Any]]:
@@ -316,6 +368,114 @@ def _services() -> List[Dict[str, Any]]:
                 out.append({"name": name, "kind": kind, "config": detail or _plain(cfg)})
         except Exception:
             continue
+    return out
+
+
+def _system_config() -> Dict[str, Any]:
+    from app.db.oper.systemconfig import SystemConfigOper
+
+    oper = SystemConfigOper()
+    load = getattr(oper, "load_snapshot", None)
+    if callable(load):
+        try:
+            load()
+        except Exception:
+            pass
+    raw: Any = {}
+    all_fn = getattr(oper, "all", None)
+    if callable(all_fn):
+        try:
+            raw = all_fn()
+        except Exception:
+            raw = {}
+    data: Dict[str, Any] = {}
+    if isinstance(raw, dict):
+        data = raw
+    elif isinstance(raw, (list, tuple)):
+        for item in raw:
+            row = as_dict(item)
+            key = row.get("key") or row.get("name")
+            if key is not None:
+                data[str(key)] = row.get("value")
+    out: Dict[str, Any] = {}
+    for key in SYSTEM_CONFIG_KEYS:
+        if key in data:
+            out[key] = _plain(data[key])
+        else:
+            get_fn = getattr(oper, "get", None)
+            if callable(get_fn):
+                try:
+                    value = get_fn(key)
+                    if value is not None:
+                        out[key] = _plain(value)
+                except Exception:
+                    pass
+    return out
+
+
+def _plugin_ids() -> List[str]:
+    ids: List[str] = []
+    try:
+        from app.sdk.plugin.manager import PluginManager
+
+        manager = PluginManager()
+        for attr in ("get_plugin_ids", "get_installed_plugins"):
+            fn = getattr(manager, attr, None)
+            if not callable(fn):
+                continue
+            try:
+                for item in list(fn() or []):
+                    row = as_dict(item)
+                    pid = row.get("id") or row.get("plugin_id")
+                    if pid is None and isinstance(item, str):
+                        pid = item
+                    if pid is not None:
+                        ids.append(str(pid))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return list(dict.fromkeys(ids))
+
+
+def _plugin_configs() -> List[Dict[str, Any]]:
+    from app.db.oper.plugininstance import PluginInstanceOper
+
+    oper = PluginInstanceOper()
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for attr in ("list", "get_all"):
+        fn = getattr(oper, attr, None)
+        if not callable(fn):
+            continue
+        try:
+            rows = list(fn() or [])
+        except Exception:
+            continue
+        for row in rows:
+            item = as_dict(row)
+            iid = item.get("id") or item.get("instance_id")
+            if iid is not None and "config_data" in item:
+                out.append({
+                    "instance_id": _plain(iid),
+                    "source_plugin_id": _plain(item.get("plugin_id") or item.get("source_plugin_id")),
+                    "config_data": _plain(item.get("config_data")),
+                })
+                seen.add(str(iid))
+        if rows:
+            break
+    get_config = getattr(oper, "get_config_data", None)
+    if callable(get_config):
+        for pid in _plugin_ids():
+            if pid in seen:
+                continue
+            try:
+                cfg = get_config(pid)
+            except Exception:
+                continue
+            if cfg is not None:
+                out.append({"instance_id": _plain(pid), "source_plugin_id": _plain(pid),
+                            "config_data": _plain(cfg)})
     return out
 
 
@@ -346,10 +506,27 @@ def _under(path: Path, directory: Path) -> bool:
 
 
 def _plugin_data(data_path: str, exclude_dir: Path) -> List[Tuple[str, Any]]:
+    out: List[Tuple[str, Any]] = []
+    # 先看宿主有没有把每个插件的 key/value 直接吐出来
+    try:
+        from app.db.oper.plugindata import PluginDataOper
+
+        oper = PluginDataOper()
+        get_all = getattr(oper, "get_data_all", None)
+        if callable(get_all):
+            for pid in _plugin_ids():
+                try:
+                    data = get_all(pid)
+                except Exception:
+                    continue
+                if isinstance(data, dict) and data:
+                    out.append(("plugin_data/" + str(pid) + "/_kv.json", mask(data)))
+    except Exception:
+        pass
+
     root = Path(data_path)
     if not root.is_dir():
-        return []
-    out: List[Tuple[str, Any]] = []
+        return out
     scanned = 0
     for path in root.rglob("*.json"):
         scanned += 1
@@ -370,6 +547,14 @@ def _plugin_data(data_path: str, exclude_dir: Path) -> List[Tuple[str, Any]]:
     return out
 
 
+def _site_public_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{key: row.get(key) for key in SITE_PUBLIC_FIELDS} for row in rows]
+
+
+def _site_secret_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{key: _plain(row.get(key)) for key in SITE_SECRET_FIELDS} for row in rows]
+
+
 def _collect_source(name: str, sections: List[str], data_path: str,
                     exclude_dir: Path) -> Tuple[Any, Dict[str, Any]]:
     if name not in ALWAYS_ON and name not in sections:
@@ -378,11 +563,15 @@ def _collect_source(name: str, sections: List[str], data_path: str,
         return [], {"status": "unavailable", "reason": "离线环境，宿主 SDK 不可用", "count": 0}
     collectors = {
         "settings": _settings,
+        "users": _users,
         "subscriptions": _subscriptions,
-        "download_history": lambda: _history("list_download_history"),
-        "transfer_history": lambda: _history("list_transfer_history"),
+        "subscription_history": _subscription_history,
         "sites": _sites,
         "services": _services,
+        "system_config": _system_config,
+        "plugin_configs": _plugin_configs,
+        "download_history": lambda: _history("list_download_history"),
+        "transfer_history": lambda: _history("list_transfer_history"),
         "plugins": _plugins,
         "plugin_data": lambda: _plugin_data(data_path, exclude_dir),
     }
@@ -395,7 +584,7 @@ def _collect_source(name: str, sections: List[str], data_path: str,
 
 
 def write_snapshot(backup_dir: Path, data_path: str, sections: List[str],
-                   keep: int) -> Dict[str, Any]:
+                   keep: int, include_secrets: bool = False) -> Dict[str, Any]:
     """写一份 zip 快照，返回文件名和 manifest；不负责轮转。"""
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -410,16 +599,24 @@ def write_snapshot(backup_dir: Path, data_path: str, sections: List[str],
         collected[name] = data
         sources[name] = info
 
+    counts: Dict[str, int] = {name: sources[name]["count"] for name in ALL_SOURCES}
+    secret_rows = _site_secret_rows(collected["sites"]) if include_secrets else []
+    counts["site_secrets"] = len(secret_rows) if include_secrets else 0
+
     manifest = {
         "plugin": "MP 备份迁移",
         "version": PLUGIN_VERSION,
+        "schema": SCHEMA,
         "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "file": filename,
         "keep": keep,
         "sections": list(sections),
         "sources": sources,
+        "counts": counts,
+        "contains_secrets": bool(include_secrets),
         "limits": {
             "history": HISTORY_LIMIT,
+            "subscription_history": SUBSCRIPTION_HISTORY_LIMIT,
             "plugin_file_bytes": PLUGIN_FILE_LIMIT,
             "plugin_file_count": PLUGIN_FILE_COUNT,
         },
@@ -429,8 +626,13 @@ def write_snapshot(backup_dir: Path, data_path: str, sections: List[str],
         for name in ALL_SOURCES:
             if name == "plugin_data":
                 continue
-            payload = collected[name] if isinstance(collected[name], (list, dict)) else []
-            zf.writestr(name + ".json", _dump(mask(payload)))
+            data = collected[name] if isinstance(collected[name], (list, dict)) else []
+            if name == "sites":
+                zf.writestr("sites.json", _dump(mask(_site_public_rows(data))))
+            else:
+                zf.writestr(name + ".json", _dump(mask(data)))
+        if include_secrets:
+            zf.writestr("site_secrets.json", _dump(secret_rows))
         zf.writestr("plugin_data/", "")
         for arc, obj in (collected["plugin_data"] or []):
             zf.writestr(arc, _dump(obj))

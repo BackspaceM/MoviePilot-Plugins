@@ -44,9 +44,14 @@ _STYLE = """
 .mpbk-tag{font-size:10px;padding:2px 7px;border-radius:6px;background:rgba(99,102,241,.16);color:#8B8BF5;font-weight:600;white-space:nowrap}
 .mpbk-tag.warn{background:rgba(245,158,11,.14);color:#F59E0B}
 .mpbk-tag.ok{background:rgba(16,185,129,.14);color:#10B981}
+.mpbk-tag.err{background:rgba(239,68,68,.14);color:#EF4444}
+.mpbk-tag.info{background:rgba(99,102,241,.14);color:#8B8BF5}
 .mpbk-pre{font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11.5px;
   line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:12px 14px;border-radius:12px;
   background:rgba(127,127,127,.08);border:1px solid rgba(127,127,127,.18)}
+.mpbk-log{max-height:240px;overflow:auto}
+.mpbk-note{font-size:12px;opacity:.74;line-height:1.85}
+.mpbk-note b{font-weight:700}
 .mpbk-foot{font-size:11px;opacity:.46;margin-top:14px;line-height:1.7}
 .mpbk-badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;
   background:rgba(99,102,241,.16);color:#8B8BF5;margin-left:8px;vertical-align:middle}
@@ -63,8 +68,17 @@ _ICONS = {
 
 _SECTION_NAMES = {
     "subscriptions": "订阅", "download_history": "下载历史", "transfer_history": "整理历史",
-    "sites": "站点", "services": "服务", "plugin_data": "插件数据",
+    "sites": "站点", "services": "服务", "plugin_data": "插件数据", "users": "用户",
+    "subscription_history": "订阅历史", "system_config": "系统配置",
+    "plugin_configs": "插件配置",
 }
+
+_IMPORT_NOTICE = (
+    "导入迁移：先点某份快照的「预览导入」看差异，这一步只读、零风险。"
+    "导入默认试运行，只列出将要执行的动作，不写回时数据库一点没动。"
+    "真要写回必须点「执行导入」并确认，才会按设置里的冲突策略落库。"
+    "开了「含明文凭据」的快照里有 Cookie / UA / Apikey / Token，别外传，用完及时从备份目录清掉。"
+)
 
 
 def _e(value: Any) -> str:
@@ -119,12 +133,13 @@ def _snapshots_block(data: Dict[str, Any]) -> str:
             "<tr>"
             f'<td>{_e(r.get("name"))}</td>'
             f'<td>{_e(r.get("size_text"))}</td>'
+            f'<td>{_e(r.get("count") if r.get("count") is not None else "—")}</td>'
             f'<td>{_e(r.get("mtime"))}</td>'
             "</tr>"
             for r in rows[:20]
         )
         body = ('<div class="mpbk-scroll"><table class="mpbk-table"><thead><tr>'
-                '<th>文件名</th><th>大小</th><th>生成时间</th></tr></thead><tbody>'
+                '<th>文件名</th><th>大小</th><th>条目数</th><th>生成时间</th></tr></thead><tbody>'
                 + trs + "</tbody></table></div>")
     note = f'共 {len(rows)} 份' if rows else ""
     return ('<div class="mpbk-section"><div class="mpbk-card">'
@@ -181,6 +196,95 @@ def _guide_block(data: Dict[str, Any]) -> str:
             '<div class="mpbk-sec-title">恢复清单</div>' + body + "</div></div>")
 
 
+def _import_notice_block(data: Dict[str, Any]) -> str:
+    text = data.get("import_guide") or _IMPORT_NOTICE
+    flag = ""
+    if data.get("contains_secrets"):
+        flag = ('<div class="mpbk-row" style="border-bottom:0;padding-top:0">'
+                '<span class="mpbk-label">最近这份快照</span>'
+                '<span class="mpbk-tag err">含明文凭据，别外传</span></div>')
+    return ('<div class="mpbk-section"><div class="mpbk-card">'
+            '<div class="mpbk-sec-title">导入迁移'
+            '<span class="mpbk-sec-note">预览 → 确认 → 写回</span></div>'
+            + flag
+            + f'<div class="mpbk-note">{_e(text)}</div></div></div>')
+
+
+def _status_tag(status: Any) -> str:
+    text = str(status or "")
+    tone = "ok" if text == "ok" else ("err" if text in ("error", "unavailable") else "info")
+    return f'<span class="mpbk-tag {tone}">{_e(text)}</span>'
+
+
+def _preview_block(data: Dict[str, Any]) -> str:
+    preview = data.get("preview")
+    if not preview:
+        body = ('<div class="mpbk-empty">还没预览过。点快照行上的「预览导入」或上面的'
+                '「预览最近快照」，这里会列出每类将新增、将跳过、将覆盖的条数。</div>')
+    elif not preview.get("ok"):
+        body = '<div class="mpbk-empty">' + _e(preview.get("message") or "预览失败") + "</div>"
+    else:
+        trs = "".join(
+            "<tr>"
+            f'<td>{_e(sec.get("label"))}</td>'
+            f'<td>{_e(sec.get("total"))}</td>'
+            f'<td>{_e(sec.get("current"))}</td>'
+            f'<td><span class="mpbk-tag ok">{_e(sec.get("will_add"))}</span></td>'
+            f'<td>{_e(sec.get("will_skip"))}</td>'
+            f'<td>{_e(sec.get("will_overwrite"))}</td>'
+            f'<td>{_status_tag(sec.get("status"))}</td>'
+            "</tr>"
+            for sec in (preview.get("sections") or [])
+        )
+        table = ('<div class="mpbk-scroll"><table class="mpbk-table"><thead><tr>'
+                 '<th>分类</th><th>快照条数</th><th>现有条数</th><th>将新增</th>'
+                 '<th>将跳过</th><th>将覆盖</th><th>状态</th></tr></thead><tbody>'
+                 + trs + "</tbody></table></div>")
+        secret = ""
+        if preview.get("contains_secrets"):
+            secret = ('<div class="mpbk-note" style="margin-top:8px">'
+                      '<span class="mpbk-tag err">含明文凭据</span> 这份快照带站点凭据，保管好。</div>')
+        body = ('<div class="mpbk-row" style="border-bottom:0;padding-top:0">'
+                f'<span class="mpbk-label">预览 {_e(preview.get("file"))} · schema {_e(preview.get("schema"))}</span>'
+                f'<b>{_e(preview.get("message"))}</b></div>'
+                + table + secret)
+    return ('<div class="mpbk-section"><div class="mpbk-card">'
+            '<div class="mpbk-sec-title">导入预览'
+            '<span class="mpbk-sec-note">只读，不改数据</span></div>'
+            + body + "</div></div>")
+
+
+def _restore_block(data: Dict[str, Any]) -> str:
+    result = data.get("restore")
+    if not result:
+        body = ('<div class="mpbk-empty">还没跑过导入。默认试运行只列清单不写库；'
+                '确认后点「执行导入」才会写回，结果和逐条日志会显示在这里。</div>')
+    else:
+        mode = _e(result.get("mode"))
+        head = ('<div class="mpbk-row" style="border-bottom:0;padding-top:0">'
+                f'<span class="mpbk-label">本次是<b>{mode}</b>'
+                f' · 策略 {_e(result.get("strategy"))}</span>'
+                f'<span class="mpbk-tag {"ok" if result.get("dry_run") else "warn"}">'
+                f'{"没写库" if result.get("dry_run") else "已写回"}</span></div>')
+        totals = result.get("totals") or {}
+        summary = ("".join(
+            f'<div class="mpbk-row"><span class="mpbk-label">{_e(label)}</span>'
+            f'<b>{_e(totals.get(key, 0))}</b></div>'
+            for key, label in (("planned", "将处理"), ("added", "新增"),
+                               ("skipped", "跳过"), ("overwritten", "覆盖"),
+                               ("failed", "失败"))
+        ))
+        logs = result.get("log") or []
+        log_html = ('<div class="mpbk-pre mpbk-log" style="margin-top:10px">'
+                    + _e("\n".join(str(item) for item in logs[:400])) + "</div>") if logs else ""
+        body = (f'<div class="mpbk-note" style="margin-bottom:8px">{_e(result.get("message"))}</div>'
+                + head + summary + log_html)
+    return ('<div class="mpbk-section"><div class="mpbk-card">'
+            '<div class="mpbk-sec-title">导入结果'
+            '<span class="mpbk-sec-note">试运行 / 执行</span></div>'
+            + body + "</div></div>")
+
+
 def render(data: Dict[str, Any]) -> str:
     offline = bool(data.get("offline"))
     snapshots = data.get("snapshots") or []
@@ -195,8 +299,8 @@ def render(data: Dict[str, Any]) -> str:
         _kpi("保留份数", data.get("keep", 7), "超出的旧快照会自动清掉", "clock"),
         _kpi("最近变更", changed, hint, "swap"),
     ]
-    foot = ("插件只导出清单，不写回数据库；恢复要照着清单在 MoviePilot 里手工做。"
-            "敏感字段已打码，不会落盘。")
+    foot = ("备份默认脱敏；导入默认试运行，确认后才写回，不写回时零风险。"
+            "含凭据的快照含明文，别外传，用完及时清掉。")
     return "".join([
         _STYLE,
         '<div class="mpbk">',
@@ -205,14 +309,17 @@ def render(data: Dict[str, Any]) -> str:
         'stroke-linecap="round" stroke-linejoin="round">'
         '<path d="M4 8h13m0 0-3-3m3 3-3 3"/><path d="M20 16H7m0 0 3-3m-3 3 3 3"/></svg></div>',
         f'<div><div class="mpbk-title">MP 备份迁移{badge}</div>'
-        '<div class="mpbk-sub">把能读到的配置和记录打包存档，随时看变化</div></div>',
+        '<div class="mpbk-sub">能读到的配置和记录都打包，也能预览后导入回来</div>',
         '</div><div class="mpbk-actions">',
         f'<span class="mpbk-time">更新于 {_e(data.get("generated_at"))}</span>',
-        '<span class="mpbk-pill">只读导出</span>',
+        '<span class="mpbk-pill">可导出 · 可导入</span>',
         '</div></div>',
         '<div class="mpbk-grid">' + "".join(kpis) + "</div>",
         _status_block(data),
         _snapshots_block(data),
+        _import_notice_block(data),
+        _preview_block(data),
+        _restore_block(data),
         _diff_block(data),
         _guide_block(data),
         f'<div class="mpbk-foot">{_e(foot)}</div></div>',
