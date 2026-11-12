@@ -1,4 +1,4 @@
-"""HDWinG 辅种插件：站点解析、匹配判定与 V3 插件契约测试。
+"""名称辅种插件：站点解析、匹配判定与 V3 插件契约测试。
 
 测试不访问网络、不依赖下载器实例：站点客户端只测纯解析与相似度函数，
 插件主类用 ``object.__new__`` 绕过宿主插件管理器，仅设置被测字段。
@@ -12,8 +12,8 @@ from typing import Any, Dict, List
 
 import pytest
 
-from app.plugins.hdwingcrossseed import HDWinGCrossSeed
-from app.plugins.hdwingcrossseed.hdwing import (
+from app.plugins.namecrossseed import NameCrossSeed
+from app.plugins.namecrossseed.site import (
     SiteTorrent,
     TorrentMeta,
     best_similarity,
@@ -25,7 +25,7 @@ from app.plugins.hdwingcrossseed.hdwing import (
     parse_torrent,
     split_tokens,
 )
-from app.plugins.hdwingcrossseed.rank import rank_candidates, size_diff_ratio
+from app.plugins.namecrossseed.rank import rank_candidates, size_diff_ratio
 
 MOVIE = "Jojo.Rabbit.2019.1080p.MA.WEBRip.DD+5.1.x264-Porco"
 OTHER = "The.Mandalorian.S02.1080p.WEB-DL.x264-Group"
@@ -36,9 +36,9 @@ SIZE = 15161507260
 # 构造被测对象
 # ---------------------------------------------------------------------------
 
-def _plugin(**overrides: Any) -> HDWinGCrossSeed:
+def _plugin(**overrides: Any) -> NameCrossSeed:
     """构造只带被测字段的插件实例，避免触发宿主插件管理器。"""
-    plugin = object.__new__(HDWinGCrossSeed)
+    plugin = object.__new__(NameCrossSeed)
     plugin._enabled = True
     plugin._notify = False
     plugin._cron = "0 4 * * *"
@@ -66,7 +66,7 @@ def _plugin(**overrides: Any) -> HDWinGCrossSeed:
 
 def _view(**overrides: Any) -> Any:
     """构造一个已完成任务视图。"""
-    from app.plugins.hdwingcrossseed import _TorrentView
+    from app.plugins.namecrossseed import _TorrentView
 
     data = {
         "hash": "localhash", "name": MOVIE, "size": SIZE,
@@ -299,18 +299,18 @@ def test_exists_checks_downloader() -> None:
 # ---------------------------------------------------------------------------
 
 def test_plugin_metadata_and_hooks() -> None:
-    assert HDWinGCrossSeed.plugin_version
-    assert HDWinGCrossSeed.plugin_config_prefix == "hdwingcrossseed_"
-    assert HDWinGCrossSeed.get_state(_plugin()) is True
-    assert HDWinGCrossSeed.get_state(_plugin(_enabled=False)) is False
+    assert NameCrossSeed.plugin_version
+    assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
+    assert NameCrossSeed.get_state(_plugin()) is True
+    assert NameCrossSeed.get_state(_plugin(_enabled=False)) is False
 
     for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page",
                  "get_service", "stop_service", "get_command"):
-        assert callable(getattr(HDWinGCrossSeed, name)), name
+        assert callable(getattr(NameCrossSeed, name)), name
 
-    commands = HDWinGCrossSeed.get_command()
-    assert commands and commands[0]["cmd"] == "/hdwing_seed"
-    assert commands[0]["data"]["action"] == "hdwing_crossseed_run"
+    commands = NameCrossSeed.get_command()
+    assert commands and commands[0]["cmd"] == "/name_seed"
+    assert commands[0]["data"]["action"] == "namecrossseed_run"
 
     apis = {item["path"] for item in _plugin().get_api()}
     assert {"/run", "/check", "/clear_cache", "/status"} <= apis
@@ -321,7 +321,7 @@ def test_service_registration() -> None:
     services = _plugin().get_service()
     assert len(services) == 1
     service = services[0]
-    assert service["id"] == "HDWinGCrossSeed"
+    assert service["id"] == "NameCrossSeed"
     assert service["func"] is not None
     assert "trigger" in service and "kwargs" in service and "func_kwargs" in service
 
@@ -366,7 +366,7 @@ def _scan_plugin(count: int = 60):
     import threading
     import types
 
-    from app.plugins.hdwingcrossseed import logview
+    from app.plugins.namecrossseed import logview
 
     plugin = _plugin()
     store: Dict[str, Any] = {}
@@ -396,6 +396,7 @@ def _scan_plugin(count: int = 60):
     plugin._interval = 6.0
     plugin._user_agent = "UA"
     plugin._downloaders = []
+    plugin._name_rules = ""
 
     torrents = [
         {"hash": f"h{i}", "name": f"Some.Movie.{i}.2020.1080p.WEB-DL",
@@ -412,13 +413,15 @@ def _scan_plugin(count: int = 60):
 
 
 def test_display_name_and_simple_form() -> None:
-    assert HDWinGCrossSeed.plugin_name == "瓷器辅种"
+    assert NameCrossSeed.plugin_name == "名称辅种"
     form, default = _plugin().get_form()
     models: List[str] = []
     _walk_models(form, models)
     assert set(models) == {"enabled", "notify", "cron", "max_tasks",
-                           "downloaders", "site_url", "user_agent", "cookie"}
-    assert len(models) <= 8, "设置项又变多了"
+                           "downloaders", "site_url", "user_agent", "cookie",
+                           "name_rules"}
+    assert len(models) <= 9, "设置项又变多了"
+    assert default["name_rules"] == "", "名称清洗规则默认留空即用内置规则"
     assert default["max_tasks"] == 0, "默认必须不限数量，扫全下载器"
 
 
@@ -431,11 +434,11 @@ def test_api_has_log_and_page_shows_log_and_rows() -> None:
     html = "".join(str(x.get("html") or "") for x in page)
     assert "运行日志" in html and "cs-log" in html
     assert "本轮扫描名录" in html and "自动刷新" in html
-    assert "__csPoll" in html and "HDWinGCrossSeed/log" in html
+    assert "__csPoll" in html and "NameCrossSeed/log" in html
 
 
 def test_log_emit_persists_every_line() -> None:
-    from app.plugins.hdwingcrossseed import logview
+    from app.plugins.namecrossseed import logview
 
     plugin, store = _scan_plugin(0)
     logview.emit(plugin, "第一条")
@@ -443,7 +446,7 @@ def test_log_emit_persists_every_line() -> None:
     text = logview.log_text(plugin)
     assert "第一条" in text and "第二条" in text
     assert store["log"][-1].endswith("第二条")
-    assert "扫到" in logview.progress({"last_scanned": 7}, False)
+    assert "下载器种子 7 个" in logview.progress({"last_scanned": 7}, False)
     assert "&lt;script&gt;" in logview.render(
         {}, "<script>", [{"name": "<b>x</b>", "state": "added",
                           "message": "ok", "downloader": "qb", "size_text": "1 GB"}]
@@ -451,7 +454,7 @@ def test_log_emit_persists_every_line() -> None:
 
 
 def test_api_log_returns_text_and_progress() -> None:
-    from app.plugins.hdwingcrossseed import logview
+    from app.plugins.namecrossseed import logview
 
     plugin, store = _scan_plugin(0)
     logview.emit(plugin, "开始跑")
@@ -460,7 +463,7 @@ def test_api_log_returns_text_and_progress() -> None:
     response = plugin.api_log()
     assert response.success
     assert "开始跑" in response.data["text"]
-    assert "扫到 12 个" in response.data["progress"]
+    assert "下载器种子 12 个" in response.data["progress"]
 
 
 def test_full_scan_has_no_truncation() -> None:
@@ -472,8 +475,10 @@ def test_full_scan_has_no_truncation() -> None:
     assert stats["last_scanned"] == 60
     assert stats["last_eligible"] == 60
     assert stats["last_processed"] == 60
+    assert stats["last_groups"] == 60
     assert all(r["state"] == "nomatch" for r in rows)
-    assert "本轮结束：扫到 60 个" in "\n".join(store["log"])
+    assert "本轮结束：下载器 60 个种子" in "\n".join(store["log"])
+    assert "搜索词" in "\n".join(store["log"])
 
 
 def test_limit_marks_remaining_as_pending_but_still_lists_all() -> None:
@@ -512,28 +517,252 @@ def test_budget_exhaustion_is_visible_in_list() -> None:
     assert "请求预算用尽" in store["stats"]["last_message"]
 
 
-def test_size_mismatch_skips_torrent_download() -> None:
-    import threading
+def test_large_size_gap_still_downloads_candidate() -> None:
+    """整季合集 / 单集体积差几十倍时，不能靠体积砍掉候选，必须走文件清单定案。
 
-    from app.plugins.hdwingcrossseed import logview
-    from app.plugins.hdwingcrossseed.hdwing import build_search_keys
+    同时回归 `self._download` 那个笔误：真实入口是站点客户端的 download()。
+    """
+    import threading
+    import types
+
+    from app.plugins.namecrossseed import logview
 
     plugin, store = _scan_plugin(0)
     logview.clear(plugin)
     plugin._stop_event = threading.Event()
     plugin._budget = 10
-    candidate = SiteTorrent(tid="1", title=MOVIE, size=SIZE // 2, seeders=5)
+    plugin._search_cache = {}
+    plugin._known_hashes = set()
+    plugin._min_score = 0.0
+    plugin._max_candidates = 3
+    content = _torrent_bytes({"Movie/a.mkv": 1000})
+    candidate = SiteTorrent(tid="1", title=MOVIE, size=SIZE // 200, seeders=5,
+                            download_path="download.php?hash=abc")
     plugin._search = lambda client, keys: [candidate]  # type: ignore[method-assign]
-    plugin._download = lambda client, cand: (_ for _ in ()).throw(  # type: ignore[method-assign]
-        AssertionError("体积差过大不应下载种子")
+    downloads: List[str] = []
+    client = types.SimpleNamespace(
+        download=lambda torrent: (downloads.append(torrent.title) or content)
     )
-    # _scan_plugin 把 _handle 换成了桩，这里要用回真实实现
-    del plugin._handle
+    plugin._judge = lambda service, view, meta: "files"  # type: ignore[method-assign]
+    plugin._exists = staticmethod(lambda service, info_hash: False)  # type: ignore[assignment]
+    plugin._add = lambda service, view, data: (True, "已添加")  # type: ignore[method-assign]
+    del plugin._handle  # 用回真实实现
     view = _view()
-    state, message, title = plugin._handle("qb", None, view, None)
-    assert state == "failed" and "体积差" in message and title == ""
-    assert any("跳过下载" in line for line in store["log"])
+    state, message, title = plugin._handle("qb", None, view, client)
+    assert downloads == [MOVIE], "体积差不能阻止下载候选种子"
+    assert state == "added", message
+    assert title == MOVIE
+    assert size_diff_ratio(SIZE, SIZE // 200) <= 1.0, "体积差必须收敛到 100% 以内"
 
-    keys = build_search_keys("The.Mandalorian.S02E01.2020.1080p.WEB-DL")
-    assert 1 <= len(keys) <= 3 and keys[0]
-    assert len(set(keys)) == len(keys)
+
+def test_site_hash_already_in_downloader_is_not_added_again() -> None:
+    """下载器里已经有这个站点种子时，整组跳过，不再重复插入。"""
+    import threading
+    import types
+
+    plugin, store = _scan_plugin(0)
+    plugin._stop_event = threading.Event()
+    plugin._budget = 10
+    plugin._search_cache = {}
+    plugin._min_score = 0.0
+    content = _torrent_bytes({"Movie/a.mkv": 1000})
+    info_hash = parse_torrent(content).info_hash
+    plugin._known_hashes = {info_hash}
+    candidate = SiteTorrent(tid="1", title=MOVIE, size=SIZE, seeders=5,
+                            download_path="download.php?hash=abc")
+    plugin._search = lambda client, keys: [candidate]  # type: ignore[method-assign]
+    client = types.SimpleNamespace(download=lambda torrent: content)
+    plugin._add = lambda *a, **kw: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("已存在的种子不应再添加")
+    )
+    del plugin._handle
+    state, message, _ = plugin._handle("qb", None, _view(), client)
+    assert state == "exists", message
+    assert "已在下载器" in message
+
+
+
+# ---------------------------------------------------------------------------
+# 名称清洗正则
+# ---------------------------------------------------------------------------
+
+def test_builtin_name_rules_normalize_dots_and_group_suffix() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    name = "武神主宰.The.God.of.War.Dominates.S01.2020.2160p.WEB-DL.H265.AAC-ADWeb"
+    out = grouping.clean_name(name)
+    assert "." not in out, "内置规则要把点转成空格"
+    assert "-ADWeb" not in out, "内置规则要去掉发布组后缀"
+    assert "The God of War Dominates" in out
+    keys = grouping.search_keys(name)
+    assert keys and all("." not in key for key in keys)
+
+
+def test_custom_regex_removes_chinese_prefix() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    rules = (
+        r"^[\u4e00-\u9fff]+[.\s_-]+ => <empty>" + "\n"
+        + r"[._]+ => <space>"
+    )
+    name = "武神主宰.The.God.of.War.Dominates.S01.2020.2160p.WEB-DL"
+    out = grouping.clean_name(name, rules)
+    assert "武神主宰" not in out
+    assert out.startswith("The")
+    keys = grouping.search_keys(name, rules)
+    assert keys and all("武神主宰" not in key for key in keys)
+    assert grouping.clean_name(name, "") != out, "填了规则必须覆盖内置规则"
+
+
+def test_invalid_regex_is_skipped_without_crash() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    rules = "[ => <empty>\n[._]+ => <space>"
+    assert grouping.invalid_rules(rules) == ["["]
+    assert grouping.clean_name("A.B.C", rules) == "A B C"
+
+
+def test_custom_rule_with_backreference() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    rules = r"^\[([^]]+)\]\.? => \1<space>"
+    assert grouping.clean_name("[PT]Some.Movie.2020", rules).startswith("PT Some")
+
+
+def test_mixed_chinese_name_also_gets_latin_search_key() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    keys = grouping.search_keys(
+        "武神主宰.The.God.of.War.Dominates.S01.2020.2160p.WEB-DL"
+    )
+    assert any("武神主宰" not in key and "god" in key for key in keys), (
+        "站点只有英文标题时，要能自动给出纯英文搜索词"
+    )
+
+
+def test_grouping_merges_same_content_reseeds() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    name = "Anime.Show.S01.2023.2160p.WEB-DL"
+    keys = {grouping.group_key(name, 20_000_000_000, "", f"h{i}") for i in range(5)}
+    assert len(keys) == 1, "同内容不同 hash 的辅种必须归为一组"
+    other = grouping.group_key(name, 30_000_000_000, "", "x")
+    assert other not in keys, "同名不同体积是不同版本，不能误合并"
+    zero = {grouping.group_key(name, 0, "", f"z{i}") for i in range(3)}
+    assert len(zero) == 3, "体积取不到时不能只按标题误合并"
+
+
+# ---------------------------------------------------------------------------
+# 两阶段扫描：去重、异常隔离、不重复插入
+# ---------------------------------------------------------------------------
+
+def _reseed_torrents(count: int, name: str, size: int, tracker: str =
+                     "http://tracker.other.org/announce") -> List[Dict[str, Any]]:
+    return [
+        {"hash": f"h{i}", "name": name, "size": size, "save_path": "/downloads",
+         "tags": [], "tracker": tracker, "added_on": i}
+        for i in range(count)
+    ]
+
+
+def test_duplicate_reseeds_are_grouped_and_searched_once() -> None:
+    plugin, store = _scan_plugin(0)
+    plugin._completed_torrents = lambda service: _reseed_torrents(  # type: ignore[method-assign]
+        4, "Anime.Show.S01.2023.2160p.WEB-DL", 20_000_000_000
+    )
+    calls = {"n": 0}
+
+    def fake_handle(downloader, service, view, client):
+        calls["n"] += 1
+        return "nomatch", "站点无搜索结果", ""
+
+    plugin._handle = fake_handle  # type: ignore[method-assign]
+    plugin._run_once("手动")
+    rows = store["scan"]
+    assert len(rows) == 4, "名录里每个种子都要有一行"
+    assert store["stats"]["last_scanned"] == 4
+    assert store["stats"]["last_groups"] == 1
+    assert store["stats"]["last_processed"] == 1
+    assert calls["n"] == 1, "同内容的 4 个辅种只能搜一次站点"
+    assert all("内容组 #1" in r["group_text"] for r in rows)
+    assert "共 4 个辅种" in rows[0]["group_text"]
+    assert all(r["state"] == "nomatch" for r in rows)
+    assert "同组代表" in rows[1]["message"]
+    assert "搜索词" in "\n".join(store["log"])
+
+
+def test_group_with_site_tracker_is_skipped_without_searching() -> None:
+    plugin, store = _scan_plugin(0)
+    torrents = _reseed_torrents(3, "Anime.Show.S01.2023.2160p.WEB-DL", 20_000_000_000)
+    torrents[1]["tracker"] = "https://tracker.hdwing.org/announce"
+    plugin._completed_torrents = lambda service: torrents  # type: ignore[method-assign]
+    calls = {"n": 0}
+
+    def fake_handle(*args):
+        calls["n"] += 1
+        return "nomatch", "无结果", ""
+
+    plugin._handle = fake_handle  # type: ignore[method-assign]
+    plugin._run_once("手动")
+    assert calls["n"] == 0, "组里已有该站点种子就不必再搜"
+    assert all(r["state"] == "exists" for r in store["scan"])
+    assert "已有该站点" in store["scan"][0]["message"]
+
+
+def test_group_cache_prevents_repeating_site_requests() -> None:
+    from app.plugins.namecrossseed import grouping
+
+    plugin, store = _scan_plugin(0)
+    name = "Anime.Show.S01.2023.2160p.WEB-DL"
+    size = 20_000_000_000
+    plugin._completed_torrents = lambda service: _reseed_torrents(2, name, size)  # type: ignore[method-assign]
+    key = "g:" + grouping.short_key(grouping.group_key(name, size, "", "h0"))
+    store["cache"] = {key: {"r": "added", "t": time.time()}}
+    calls = {"n": 0}
+    plugin._handle = lambda *a: (calls.__setitem__("n", calls["n"] + 1) or  # type: ignore[method-assign]
+                                ("nomatch", "无结果", ""))
+    plugin._run_once("手动")
+    assert calls["n"] == 0
+    assert all(r["state"] == "cached" for r in store["scan"])
+
+
+def test_one_group_exception_does_not_abort_round() -> None:
+    plugin, store = _scan_plugin(0)
+    torrents = [
+        {"hash": f"h{i}", "name": f"Some.Movie.{i}.2020.1080p.WEB-DL",
+         "size": 1_000_000 + i, "save_path": "/downloads", "tags": [],
+         "tracker": "http://tracker.other.org/announce", "added_on": i}
+        for i in range(3)
+    ]
+    plugin._completed_torrents = lambda service: torrents  # type: ignore[method-assign]
+    calls = {"n": 0}
+
+    def fake_handle(*args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("模拟单组异常")
+        return "nomatch", "无结果", ""
+
+    plugin._handle = fake_handle  # type: ignore[method-assign]
+    plugin._run_once("手动")
+    assert calls["n"] == 3, "一组异常不能中断整轮"
+    assert store["stats"]["last_processed"] == 3
+    assert sum(1 for r in store["scan"] if r["state"] == "error") == 1
+    assert "处理异常" in "\n".join(store["log"])
+
+
+def test_renamed_english_identifiers_are_consistent() -> None:
+    from app.plugins.namecrossseed import logview
+
+    assert NameCrossSeed.__name__ == "NameCrossSeed"
+    assert NameCrossSeed.plugin_name == "名称辅种"
+    assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
+    assert NameCrossSeed.plugin_version == "2.0.0"
+    assert "namecrossseed.png" in NameCrossSeed.plugin_icon
+    cmd = NameCrossSeed.get_command()[0]
+    assert cmd["cmd"] == "/name_seed"
+    assert cmd["data"]["action"] == "namecrossseed_run"
+    assert _plugin().get_service()[0]["id"] == "NameCrossSeed"
+    assert logview.PLUGIN_ID == "NameCrossSeed"
+    assert "plugin/NameCrossSeed/log" in logview._POLL_JS
+    assert "HDWinG" not in NameCrossSeed.plugin_desc

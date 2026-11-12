@@ -1,6 +1,6 @@
 """在没有 MoviePilot 宿主的环境中运行 cfrouteros 离线用例。
 
-做法与 hdwingcrossseed 一致：临时目录里生成 app stub 包，把插件源码复制进
+做法与其他插件一致：临时目录里生成 app stub 包，把插件源码复制进
 app/plugins/cfrouteros，再交给 pytest 运行，避免污染仓库与真实环境。
 """
 

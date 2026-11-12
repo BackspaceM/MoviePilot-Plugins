@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """在无宿主环境下运行本插件测试：临时生成 app stub 包，避免污染仓库。
 
-用法：python3 tests/v3/hdwingcrossseed/run_stub_tests.py
+用法：python3 tests/v3/namecrossseed/run_stub_tests.py
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PLUGIN_SRC = os.path.abspath(os.path.join(HERE, "../../../plugins.v3/hdwingcrossseed"))
+PLUGIN_SRC = os.path.abspath(os.path.join(HERE, "../../../plugins.v3/namecrossseed"))
 TEST_FILE = os.path.join(HERE, "test_plugin.py")
 
 CONFTEST = '''"""为插件测试注入最小宿主 stub：只覆盖 SDK 契约面，不含宿主实现。"""
@@ -168,14 +168,14 @@ sys.modules.update({
 
 
 def main() -> int:
-    work = tempfile.mkdtemp(prefix="hdwingcrossseed-stub-")
+    work = tempfile.mkdtemp(prefix="namecrossseed-stub-")
     try:
         app_dir = os.path.join(work, "app")
         plugins_dir = os.path.join(app_dir, "plugins")
         os.makedirs(plugins_dir)
         open(os.path.join(app_dir, "__init__.py"), "w").close()
         open(os.path.join(plugins_dir, "__init__.py"), "w").close()
-        shutil.copytree(PLUGIN_SRC, os.path.join(plugins_dir, "hdwingcrossseed"))
+        shutil.copytree(PLUGIN_SRC, os.path.join(plugins_dir, "namecrossseed"))
         os.makedirs(os.path.join(work, "tests"))
         shutil.copy(TEST_FILE, os.path.join(work, "tests", "test_plugin.py"))
         with open(os.path.join(work, "conftest.py"), "w", encoding="utf-8") as handle:

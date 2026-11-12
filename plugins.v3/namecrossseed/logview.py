@@ -1,4 +1,4 @@
-"""瓷器辅种 —— 运行日志与详情页渲染。
+"""名称辅种 —— 运行日志与详情页渲染。
 
 日志双写：写进插件数据（页面能实时看到，运行中每处理一条就落一次），
 同时写宿主 logger（插件卡片点「日志」也能看到）。
@@ -12,7 +12,7 @@ import html
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-PLUGIN_ID = "HDWinGCrossSeed"
+PLUGIN_ID = "NameCrossSeed"
 LOG_KEY = "log"
 SCAN_KEY = "scan"
 MAX_LINES = 400
@@ -66,7 +66,7 @@ def emit(plugin: Any, message: str, level: str = "info") -> None:
     if _host_logger is not None:
         try:
             getattr(_host_logger, "warning" if level in ("warning", "error") else "info")(
-                f"瓷器辅种：{text}"
+                f"名称辅种：{text}"
             )
         except Exception:  # noqa: BLE001
             pass
@@ -107,9 +107,9 @@ def progress(stats: Dict[str, Any], running: bool, as_html: bool = True) -> str:
     esc = _e if as_html else (lambda value: str(value if value is not None else ""))
     parts = [
         f"上次运行：{esc(stats.get('last_run_text') or '尚未运行')}",
-        f"扫到 {int(stats.get('last_scanned') or 0)} 个",
-        f"符合 {int(stats.get('last_eligible') or 0)} 个",
-        f"实际处理 {int(stats.get('last_processed') or 0)} 个",
+        f"下载器种子 {int(stats.get('last_scanned') or 0)} 个",
+        f"归并 {int(stats.get('last_groups') or 0)} 组内容",
+        f"实际搜站 {int(stats.get('last_processed') or 0)} 组",
         f"新增 {int(stats.get('last_added') or 0)}",
         f"失败 {int(stats.get('last_failed') or 0)}",
     ]
@@ -133,7 +133,7 @@ _COPY_JS = (
 _POLL_JS = (
     "if(!window.__csPoll){window.__csPoll=setInterval(function(){"
     "var A=window.MoviePilotAPI;if(!A){return;}if(!A.get){return;}"
-    "A.get('plugin/HDWinGCrossSeed/log').then(function(r){"
+    f"A.get('plugin/{PLUGIN_ID}/log').then(function(r){{"
     "var d=r;if(d){if(d.data){d=d.data;}}"
     "if(d){if(d.success!==undefined){if(d.data){d=d.data;}}}"
     "var t='';if(d){if(d.text){t=d.text;}}"
@@ -183,10 +183,12 @@ def _table(rows: Sequence[Dict[str, Any]], truncated: bool) -> str:
         state = str(row.get("state") or "skipped")
         color = _STATE_COLOR.get(state, "#64748B")
         label = _STATE_LABEL.get(state, state)
+        group_note = str(row.get("group_text") or "").strip()
+        group_html = f'<div class="cs-mono">{_e(group_note)}</div>' if group_note else ""
         body.append(
             "<tr>"
             f'<td><b>{_e(row.get("name"))}</b><div class="cs-mono">{_e(row.get("downloader"))} · '
-            f'{_e(row.get("size_text") or "—")}</div></td>'
+            f'{_e(row.get("size_text") or "—")}</div>{group_html}</td>'
             f'<td><span class="cs-tag" style="color:{color}">{_e(label)}</span></td>'
             f'<td>{_e(row.get("message") or "—")}</td></tr>'
         )
@@ -208,7 +210,7 @@ def render(
 ) -> str:
     """详情页 HTML：进度 + 实时日志 + 本轮全量名录。"""
     head = (
-        '<div class="cs-head"><div class="cs-title">瓷器辅种</div>'
+        '<div class="cs-head"><div class="cs-title">名称辅种</div>'
         f'<span class="cs-pill">{"运行中" if running else "空闲"}</span></div>'
     )
     state = f'<div class="cs-state" id="cs-state">{progress(stats, running)}</div>'
@@ -223,8 +225,9 @@ def render(
         + _table(rows, truncated)
     )
     foot = (
-        '<div class="cs-foot">名称只用于在站点找候选，最终要下载种子解析 info_hash 和文件清单，'
-        '完全一致才会添加。近期核对过、带跳过标签或属于本站的种子会被略过，但仍会计入上面的名录。'
+        '<div class="cs-foot">先把下载器里的种子按内容归并，同内容的多个辅种只搜一次站点、只添加一次；'
+        '名称只用来找候选，最终要下载种子解析 info_hash 和文件清单，完全一致才会添加。'
+        '组里已经有目标站点的种子、近期核对过、带跳过标签的都会略过，但仍列在上面的名录里。'
         '想强制重扫一遍，点「清空缓存」后再运行。</div>'
     )
     # v-html 不会执行 <script>，用静态 data URI 图片的 onload 启动轮询

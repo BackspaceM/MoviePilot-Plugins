@@ -1,9 +1,11 @@
-"""瓷器辅种插件（MoviePilot V3）。
+"""名称辅种插件（MoviePilot V3）。
 
-扫描下载器里已完成的种子，在 瓷器站内搜索同源种子并添加到下载器辅种：
-- 同 info_hash 直接命中，qBittorrent 可跳过校验秒做种
-- 跨站同源按文件清单（文件名 + 字节数）逐一比对，全部一致才添加
-- 每次运行有请求预算与节流，避免触发站点频率限制
+先把下载器里的种子按内容归并，同一份文件的多个辅种只搜一次站点、只添加一次：
+- 阶段一：全量读取下载器已完成任务，建立全局 hash 集合与内容分组，不访问站点
+- 阶段二：每组派一个代表去站点找候选；候选 hash 已在下载器里就直接跳过
+- 名称只负责召回，是否同源由 info_hash 与文件清单（文件名 + 字节数）定案
+- 发布名可用正则规则清洗，解决站点用空格、本地用点/连字符/中文前缀的问题
+- 每次运行有请求预算与节流，单条异常隔离，不会中断整轮
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -26,13 +28,12 @@ from app.sdk.network import RequestUtils
 from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper
 
-from . import logview
-from .hdwing import (
+from . import grouping, logview
+from .site import (
     DEFAULT_SITE_URL,
     DEFAULT_USER_AGENT,
-    HDWinGClient,
+    SiteClient,
     HttpResult,
-    build_search_keys,
     parse_torrent,
 )
 from .rank import rank_candidates, size_diff_ratio
@@ -42,8 +43,8 @@ _HISTORY_KEY = "history"
 _STATS_KEY = "stats"
 _MAX_HISTORY = 40
 _PAGE_HISTORY = 8
-_CMD_ACTION = "hdwing_crossseed_run"
-_ONCE_JOB_ID = "HDWinGCrossSeed.RunOnce"
+_CMD_ACTION = "namecrossseed_run"
+_ONCE_JOB_ID = "NameCrossSeed.RunOnce"
 _STALE_RUN_SECONDS = 3 * 3600
 _SUCCESS_TTL = 30 * 86400
 _DEFAULT_UA = DEFAULT_USER_AGENT
@@ -181,23 +182,23 @@ def _view_of(item: Any) -> Optional[_TorrentView]:
     )
 
 
-class HDWinGCrossSeed(_PluginBase):
-    """瓷器站内辅种插件。"""
+class NameCrossSeed(_PluginBase):
+    """按发布名在站点找同源种子的辅种插件。"""
 
-    plugin_name = "瓷器辅种"
+    plugin_name = "名称辅种"
     plugin_desc = (
-        "把下载器里的种子全量扫一遍，用名称在瓷器站内找候选，再下载种子解析 "
-        "info_hash 与文件清单，完全一致才添加辅种。页面有实时日志和逐条结果，"
-        "设置只要填 Cookie，其余自动。"
+        "先把下载器里同一份文件的多个辅种归并成一组，每组只搜一次站点、只添加一次；"
+        "名称只用来找候选，info_hash 和文件清单完全一致才添加。"
+        "发布名可用正则规则清洗，页面有实时日志与全量名录，设置只要填 Cookie。"
     )
     plugin_icon = (
-        "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
+        "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png"
     )
-    plugin_version = "1.2.0"
-    plugin_label = "站点,辅种,瓷器"
+    plugin_version = "2.0.0"
+    plugin_label = "做种,辅种,名称匹配,实时日志"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
-    plugin_config_prefix = "hdwingcrossseed_"
+    plugin_config_prefix = "namecrossseed_"
     plugin_order = 88
     auth_level = 1
 
@@ -223,6 +224,7 @@ class HDWinGCrossSeed(_PluginBase):
     _skip_paths: List[str] = []
     _min_size_gb: float = 0.0
     _cache_days: int = 7
+    _name_rules: str = ""
 
     # --- 运行态 ---
     _state_lock = threading.Lock()
@@ -264,6 +266,7 @@ class HDWinGCrossSeed(_PluginBase):
         self._skip_paths = []
         self._min_size_gb = 0.0
         self._cache_days = 7
+        self._name_rules = ""
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
@@ -288,6 +291,10 @@ class HDWinGCrossSeed(_PluginBase):
         self._skip_paths = _split_lines(config.get("skip_paths"))
         self._min_size_gb = max(_to_float(config.get("min_size_gb"), 0.0), 0.0)
         self._cache_days = max(_to_int(config.get("cache_days"), 7), 1)
+        self._name_rules = str(config.get("name_rules") or "")
+        bad_rules = grouping.invalid_rules(self._name_rules)
+        if bad_rules:
+            logger.warning(f"名称辅种：忽略无效的名称正则 {bad_rules[:3]}")
 
     def get_state(self) -> bool:
         """返回插件是否启用。"""
@@ -303,7 +310,7 @@ class HDWinGCrossSeed(_PluginBase):
             try:
                 remove_once(self.__class__.__name__, _ONCE_JOB_ID)
             except Exception as err:  # noqa: BLE001 - 调度器未启动时不应阻塞停用
-                logger.debug(f"瓷器辅种：取消待执行调度任务失败 {err}")
+                logger.debug(f"名称辅种：取消待执行调度任务失败 {err}")
         thread = getattr(self, "_thread", None)
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=10)
@@ -320,8 +327,8 @@ class HDWinGCrossSeed(_PluginBase):
             trigger = CronTrigger.from_crontab("0 4 * * *")
         return [
             {
-                "id": "HDWinGCrossSeed",
-                "name": "瓷器辅种",
+                "id": "NameCrossSeed",
+                "name": "名称辅种",
                 "trigger": trigger,
                 "func": self.run_scheduled,
                 "kwargs": {},
@@ -334,9 +341,9 @@ class HDWinGCrossSeed(_PluginBase):
         """注册远程命令，便于从聊天窗口触发一次辅种。"""
         return [
             {
-                "cmd": "/hdwing_seed",
+                "cmd": "/name_seed",
                 "event": EventType.PluginAction,
-                "desc": "立即跑一次瓷器辅种",
+                "desc": "立即跑一次名称辅种",
                 "category": "站点",
                 "data": {"action": _CMD_ACTION},
             }
@@ -355,13 +362,13 @@ class HDWinGCrossSeed(_PluginBase):
         if target and target != self.__class__.__name__:
             return
         if not self._enabled:
-            self.post_message(title="瓷器辅种", text="插件未启用，命令已忽略")
+            self.post_message(title="名称辅种", text="插件未启用，命令已忽略")
             return
         if not self._cookie:
-            self.post_message(title="瓷器辅种", text="未配置站点 Cookie，无法执行")
+            self.post_message(title="名称辅种", text="未配置站点 Cookie，无法执行")
             return
         if not self.start_run(trigger="命令"):
-            self.post_message(title="瓷器辅种", text="上一轮任务尚未结束，请稍后再试")
+            self.post_message(title="名称辅种", text="上一轮任务尚未结束，请稍后再试")
 
     # ------------------------------------------------------------------
     # 表单
@@ -375,7 +382,7 @@ class HDWinGCrossSeed(_PluginBase):
                 for name in (DownloaderHelper().get_configs() or {}).keys()
             ]
         except Exception as err:  # noqa: BLE001 - 未配置下载器时表单仍需可渲染
-            logger.debug(f"瓷器辅种：读取下载器列表失败 {err}")
+            logger.debug(f"名称辅种：读取下载器列表失败 {err}")
             downloader_items = []
         content: List[dict] = [
             {"component": "VRow", "content": [
@@ -414,13 +421,26 @@ class HDWinGCrossSeed(_PluginBase):
                     "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
+                self._col(12, 12, [{"component": "VTextarea", "props": {
+                    "model": "name_rules", "label": "名称清洗规则（可选）", "rows": 4,
+                    "placeholder": "[._]+ => <space>",
+                    "hint": (
+                        "每行一条「正则 => 替换」；<space> 表示空格（可单独用或嵌在替换文本里，如 \\1<space>），"
+                        "替换侧留空表示删除。整个框留空即用内置规则（点/下划线转空格、去方括号标签与发布组后缀）。"
+                        "例：去掉中文名前缀写 ^[\\u4e00-\\u9fff]+[.\\s_-]+ => <empty>；"
+                        "站点标题用空格时可写 [._-]+ => <space>。填了规则就覆盖内置规则，"
+                        "每组的实际搜索词会写进运行日志。"
+                    ),
+                    "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VAlert", "props": {
                     "type": "info", "variant": "tonal"}, "text": (
-                        "装好填 Cookie 就能用。每次会把下载器里已完成的种子全量扫一遍，"
-                        "名称只用来在站点找候选，找到后还要解析 info_hash 和文件清单，"
-                        "完全一致才添加，不会只看名字就辅种。站点请求间隔默认 6 秒，"
-                        "近期核对过的种子不再重复请求，想强制重扫点「清空缓存」。"
-                        "运行日志和逐条结果在详情页实时显示。")}]),
+                        "装好填 Cookie 就能用。每次先把下载器里同一份文件的多个辅种归并成一组，"
+                        "每组只搜一次站点、只添加一次，不会拿着同一个内容反复搜、反复插；"
+                        "站点种子已经在下载器里就直接跳过。名称只负责找候选，"
+                        "找到后还要解析 info_hash 和文件清单，完全一致才添加。"
+                        "运行日志、搜索词和逐条结果在详情页实时显示；想强制重扫点「清空缓存」。")}]),
             ]},
         ]
         return [{"component": "VForm", "content": content}], {
@@ -432,6 +452,7 @@ class HDWinGCrossSeed(_PluginBase):
             "site_url": DEFAULT_SITE_URL,
             "user_agent": _DEFAULT_UA,
             "cookie": "",
+            "name_rules": "",
         }
 
     @staticmethod
@@ -559,9 +580,9 @@ class HDWinGCrossSeed(_PluginBase):
             if self._running:
                 # 异常退出可能留下未复位标记，超过阈值后允许重新进入
                 if time.time() - self._run_started < _STALE_RUN_SECONDS:
-                    logger.info("瓷器辅种：上一轮尚未结束，本次跳过")
+                    logger.info("名称辅种：上一轮尚未结束，本次跳过")
                     return False
-                logger.warning("瓷器辅种：上一轮运行状态疑似残留，强制重置后继续")
+                logger.warning("名称辅种：上一轮运行状态疑似残留，强制重置后继续")
             self._running = True
             self._run_started = time.time()
         stop_event = getattr(self, "_stop_event", None)
@@ -577,12 +598,12 @@ class HDWinGCrossSeed(_PluginBase):
                     self.__class__.__name__,
                     _ONCE_JOB_ID,
                     self._run_wrapper,
-                    "瓷器辅种执行",
+                    "名称辅种执行",
                     delay_seconds=0,
                     func_kwargs={"trigger": trigger},
                 )
             except Exception as err:  # noqa: BLE001 - 调度器异常时退回自建线程
-                logger.warning(f"瓷器辅种：提交调度任务失败，改为后台线程执行 {err}")
+                logger.warning(f"名称辅种：提交调度任务失败，改为后台线程执行 {err}")
                 scheduled = False
             if scheduled:
                 return True
@@ -601,7 +622,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             self._run_once(trigger)
         except Exception as err:  # noqa: BLE001 - 后台任务必须兜底，避免任务静默消失
-            logger.error(f"瓷器辅种执行异常：{err} - {traceback.format_exc()}")
+            logger.error(f"名称辅种执行异常：{err} - {traceback.format_exc()}")
             logview.emit(self, f"执行异常：{err}", level="error")
             self._save_result({
                 "trigger": trigger,
@@ -620,7 +641,12 @@ class HDWinGCrossSeed(_PluginBase):
     # ------------------------------------------------------------------
 
     def _run_once(self, trigger: str) -> None:
-        """跑一轮：全量读取下载器名录，逐条记录结果，实时写日志。"""
+        """两阶段跑一轮：先确定下载器里有哪些内容，再按组去站点搜。
+
+        下载器里同一份文件常常有多个辅种（hash 不同、名称略有差异）。
+        逐条搜站会把同一内容反复搜索、反复尝试添加，所以先全量采集并归并，
+        每组只派一个代表搜站、只添加一次，组内成员复用结果但各留一行名录。
+        """
         started = time.time()
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is None:
@@ -628,11 +654,10 @@ class HDWinGCrossSeed(_PluginBase):
         stop_event.clear()
         result: Dict[str, Any] = {
             "trigger": trigger,
-            "scanned": 0, "eligible": 0, "processed": 0,
+            "scanned": 0, "groups": 0, "eligible": 0, "processed": 0,
             "matched": 0, "added": 0, "failed": 0, "skipped": 0,
             "message": "", "records": [],
         }
-        scan_rows: List[Dict[str, Any]] = []
         if not self._cookie:
             result["message"] = "未配置站点 Cookie"
             logview.emit(self, result["message"], level="warning")
@@ -656,121 +681,190 @@ class HDWinGCrossSeed(_PluginBase):
             logview.emit(self, result["message"], level="warning")
             self._save_result(result, started)
             return
+        host = self._site_host()
+        logview.emit(self, f"开始一轮辅种（{trigger}）：先只读盘点下载器，本阶段不访问站点…")
 
-        limit = self._max_tasks  # 0 = 不限制
-        processed = 0
-        total_seen = 0
-        eligible_total = 0
-        stopped = ""
+        # ---------------- 阶段一：全量采集，不访问站点 ----------------
+        entries: List[Tuple[str, Any, _TorrentView, Dict[str, Any]]] = []
+        known_hashes: Set[str] = set()
         for downloader, service in services.items():
             if self._stop_event.is_set():
-                stopped = "任务被中止"
                 break
             torrents = self._completed_torrents(service)
             if torrents is None:
                 result["message"] = f"{downloader} 读取任务失败"
                 logview.emit(self, result["message"], level="warning")
                 continue
-            total_seen += len(torrents)
-            logview.emit(self, f"下载器 {downloader}：读到 {len(torrents)} 个已完成任务，逐个核对。")
-
-            queued: List[Tuple[_TorrentView, Dict[str, Any]]] = []
+            count = 0
             for item in torrents:
                 view = _view_of(item)
                 if not view:
                     continue
+                known_hashes.add(view.hash)
                 row: Dict[str, Any] = {
                     "downloader": downloader,
                     "name": view.name[:140],
                     "size_text": _format_size(view.size),
-                    "state": "ignored", "message": "",
+                    "state": "pending",
+                    "message": "",
+                    "group_text": "",
                 }
-                if not self._eligible(view, cache, downloader):
-                    key = f"{downloader}|{view.hash}"
-                    entry = cache.get(key)
-                    if entry and not self._cache_expired(entry):
-                        row["state"] = "cached"
-                        row["message"] = f"近期已核对（{entry.get('r', '')}），不重复请求"
-                    else:
-                        row["state"] = "ignored"
-                        row["message"] = "带跳过标签 / 本站种子 / 体积或路径被排除"
-                    scan_rows.append(row)
-                    continue
-                queued.append((view, row))
-            eligible_total += len(queued)
-            queued.sort(key=lambda pair: pair[0].added_on, reverse=True)
+                entries.append((downloader, service, view, row))
+                count += 1
+            logview.emit(self, f"下载器 {downloader}：读到 {count} 个已完成任务（全量，不截断）。")
+
+        result["scanned"] = len(entries)
+        # _handle 与本流程共享同一个集合：站点候选 hash 只要在里面就直接跳过
+        self._known_hashes = known_hashes
+        if not entries:
+            result["message"] = "下载器里没有可读取的已完成任务"
+            logview.emit(self, result["message"], level="warning")
+            self._save_result(result, started)
+            return
+
+        # ---------------- 分组：同内容的多个辅种归为一组 ----------------
+        groups: Dict[str, List[Tuple[str, Any, _TorrentView, Dict[str, Any]]]] = {}
+        for entry in entries:
+            view = entry[2]
+            key = grouping.group_key(view.name, view.size, self._name_rules, view.hash)
+            groups.setdefault(key, []).append(entry)
+        result["groups"] = len(groups)
+        bad_rules = grouping.invalid_rules(self._name_rules)
+        if bad_rules:
+            logview.emit(self, f"名称规则里有 {len(bad_rules)} 条正则无效，已跳过：{bad_rules[:2]}",
+                         level="warning")
+        logview.emit(
+            self,
+            f"盘点完成：{len(entries)} 个种子归并成 {len(groups)} 组内容；"
+            "同内容的多个辅种只搜一次站点、只添加一次。",
+        )
+
+        # ---------------- 阶段二：逐组搜站 ----------------
+        limit = self._max_tasks  # 0 = 不限制组数
+        processed = 0
+        stopped = ""
+        ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        for number, (key, members) in enumerate(ordered, 1):
+            group_label = (f"内容组 #{number} · 共 {len(members)} 个辅种" if len(members) > 1
+                           else f"内容组 #{number}")
+            for _, _, _, row in members:
+                row["group_text"] = group_label
+            if self._stop_event.is_set():
+                stopped = "任务被中止"
+                for _, _, _, row in members:
+                    row["state"] = "pending"
+                    row["message"] = stopped
+                continue
+            gkey = "g:" + grouping.short_key(key)
+            cached = cache.get(gkey)
+            site_covered = any(host and host in (v.tracker or "").lower()
+                               for _, _, v, _ in members)
+            eligible_members = [e for e in members if self._eligible(e[2], cache, e[0])]
+            representative = min(
+                eligible_members, key=lambda e: e[2].added_on or 0
+            ) if eligible_members else None
+            if representative is not None:
+                result["eligible"] += 1
+
+            def mark(state: str, text: str) -> None:
+                for _, _, _, row in members:
+                    row["state"] = state
+                    row["message"] = text
+
+            if site_covered:
+                mark("exists", "组内已有该站点的种子，无需再辅种")
+                continue
+            if cached and not self._cache_expired(cached):
+                mark("cached", f"近期已核对（{cached.get('r', '')}），不重复请求站点")
+                continue
+            if representative is None:
+                # 兼容旧版按单个种子存的缓存：升级后也别让这些组重复请求站点
+                legacy_hit = any(
+                    isinstance(cache.get(f"{e[0]}|{e[2].hash}"), dict)
+                    and not self._cache_expired(cache[f"{e[0]}|{e[2].hash}"])
+                    for e in members
+                )
+                if legacy_hit:
+                    mark("cached", "近期已核对（旧版记录），不重复请求站点")
+                else:
+                    mark("ignored", "带跳过标签 / 本站种子 / 体积或路径被排除")
+                continue
+            if limit and processed >= limit:
+                stopped = f"达到本轮处理上限 {limit} 组"
+                mark("pending", stopped + "，下轮继续")
+                continue
+            if self._budget <= 0:
+                stopped = "站点请求预算用尽"
+                mark("pending", stopped + "，下轮继续")
+                continue
+
+            downloader, service, view, _ = representative
+            processed += 1
+            result["processed"] += 1
+            keys = grouping.search_keys(view.name, self._name_rules)
             logview.emit(
                 self,
-                f"下载器 {downloader}：{len(torrents)} 个里 {len(queued)} 个需要核对，"
-                f"其余 {len(torrents) - len(queued)} 个按策略略过（仍列在名录中）。",
+                f"[{processed}/{len(ordered)}] 第 {number} 组（{len(members)} 个辅种）"
+                f"由「{view.name[:70]}」代表搜站｜搜索词：{' / '.join(keys[:4]) or '（无）'}",
             )
+            # 单组异常必须隔离，绝不能像之前那样让一轮任务整段中断
+            try:
+                state, detail, site_title = self._handle(downloader, service, view, client)
+            except Exception as err:  # noqa: BLE001
+                logger.error(f"名称辅种：处理分组异常 {err} - {traceback.format_exc()}")
+                logview.emit(self, f"处理异常：{err}", level="error")
+                state, detail, site_title = "error", f"处理异常：{str(err)[:120]}", ""
 
-            for view, row in queued:
-                if self._stop_event.is_set():
-                    row["state"], row["message"] = "pending", "任务被中止"
-                    scan_rows.append(row)
-                    continue
-                if limit and processed >= limit:
-                    stopped = f"达到本轮处理上限 {limit}"
-                    row["state"], row["message"] = "pending", stopped + "，下轮继续"
-                    scan_rows.append(row)
-                    continue
-                if self._budget <= 0:
-                    stopped = "站点请求预算用尽"
-                    row["state"], row["message"] = "pending", stopped + "，下轮继续"
-                    scan_rows.append(row)
-                    continue
-                processed += 1
-                result["processed"] += 1
-                logview.emit(self, f"[{processed}] {view.name[:80]} → 开始在站点找候选…")
-                state, message, site_title = self._handle(downloader, service, view, client)
+            prefix = f"{site_title[:60]}｜" if site_title else ""
+            for _, _, member_view, row in members:
                 row["state"] = state
-                row["message"] = (f"{site_title[:60]}｜" if site_title else "") + message[:140]
-                scan_rows.append(row)
-                label = logview.state_label(state)
-                logview.emit(
-                    self,
-                    f"[{processed}] {label}：{view.name[:80]}"
-                    + (f" → {site_title[:60]}" if site_title else "")
-                    + f"（{message[:100]}）",
-                    level="warning" if state in ("failed", "error") else "info",
-                )
-                if state in ("added", "exists"):
-                    result["matched"] += 1
-                if state == "added":
-                    result["added"] += 1
-                elif state == "failed":
-                    result["failed"] += 1
-                elif state == "skipped":
-                    result["skipped"] += 1
-                self._remember(cache, downloader, view, state, message)
-                result["records"].append({
-                    "downloader": downloader,
-                    "local": view.name[:80],
-                    "site": site_title[:80] if site_title else "-",
-                    "state": state,
-                    "message": message[:160],
-                })
+                if member_view is view:
+                    row["message"] = (prefix + detail)[:160]
+                else:
+                    row["message"] = (
+                        f"{prefix}同组代表「{view.name[:40]}」已处理，本种子不重复搜站"
+                    )[:160]
+            label = logview.state_label(state)
+            logview.emit(
+                self,
+                f"[{processed}] {label}：{view.name[:80]}"
+                + (f" → {site_title[:60]}" if site_title else "")
+                + f"（{detail[:100]}）"
+                + (f"｜同组 {len(members)} 个种子复用此结果" if len(members) > 1 else ""),
+                level="warning" if state in ("failed", "error") else "info",
+            )
+            if state in ("added", "exists"):
+                result["matched"] += 1
+            if state == "added":
+                result["added"] += 1
+            elif state == "failed":
+                result["failed"] += 1
+            elif state == "skipped":
+                result["skipped"] += 1
+            cache[gkey] = {
+                "r": state, "t": time.time(), "m": detail[:200], "n": view.name[:120],
+            }
+            result["records"].append({
+                "downloader": downloader,
+                "local": view.name[:80],
+                "site": site_title[:80] if site_title else "-",
+                "state": state,
+                "message": detail[:160],
+            })
 
-        result["scanned"] = total_seen
-        result["eligible"] = eligible_total
-        if not stopped and (limit and processed >= limit):
-            stopped = f"达到本轮处理上限 {limit}"
-        if not stopped and self._budget <= 0:
-            stopped = "站点请求预算用尽"
         result["message"] = stopped
         self.save_data(_CACHE_KEY, cache)
-        self.save_data(logview.SCAN_KEY, scan_rows[-logview.MAX_ROWS:])
+        self.save_data(logview.SCAN_KEY, [e[3] for e in entries][-logview.MAX_ROWS:])
         result["pending_retry"] = sum(
             1 for entry in cache.values()
             if isinstance(entry, dict) and entry.get("r") in ("nomatch", "failed")
         )
         logview.emit(
             self,
-            f"本轮结束：扫到 {total_seen} 个、需要核对 {eligible_total} 个、"
-            f"实际核对 {processed} 个、新增 {result['added']} 个、失败 {result['failed']} 个"
+            f"本轮结束：下载器 {len(entries)} 个种子 → {len(groups)} 组内容，"
+            f"实际搜站 {processed} 组、新增 {result['added']} 个、失败 {result['failed']} 组"
             + (f"；{stopped}" if stopped else "")
-            + "。明细见下方名录。",
+            + "。全量名录与搜索词见上方日志。",
         )
         self._save_result(result, started)
         self._notify_result(result)
@@ -785,7 +879,7 @@ class HDWinGCrossSeed(_PluginBase):
             if not service or not getattr(service, "instance", None):
                 continue
             if service.type not in ("qbittorrent", "transmission"):
-                logger.info(f"瓷器辅种：跳过不支持的下载器 {name}（{service.type}）")
+                logger.info(f"名称辅种：跳过不支持的下载器 {name}（{service.type}）")
                 continue
             usable[name] = service
         return usable
@@ -802,7 +896,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             completed = service.instance.get_completed_torrents()
         except Exception as err:  # noqa: BLE001
-            logger.warning(f"瓷器辅种：读取完成任务异常 {err}")
+            logger.warning(f"名称辅种：读取完成任务异常 {err}")
             return None
         if completed is None:
             return None
@@ -811,7 +905,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             all_torrents, error = service.instance.get_torrents()
         except Exception as err:  # noqa: BLE001
-            logger.warning(f"瓷器辅种：读取 Transmission 全量任务异常 {err}")
+            logger.warning(f"名称辅种：读取 Transmission 全量任务异常 {err}")
             return completed
         if error or not all_torrents:
             return completed
@@ -859,56 +953,92 @@ class HDWinGCrossSeed(_PluginBase):
         return (time.time() - _to_float(entry.get("t"))) > ttl
 
     def _handle(
-        self, downloader: str, service: Any, view: _TorrentView, client: HDWinGClient
+        self, downloader: str, service: Any, view: _TorrentView, client: SiteClient
     ) -> Tuple[str, str, str]:
-        """处理一个本地任务：名称找候选，体积预筛，再靠 hash / 文件清单定案。"""
-        keywords = build_search_keys(view.name)
-        if not keywords:
+        """处理一组内容；任何异常都收敛成一条 error 结果，不中断整轮。"""
+        try:
+            return self._handle_group(downloader, service, view, client)
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"名称辅种：处理分组异常 {err} - {traceback.format_exc()}")
+            logview.emit(self, f"本组处理异常：{err}", level="error")
+            return "error", f"处理异常：{str(err)[:120]}", ""
+
+    def _handle_group(
+        self, downloader: str, service: Any, view: _TorrentView, client: SiteClient
+    ) -> Tuple[str, str, str]:
+        """名称负责召回，info_hash / 文件清单负责定案，体积只参与排序。"""
+        keys = grouping.search_keys(view.name, self._name_rules)
+        if not keys:
             return "skipped", "无法从名称提取搜索词", ""
-        results = self._search(client, keywords)
+        results = self._search(client, keys)
         if not results:
             return "nomatch", "站点无搜索结果", ""
         ranked = rank_candidates(view.name, view.size, results, self._min_score)
         if not ranked:
             return "nomatch", f"{len(results)} 条结果名称均不匹配", ""
+
+        known = getattr(self, "_known_hashes", None)
+        if known is None:
+            known = set()
+            self._known_hashes = known
         tried = 0
-        last = "候选种子文件不一致"
-        for score, diff, candidate in ranked:
+        saw_meta = False
+        add_failed = False
+        last = "站点候选均与本地文件不一致"
+        for _score, diff, candidate in ranked:
             if self._stop_event.is_set() or self._budget <= 0:
                 break
             if tried >= self._max_candidates:
                 break
-            # 站点列表页就带体积，差太多就不必下载 .torrent，
-            # 省下的请求留给后面的种子，全量扫描才跑得动。
-            if diff > 0.10:
-                last = f"{candidate.title[:50]} 体积差 {diff * 100:.1f}%"
-                logview.emit(self, f"  ↳ 候选「{candidate.title[:50]}」体积差 {diff * 100:.1f}%，跳过下载")
+            if not getattr(candidate, "download_path", ""):
                 continue
             tried += 1
-            content = self._download(client, candidate)
+            self._budget -= 1
+            # 体积只用来排序，绝不当拒绝条件：整季合集与单集本来就差几十倍，
+            # 之前按 10% 硬筛会把真正同源的候选全部砍掉。
+            try:
+                content = client.download(candidate)
+            except Exception as err:  # noqa: BLE001 - 单个候选失败不影响后面的候选
+                logview.emit(self, f"  ↳ 下载「{str(candidate.title)[:50]}」失败：{err}",
+                             level="warning")
+                continue
             if not content:
                 continue
             meta = parse_torrent(content)
             if not meta:
                 continue
+            saw_meta = True
+            info_hash = str(meta.info_hash or "").strip().lower()
+            if info_hash and info_hash in known:
+                return "exists", "站点种子已在下载器里（全局名录命中）", candidate.title
             mode = self._judge(service, view, meta)
             if not mode:
-                last = f"{candidate.title[:50]} 文件不一致"
+                last = f"{candidate.title[:50]} 文件清单不一致（体积差 {diff * 100:.1f}%）"
+                logview.emit(self, f"  ↳ 候选「{candidate.title[:50]}」文件清单不一致，跳过")
                 continue
             if self._exists(service, meta.info_hash):
+                if info_hash:
+                    known.add(info_hash)
                 return "exists", f"站点种子已在下载器（{mode}）", candidate.title
             ok, message = self._add(service, view, content)
             if ok:
+                if info_hash:
+                    known.add(info_hash)
                 logview.emit(
                     self,
-                    f"瓷器辅种成功：{view.name} -> {candidate.title}"
+                    f"名称辅种成功：{view.name} -> {candidate.title}"
                     f"（{mode}，体积差 {diff * 100:.2f}%）",
                 )
                 return "added", f"匹配方式 {mode}，体积差 {diff * 100:.2f}%", candidate.title
+            add_failed = True
             last = message
-        return "failed", last, ""
+        if add_failed:
+            return "failed", last, ""
+        if tried and not saw_meta:
+            return "failed", "站点种子下载或解析失败", ""
+        return "nomatch", last, ""
 
-    def _search(self, client: HDWinGClient, keywords: Any) -> List[Any]:
+    def _search(self, client: SiteClient, keywords: Any) -> List[Any]:
         """按多个关键词依次搜索，带轮内缓存与预算控制。"""
         for keyword in keywords:
             if self._budget <= 0:
@@ -943,7 +1073,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             local_files = service.instance.get_files(view.hash)
         except Exception as err:  # noqa: BLE001
-            logger.warning(f"瓷器辅种：读取文件清单失败 {err}")
+            logger.warning(f"名称辅种：读取文件清单失败 {err}")
             return False
         if not local_files:
             return False
@@ -1002,7 +1132,7 @@ class HDWinGCrossSeed(_PluginBase):
                 )
                 return bool(ret), "已添加" if ret else "下载器拒绝添加"
         except Exception as err:  # noqa: BLE001
-            logger.error(f"瓷器辅种：添加种子异常 {err}")
+            logger.error(f"名称辅种：添加种子异常 {err}")
             return False, f"添加异常：{err}"
         return False, f"不支持的下载器类型 {service.type}"
 
@@ -1032,6 +1162,7 @@ class HDWinGCrossSeed(_PluginBase):
             "last_run_text": _format_time(stamp),
             "last_trigger": result.get("trigger", ""),
             "last_scanned": result.get("scanned", 0),
+            "last_groups": result.get("groups", 0),
             "last_eligible": result.get("eligible", 0),
             "last_processed": result.get("processed", 0),
             "last_matched": result.get("matched", 0),
@@ -1068,10 +1199,10 @@ class HDWinGCrossSeed(_PluginBase):
         failed = result.get("failed", 0)
         if not added and not failed and not result.get("message"):
             return
-        title = "瓷器辅种完成" if added else "瓷器辅种未新增"
+        title = "名称辅种完成" if added else "名称辅种未新增"
         lines = [
-            f"扫到 {result.get('scanned', 0)} 个已完成种子，"
-            f"实际核对 {result.get('processed', 0)} 个，"
+            f"下载器 {result.get('scanned', 0)} 个种子归并成 {result.get('groups', 0)} 组内容，"
+            f"实际搜站 {result.get('processed', 0)} 组，"
             f"新增 {added}，失败 {failed}",
         ]
         if result.get("message"):
@@ -1085,7 +1216,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             self.post_message(title=title, text="\n".join(lines))
         except Exception as err:  # noqa: BLE001 - 通知失败不影响主流程
-            logger.warning(f"瓷器辅种：发送通知失败 {err}")
+            logger.warning(f"名称辅种：发送通知失败 {err}")
 
     # ------------------------------------------------------------------
     # 工具
@@ -1096,7 +1227,7 @@ class HDWinGCrossSeed(_PluginBase):
         base = base.split("://")[-1].split("/")[0]
         return base
 
-    def _build_client(self) -> HDWinGClient:
+    def _build_client(self) -> SiteClient:
         site_url = (self._site_url or DEFAULT_SITE_URL).rstrip("/")
         # 注意：RequestUtils 传入 headers 后不再注入 accept_type/referer，需在此显式给出，
         # cf_clearance 与防盗链都依赖 UA/Referer 与浏览器一致。
@@ -1117,7 +1248,7 @@ class HDWinGCrossSeed(_PluginBase):
                     use_session=True,
                 ).get_res(url)
             except Exception as err:  # noqa: BLE001
-                logger.warning(f"瓷器辅种：站点请求异常：{err}")
+                logger.warning(f"名称辅种：站点请求异常：{err}")
                 return None
             if not response:
                 return None
@@ -1127,7 +1258,7 @@ class HDWinGCrossSeed(_PluginBase):
                 url=str(response.url),
             )
 
-        return HDWinGClient(
+        return SiteClient(
             fetcher=fetcher,
             base_url=site_url,
             interval=self._interval,

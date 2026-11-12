@@ -1,5 +1,5 @@
 """
-HDWinG（NexusPHP）站点交互与种子解析工具。
+NexusPHP 站点交互与种子解析工具。
 
 本模块刻意不依赖 MoviePilot 宿主，只依赖标准库，便于脱离宿主单元测试：
 - HTTP 由调用方注入 fetcher，便于复用宿主的请求封装（代理、证书、UA 策略）
@@ -450,8 +450,8 @@ def candidate_ok(local_name: str, candidate: SiteTorrent, min_score: float = 0.6
 Fetcher = Callable[[str], Optional[HttpResult]]
 
 
-class HDWinGClient:
-    """带节流与限流退避的 HDWinG 只读客户端。"""
+class SiteClient:
+    """带节流与限流退避的站点只读客户端。"""
 
     def __init__(
         self,
