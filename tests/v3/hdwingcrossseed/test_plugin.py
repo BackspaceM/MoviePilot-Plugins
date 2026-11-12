@@ -343,3 +343,197 @@ def test_get_form_and_page_render() -> None:
     }.get(key)
     page = plugin.get_page()
     assert isinstance(page, list) and page
+
+
+# ---------------------------------------------------------------------------
+# 全量扫描 / 实时日志 / 精简设置（v1.2.0）
+# ---------------------------------------------------------------------------
+
+def _walk_models(node: Any, out: List[str]) -> None:
+    if isinstance(node, dict):
+        props = node.get("props") or {}
+        if "model" in props:
+            out.append(props["model"])
+        for value in node.values():
+            _walk_models(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_models(value, out)
+
+
+def _scan_plugin(count: int = 60):
+    """构造一个不联网、不碰下载器的插件，模拟 count 个已完成任务。"""
+    import threading
+    import types
+
+    from app.plugins.hdwingcrossseed import logview
+
+    plugin = _plugin()
+    store: Dict[str, Any] = {}
+    plugin.get_data = lambda key=None, **kw: store.get(key)  # type: ignore[method-assign]
+    plugin.save_data = lambda key, value: store.__setitem__(key, value)  # type: ignore[method-assign]
+    logview.clear(plugin)
+
+    plugin._stop_event = threading.Event()
+    plugin._budget = 10000
+    plugin._max_requests = 10000
+    plugin._max_tasks = 0
+    plugin._max_candidates = 3
+    plugin._min_score = 0.6
+    plugin._size_tolerance = 2.0
+    plugin._match_mode = "strict"
+    plugin._skip_tags = []
+    plugin._skip_paths = []
+    plugin._min_size_gb = 0.0
+    plugin._cache_days = 7
+    plugin._site_url = "https://hdwing.org"
+    plugin._cookie = "test-cookie"
+    plugin._notify = False
+    plugin._search_cache = {}
+    plugin._tag = "辅种"
+    plugin._skip_checking = True
+    plugin._add_paused = False
+    plugin._interval = 6.0
+    plugin._user_agent = "UA"
+    plugin._downloaders = []
+
+    torrents = [
+        {"hash": f"h{i}", "name": f"Some.Movie.{i}.2020.1080p.WEB-DL",
+         "size": 1_000_000 + i, "save_path": "/downloads", "tags": [],
+         "tracker": "http://tracker.other.org/announce", "added_on": i}
+        for i in range(count)
+    ]
+    client = types.SimpleNamespace(check_login=lambda: (True, "ok"))
+    plugin._services = lambda: {"qb.main": object()}  # type: ignore[method-assign]
+    plugin._completed_torrents = lambda service: torrents  # type: ignore[method-assign]
+    plugin._build_client = lambda: client  # type: ignore[method-assign]
+    plugin._handle = lambda d, s, v, c: ("nomatch", "站点无搜索结果", "")  # type: ignore[method-assign]
+    return plugin, store
+
+
+def test_display_name_and_simple_form() -> None:
+    assert HDWinGCrossSeed.plugin_name == "瓷器辅种"
+    form, default = _plugin().get_form()
+    models: List[str] = []
+    _walk_models(form, models)
+    assert set(models) == {"enabled", "notify", "cron", "max_tasks",
+                           "downloaders", "site_url", "user_agent", "cookie"}
+    assert len(models) <= 8, "设置项又变多了"
+    assert default["max_tasks"] == 0, "默认必须不限数量，扫全下载器"
+
+
+def test_api_has_log_and_page_shows_log_and_rows() -> None:
+    assert "/log" in {item["path"] for item in _plugin().get_api()}
+    plugin, store = _scan_plugin(3)
+    store["stats"] = {"last_run_text": "刚刚", "last_scanned": 3,
+                      "last_eligible": 3, "last_processed": 3}
+    page = plugin.get_page()
+    html = "".join(str(x.get("html") or "") for x in page)
+    assert "运行日志" in html and "cs-log" in html
+    assert "本轮扫描名录" in html and "自动刷新" in html
+    assert "__csPoll" in html and "HDWinGCrossSeed/log" in html
+
+
+def test_log_emit_persists_every_line() -> None:
+    from app.plugins.hdwingcrossseed import logview
+
+    plugin, store = _scan_plugin(0)
+    logview.emit(plugin, "第一条")
+    logview.emit(plugin, "第二条")
+    text = logview.log_text(plugin)
+    assert "第一条" in text and "第二条" in text
+    assert store["log"][-1].endswith("第二条")
+    assert "扫到" in logview.progress({"last_scanned": 7}, False)
+    assert "&lt;script&gt;" in logview.render(
+        {}, "<script>", [{"name": "<b>x</b>", "state": "added",
+                          "message": "ok", "downloader": "qb", "size_text": "1 GB"}]
+    )
+
+
+def test_api_log_returns_text_and_progress() -> None:
+    from app.plugins.hdwingcrossseed import logview
+
+    plugin, store = _scan_plugin(0)
+    logview.emit(plugin, "开始跑")
+    store["stats"] = {"last_run_text": "刚刚", "last_scanned": 12,
+                      "last_eligible": 10, "last_processed": 8}
+    response = plugin.api_log()
+    assert response.success
+    assert "开始跑" in response.data["text"]
+    assert "扫到 12 个" in response.data["progress"]
+
+
+def test_full_scan_has_no_truncation() -> None:
+    plugin, store = _scan_plugin(60)
+    plugin._run_once("手动")
+    rows = store["scan"]
+    stats = store["stats"]
+    assert len(rows) == 60, "名录必须全量，不能只留前几个"
+    assert stats["last_scanned"] == 60
+    assert stats["last_eligible"] == 60
+    assert stats["last_processed"] == 60
+    assert all(r["state"] == "nomatch" for r in rows)
+    assert "本轮结束：扫到 60 个" in "\n".join(store["log"])
+
+
+def test_limit_marks_remaining_as_pending_but_still_lists_all() -> None:
+    plugin, store = _scan_plugin(10)
+    plugin._max_tasks = 3
+    plugin._run_once("手动")
+    rows = store["scan"]
+    assert len(rows) == 10
+    assert sum(1 for r in rows if r["state"] == "pending") == 7
+    assert store["stats"]["last_processed"] == 3
+    assert store["stats"]["last_scanned"] == 10
+    assert "达到本轮处理上限" in store["stats"]["last_message"]
+
+
+def test_cached_items_are_still_listed() -> None:
+    plugin, store = _scan_plugin(5)
+    store["cache"] = {"qb.main|h0": {"r": "added", "t": time.time()}}
+    plugin._run_once("手动")
+    rows = store["scan"]
+    assert len(rows) == 5
+    assert sum(1 for r in rows if r["state"] == "cached") == 1
+    assert store["stats"]["last_scanned"] == 5
+    assert store["stats"]["last_eligible"] == 4
+
+
+def test_budget_exhaustion_is_visible_in_list() -> None:
+    plugin, store = _scan_plugin(6)
+    plugin._max_requests = 2
+    plugin._handle = lambda d, s, v, c: (  # type: ignore[method-assign]
+        setattr(plugin, "_budget", plugin._budget - 1) or ("nomatch", "无结果", "")
+    )
+    plugin._run_once("手动")
+    rows = store["scan"]
+    assert len(rows) == 6
+    assert any(r["state"] == "pending" for r in rows)
+    assert "请求预算用尽" in store["stats"]["last_message"]
+
+
+def test_size_mismatch_skips_torrent_download() -> None:
+    import threading
+
+    from app.plugins.hdwingcrossseed import logview
+    from app.plugins.hdwingcrossseed.hdwing import build_search_keys
+
+    plugin, store = _scan_plugin(0)
+    logview.clear(plugin)
+    plugin._stop_event = threading.Event()
+    plugin._budget = 10
+    candidate = SiteTorrent(tid="1", title=MOVIE, size=SIZE // 2, seeders=5)
+    plugin._search = lambda client, keys: [candidate]  # type: ignore[method-assign]
+    plugin._download = lambda client, cand: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("体积差过大不应下载种子")
+    )
+    # _scan_plugin 把 _handle 换成了桩，这里要用回真实实现
+    del plugin._handle
+    view = _view()
+    state, message, title = plugin._handle("qb", None, view, None)
+    assert state == "failed" and "体积差" in message and title == ""
+    assert any("跳过下载" in line for line in store["log"])
+
+    keys = build_search_keys("The.Mandalorian.S02E01.2020.1080p.WEB-DL")
+    assert 1 <= len(keys) <= 3 and keys[0]
+    assert len(set(keys)) == len(keys)

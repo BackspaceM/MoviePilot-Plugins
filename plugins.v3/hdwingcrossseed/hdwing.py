@@ -369,6 +369,31 @@ def build_search_key(name: str) -> Tuple[str, str]:
     return " ".join(primary), " ".join(fallback)
 
 
+def build_search_keys(name: str) -> List[str]:
+    """给出按优先级排列的搜索词，最多三个。
+
+    站点没有 pieces-hash 可用，只能靠名称找候选，因此多备几种写法：
+    完整片名 / 去掉年份的短词 / 去掉季集的标题加年份（合集与单集互搜）。
+    真正的同源判定仍由 info_hash 与文件清单完成，名称只负责召回。
+    """
+    primary, fallback = build_search_key(name)
+    keys: List[str] = []
+    for key in (primary, fallback):
+        if key and key not in keys:
+            keys.append(key)
+    tokens = name_tokens(name)
+    year = year_of(name)
+    plain = [
+        token for token in tokens
+        if not _YEAR.fullmatch(token) and not _EPISODE.fullmatch(token)
+    ][:4]
+    if plain:
+        third = " ".join(plain + ([year] if year else []))
+        if third and third not in keys:
+            keys.append(third)
+    return keys
+
+
 def episode_of(name: str) -> str:
     """提取季集标识，统一成 SxxEyy / 第N集 的形式。"""
     text = name or ""

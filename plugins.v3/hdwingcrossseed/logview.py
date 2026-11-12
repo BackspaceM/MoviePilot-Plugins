@@ -1,0 +1,236 @@
+"""瓷器辅种 —— 运行日志与详情页渲染。
+
+日志双写：写进插件数据（页面能实时看到，运行中每处理一条就落一次），
+同时写宿主 logger（插件卡片点「日志」也能看到）。
+页面上的自动刷新只用固定的 inline onload 脚本：v-html 插入的 <script> 不会执行，
+但图片的 onload 会，因此用它启动一个 3 秒轮询，动态内容一律走 textContent。
+"""
+
+from __future__ import annotations
+
+import html
+import time
+from typing import Any, Dict, List, Optional, Sequence
+
+PLUGIN_ID = "HDWinGCrossSeed"
+LOG_KEY = "log"
+SCAN_KEY = "scan"
+MAX_LINES = 400
+MAX_ROWS = 2000
+POLL_MS = 3000
+
+try:
+    from app.sdk.logging import logger as _host_logger  # type: ignore
+except Exception:  # noqa: BLE001 - 离线 stub 环境
+    _host_logger = None
+
+_LOG_LINES: List[str] = []
+
+_STATE_LABEL = {
+    "added": "已辅种", "exists": "已存在", "nomatch": "未匹配",
+    "failed": "失败", "skipped": "跳过", "error": "异常",
+    "cached": "近期已核对", "ignored": "不符合条件", "pending": "本轮未处理",
+}
+_STATE_COLOR = {
+    "added": "#16A34A", "exists": "#6366F1", "nomatch": "#64748B",
+    "failed": "#DC2626", "skipped": "#64748B", "error": "#DC2626",
+    "cached": "#64748B", "ignored": "#94A3B8", "pending": "#D97706",
+}
+
+
+def _e(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def state_label(state: str) -> str:
+    return _STATE_LABEL.get(state, state)
+
+
+def _stamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def emit(plugin: Any, message: str, level: str = "info") -> None:
+    """追加一条运行日志；插件数据、内存镜像、宿主日志三处同步。"""
+    text = str(message or "").strip()
+    if not text:
+        return
+    line = f"[{_stamp()}] {text}"
+    _LOG_LINES.append(line)
+    if len(_LOG_LINES) > MAX_LINES:
+        del _LOG_LINES[: len(_LOG_LINES) - MAX_LINES]
+    try:
+        plugin.save_data(LOG_KEY, list(_LOG_LINES[-MAX_LINES:]))
+    except Exception:  # noqa: BLE001 - 持久化失败不能中断辅种
+        pass
+    if _host_logger is not None:
+        try:
+            getattr(_host_logger, "warning" if level in ("warning", "error") else "info")(
+                f"瓷器辅种：{text}"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def clear(plugin: Any) -> None:
+    _LOG_LINES.clear()
+    try:
+        plugin.save_data(LOG_KEY, [])
+        plugin.save_data(SCAN_KEY, [])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def log_lines(plugin: Any) -> List[str]:
+    if _LOG_LINES:
+        return list(_LOG_LINES)
+    try:
+        saved = plugin.get_data(LOG_KEY) or []
+    except Exception:  # noqa: BLE001
+        saved = []
+    return [str(x) for x in saved][-MAX_LINES:]
+
+
+def log_text(plugin: Any, limit: int = 300) -> str:
+    return "\n".join(log_lines(plugin)[-max(1, int(limit)):])
+
+
+def scan_rows(plugin: Any) -> List[Dict[str, Any]]:
+    try:
+        rows = plugin.get_data(SCAN_KEY) or []
+    except Exception:  # noqa: BLE001
+        rows = []
+    return [x for x in rows if isinstance(x, dict)][-MAX_ROWS:]
+
+
+def progress(stats: Dict[str, Any], running: bool, as_html: bool = True) -> str:
+    esc = _e if as_html else (lambda value: str(value if value is not None else ""))
+    parts = [
+        f"上次运行：{esc(stats.get('last_run_text') or '尚未运行')}",
+        f"扫到 {int(stats.get('last_scanned') or 0)} 个",
+        f"符合 {int(stats.get('last_eligible') or 0)} 个",
+        f"实际处理 {int(stats.get('last_processed') or 0)} 个",
+        f"新增 {int(stats.get('last_added') or 0)}",
+        f"失败 {int(stats.get('last_failed') or 0)}",
+    ]
+    text = "｜".join(parts)
+    if running:
+        text = "正在运行…｜" + text
+    if stats.get("last_message"):
+        text += "｜" + esc(str(stats["last_message"])[:120])
+    return text
+
+
+_COPY_JS = (
+    "var p=document.getElementById('cs-log');var t=p?p.textContent:'';"
+    "var self=this;var done=function(){self.textContent='已复制';};"
+    "var fb=function(){var x=document.createElement('textarea');x.value=t;"
+    "document.body.appendChild(x);x.select();document.execCommand('copy');"
+    "document.body.removeChild(x);done();};"
+    "var C=navigator.clipboard;if(C){if(C.writeText){C.writeText(t);done();}else{fb();}}else{fb();}"
+)
+
+_POLL_JS = (
+    "if(!window.__csPoll){window.__csPoll=setInterval(function(){"
+    "var A=window.MoviePilotAPI;if(!A){return;}if(!A.get){return;}"
+    "A.get('plugin/HDWinGCrossSeed/log').then(function(r){"
+    "var d=r;if(d){if(d.data){d=d.data;}}"
+    "if(d){if(d.success!==undefined){if(d.data){d=d.data;}}}"
+    "var t='';if(d){if(d.text){t=d.text;}}"
+    "var p=document.getElementById('cs-log');"
+    "if(p){if(p.textContent!==t){p.textContent=t;p.scrollTop=p.scrollHeight;}}"
+    "var s=document.getElementById('cs-state');"
+    "if(s){if(d){if(d.progress){s.textContent=d.progress;}}}"
+    "}).catch(function(){});},3000);}"
+)
+
+_STYLE = """
+<style>
+.cs{color:inherit;font-family:inherit;font-size:13px;line-height:1.6}
+.cs *{box-sizing:border-box}
+.cs-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:4px 0 12px}
+.cs-title{font-size:17px;font-weight:700}
+.cs-state{font-size:12px;opacity:.72;margin-bottom:10px}
+.cs-pill{font-size:11px;font-weight:700;padding:3px 9px;border-radius:7px;background:rgba(99,102,241,.14);color:#8B8BF5}
+.cs-sec{font-size:13px;font-weight:650;margin:14px 0 8px;display:flex;align-items:center;gap:8px}
+.cs-sec:before{content:'';width:3px;height:12px;border-radius:3px;background:linear-gradient(135deg,#4F46E5,#A855F7)}
+.cs-sec small{font-weight:400;opacity:.55;margin-left:auto}
+.cs-log{background:rgba(127,127,127,.07);border:1px solid rgba(127,127,127,.15);border-radius:10px;
+  padding:10px 12px;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.65}
+.cs-copy{font-size:11px;padding:4px 10px;border-radius:7px;border:1px solid rgba(127,127,127,.28);
+  background:rgba(127,127,127,.08);color:inherit;cursor:pointer}
+.cs-wrap{border:1px solid rgba(127,127,127,.16);border-radius:10px;overflow:auto;max-height:420px}
+.cs-table{width:100%;border-collapse:collapse;font-size:12px}
+.cs-table th{position:sticky;top:0;background:rgba(127,127,127,.14);text-align:left;
+  padding:8px 9px;font-weight:650;white-space:nowrap}
+.cs-table td{padding:7px 9px;border-bottom:1px solid rgba(127,127,127,.10);vertical-align:top;word-break:break-all}
+.cs-table tr:last-child td{border-bottom:0}
+.cs-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;opacity:.8}
+.cs-tag{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;
+  background:rgba(127,127,127,.16);white-space:nowrap}
+.cs-foot{font-size:11px;opacity:.52;margin-top:12px;line-height:1.8}
+.cs-empty{font-size:12px;opacity:.55;padding:10px 0}
+</style>
+"""
+
+
+def _table(rows: Sequence[Dict[str, Any]], truncated: bool) -> str:
+    if not rows:
+        return '<div class="cs-empty">还没有扫描记录，点「立即辅种」跑一轮。</div>'
+    body = []
+    for row in rows:
+        state = str(row.get("state") or "skipped")
+        color = _STATE_COLOR.get(state, "#64748B")
+        label = _STATE_LABEL.get(state, state)
+        body.append(
+            "<tr>"
+            f'<td><b>{_e(row.get("name"))}</b><div class="cs-mono">{_e(row.get("downloader"))} · '
+            f'{_e(row.get("size_text") or "—")}</div></td>'
+            f'<td><span class="cs-tag" style="color:{color}">{_e(label)}</span></td>'
+            f'<td>{_e(row.get("message") or "—")}</td></tr>'
+        )
+    note = "（本轮名录已达显示上限，仅显示最近部分）" if truncated else ""
+    return (
+        '<div class="cs-wrap"><table class="cs-table"><thead><tr>'
+        "<th>下载器里的种子</th><th>结果</th><th>说明 / 站点种子</th>"
+        f"</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+        + (f'<div class="cs-foot">{_e(note)}</div>' if note else "")
+    )
+
+
+def render(
+    stats: Dict[str, Any],
+    log: str,
+    rows: Sequence[Dict[str, Any]],
+    running: bool = False,
+    truncated: bool = False,
+) -> str:
+    """详情页 HTML：进度 + 实时日志 + 本轮全量名录。"""
+    head = (
+        '<div class="cs-head"><div class="cs-title">瓷器辅种</div>'
+        f'<span class="cs-pill">{"运行中" if running else "空闲"}</span></div>'
+    )
+    state = f'<div class="cs-state" id="cs-state">{progress(stats, running)}</div>'
+    log_block = (
+        '<div class="cs-sec">运行日志<small>每 3 秒自动刷新，运行中也能看</small></div>'
+        f'<div style="display:flex;justify-content:flex-end;margin-bottom:6px">'
+        f'<button class="cs-copy" onclick="{_COPY_JS}">复制日志</button></div>'
+        f'<pre class="cs-log" id="cs-log">{_e(log)}</pre>'
+    )
+    table_block = (
+        f'<div class="cs-sec">本轮扫描名录<small>共 {len(rows)} 条 · 全量列出</small></div>'
+        + _table(rows, truncated)
+    )
+    foot = (
+        '<div class="cs-foot">名称只用于在站点找候选，最终要下载种子解析 info_hash 和文件清单，'
+        '完全一致才会添加。近期核对过、带跳过标签或属于本站的种子会被略过，但仍会计入上面的名录。'
+        '想强制重扫一遍，点「清空缓存」后再运行。</div>'
+    )
+    # v-html 不会执行 <script>，用静态 data URI 图片的 onload 启动轮询
+    poll = (
+        '<img alt="" style="display:none" '
+        'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" '
+        f'onload="{_POLL_JS}">'
+    )
+    return f'<div class="cs">{_STYLE}{head}{state}{log_block}{table_block}{foot}{poll}</div>'

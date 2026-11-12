@@ -1,6 +1,6 @@
-"""HDWinG 辅种插件（MoviePilot V3）。
+"""瓷器辅种插件（MoviePilot V3）。
 
-扫描下载器里已完成的种子，在 HDWinG 站内搜索同源种子并添加到下载器辅种：
+扫描下载器里已完成的种子，在 瓷器站内搜索同源种子并添加到下载器辅种：
 - 同 info_hash 直接命中，qBittorrent 可跳过校验秒做种
 - 跨站同源按文件清单（文件名 + 字节数）逐一比对，全部一致才添加
 - 每次运行有请求预算与节流，避免触发站点频率限制
@@ -26,12 +26,13 @@ from app.sdk.network import RequestUtils
 from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper
 
+from . import logview
 from .hdwing import (
     DEFAULT_SITE_URL,
     DEFAULT_USER_AGENT,
     HDWinGClient,
     HttpResult,
-    build_search_key,
+    build_search_keys,
     parse_torrent,
 )
 from .rank import rank_candidates, size_diff_ratio
@@ -181,18 +182,19 @@ def _view_of(item: Any) -> Optional[_TorrentView]:
 
 
 class HDWinGCrossSeed(_PluginBase):
-    """HDWinG 站内辅种插件。"""
+    """瓷器站内辅种插件。"""
 
-    plugin_name = "HDWinG 辅种"
+    plugin_name = "瓷器辅种"
     plugin_desc = (
-        "扫描下载器已完成的种子，在 HDWinG 搜索同源种子并添加辅种；"
-        "同 hash 或文件清单完全一致才添加，支持定时执行、请求节流与结果通知。"
+        "把下载器里的种子全量扫一遍，用名称在瓷器站内找候选，再下载种子解析 "
+        "info_hash 与文件清单，完全一致才添加辅种。页面有实时日志和逐条结果，"
+        "设置只要填 Cookie，其余自动。"
     )
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/hdwingcrossseed.png"
     )
-    plugin_version = "1.1.4"
-    plugin_label = "站点,辅种,HDWinG"
+    plugin_version = "1.2.0"
+    plugin_label = "站点,辅种,瓷器"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "hdwingcrossseed_"
@@ -208,8 +210,8 @@ class HDWinGCrossSeed(_PluginBase):
     _cookie: str = ""
     _user_agent: str = _DEFAULT_UA
     _interval: float = 6.0
-    _max_requests: int = 40
-    _max_tasks: int = 20
+    _max_requests: int = 300
+    _max_tasks: int = 0  # 0 = 不限制，全量扫描
     _max_candidates: int = 3
     _min_score: float = 0.6
     _size_tolerance: float = 2.0
@@ -249,8 +251,8 @@ class HDWinGCrossSeed(_PluginBase):
         self._cookie = ""
         self._user_agent = _DEFAULT_UA
         self._interval = 6.0
-        self._max_requests = 40
-        self._max_tasks = 20
+        self._max_requests = 300
+        self._max_tasks = 0
         self._max_candidates = 3
         self._min_score = 0.6
         self._size_tolerance = 2.0
@@ -271,9 +273,10 @@ class HDWinGCrossSeed(_PluginBase):
         self._site_url = str(config.get("site_url") or DEFAULT_SITE_URL).strip().rstrip("/")
         self._cookie = str(config.get("cookie") or "").strip()
         self._user_agent = str(config.get("user_agent") or _DEFAULT_UA).strip()
-        self._interval = max(_to_float(config.get("interval"), 6.0), 0.0)
-        self._max_requests = max(_to_int(config.get("max_requests"), 40), 1)
-        self._max_tasks = max(_to_int(config.get("max_tasks"), 20), 1)
+        self._interval = max(_to_float(config.get("interval"), 6.0), 5.0)
+        self._max_requests = max(_to_int(config.get("max_requests"), 300), 1)
+        # 0 表示不限制，扫全下载器；负数也按 0 处理
+        self._max_tasks = max(_to_int(config.get("max_tasks"), 0), 0)
         self._max_candidates = max(_to_int(config.get("max_candidates"), 3), 1)
         self._min_score = min(max(_to_float(config.get("min_score"), 0.6), 0.1), 1.0)
         self._size_tolerance = max(_to_float(config.get("size_tolerance"), 2.0), 0.0)
@@ -300,7 +303,7 @@ class HDWinGCrossSeed(_PluginBase):
             try:
                 remove_once(self.__class__.__name__, _ONCE_JOB_ID)
             except Exception as err:  # noqa: BLE001 - 调度器未启动时不应阻塞停用
-                logger.debug(f"HDWinG 辅种：取消待执行调度任务失败 {err}")
+                logger.debug(f"瓷器辅种：取消待执行调度任务失败 {err}")
         thread = getattr(self, "_thread", None)
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=10)
@@ -318,7 +321,7 @@ class HDWinGCrossSeed(_PluginBase):
         return [
             {
                 "id": "HDWinGCrossSeed",
-                "name": "HDWinG 辅种",
+                "name": "瓷器辅种",
                 "trigger": trigger,
                 "func": self.run_scheduled,
                 "kwargs": {},
@@ -333,7 +336,7 @@ class HDWinGCrossSeed(_PluginBase):
             {
                 "cmd": "/hdwing_seed",
                 "event": EventType.PluginAction,
-                "desc": "立即执行一次 HDWinG 辅种",
+                "desc": "立即跑一次瓷器辅种",
                 "category": "站点",
                 "data": {"action": _CMD_ACTION},
             }
@@ -352,180 +355,83 @@ class HDWinGCrossSeed(_PluginBase):
         if target and target != self.__class__.__name__:
             return
         if not self._enabled:
-            self.post_message(title="HDWinG 辅种", text="插件未启用，命令已忽略")
+            self.post_message(title="瓷器辅种", text="插件未启用，命令已忽略")
             return
         if not self._cookie:
-            self.post_message(title="HDWinG 辅种", text="未配置站点 Cookie，无法执行")
+            self.post_message(title="瓷器辅种", text="未配置站点 Cookie，无法执行")
             return
         if not self.start_run(trigger="命令"):
-            self.post_message(title="HDWinG 辅种", text="上一轮任务尚未结束，请稍后再试")
+            self.post_message(title="瓷器辅种", text="上一轮任务尚未结束，请稍后再试")
 
     # ------------------------------------------------------------------
     # 表单
     # ------------------------------------------------------------------
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """返回配置表单与默认值。"""
+        """设置只留必要的几项；限流、相似度、标签等全部用内置安全默认值。"""
         try:
             downloader_items = [
                 {"title": name, "value": name}
                 for name in (DownloaderHelper().get_configs() or {}).keys()
             ]
         except Exception as err:  # noqa: BLE001 - 未配置下载器时表单仍需可渲染
-            logger.debug(f"HDWinG 辅种：读取下载器列表失败 {err}")
+            logger.debug(f"瓷器辅种：读取下载器列表失败 {err}")
             downloader_items = []
         content: List[dict] = [
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 3, [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]),
-                    self._col(12, 3, [{"component": "VSwitch", "props": {"model": "notify", "label": "运行结果通知"}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "cron", "label": "执行周期（cron）",
-                        "placeholder": "0 4 * * *",
-                        "hint": "默认每天 04:00，按容器时区解释", "persistentHint": True}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "cache_days", "label": "失败重试间隔（天）",
-                        "placeholder": "7", "type": "number",
-                        "hint": "未匹配/失败的种子在该天数内不再重试",
-                        "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VSelect", "props": {
-                        "model": "downloaders", "label": "参与辅种的下载器",
-                        "multiple": True, "chips": True, "clearable": True,
-                        "items": downloader_items,
-                        "hint": "不选则使用全部已启用的下载器", "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 4, [{"component": "VTextField", "props": {
-                        "model": "site_url", "label": "站点地址",
-                        "placeholder": DEFAULT_SITE_URL}}]),
-                    self._col(12, 4, [{"component": "VTextField", "props": {
-                        "model": "user_agent", "label": "User-Agent",
-                        "placeholder": _DEFAULT_UA,
-                        "hint": "需与浏览器提取 cookie 时一致，否则 cf_clearance 可能失效",
-                        "persistentHint": True}}]),
-                    self._col(12, 4, [{"component": "VTextField", "props": {
-                        "model": "interval", "label": "请求间隔（秒）",
-                        "placeholder": "6", "type": "number",
-                        "hint": "站点有频率限制，别低于 5 秒",
-                        "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VTextarea", "props": {
-                        "model": "cookie", "label": "站点 Cookie",
-                        "rows": 4,
-                        "placeholder": "在此粘贴自己的 Cookie：hdchina=<你的值>; PHPSESSID=<你的值>; cf_clearance=<你的值>",
-                        "hint": "从浏览器开发者工具复制完整 cookie 串；含 cf_clearance 时需保持 IP 与 UA 不变。Cookie 属于个人凭据，仅存本机配置，不要提交到仓库或分享",
-                        "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "max_tasks", "label": "每轮最多处理任务数",
-                        "placeholder": "20", "type": "number"}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "max_requests", "label": "每轮请求上限",
-                        "placeholder": "40", "type": "number",
-                        "hint": "搜索与下载种子都计入，耗尽后本轮停止",
-                        "persistentHint": True}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "max_candidates", "label": "每个任务最多尝试种子数",
-                        "placeholder": "3", "type": "number"}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "min_score", "label": "名称相似度阈值",
-                        "placeholder": "0.6", "type": "number",
-                        "hint": "0.1~1.0，越大越严格", "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 4, [{"component": "VSelect", "props": {
-                        "model": "match_mode", "label": "匹配模式",
-                        "items": [
-                            {"title": "严格：同 hash 或文件清单完全一致", "value": "strict"},
-                            {"title": "宽松：额外允许总体积接近即可", "value": "loose"},
-                        ],
-                        "hint": "宽松模式可能把内容不同的版本加进来，需自行承担校验失败风险",
-                        "persistentHint": True}}]),
-                    self._col(12, 4, [{"component": "VTextField", "props": {
-                        "model": "size_tolerance", "label": "宽松模式体积容差（%）",
-                        "placeholder": "2.0", "type": "number"}}]),
-                    self._col(12, 4, [{"component": "VTextField", "props": {
-                        "model": "min_size_gb", "label": "最小种子体积（GB）",
-                        "placeholder": "0", "type": "number",
-                        "hint": "0 表示不限制", "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 3, [{"component": "VSwitch", "props": {
-                        "model": "skip_checking", "label": "qB 跳过校验",
-                        "hint": "仅在匹配通过时生效，可秒做种", "persistentHint": True}}]),
-                    self._col(12, 3, [{"component": "VSwitch", "props": {
-                        "model": "add_paused", "label": "添加后暂停"}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "tag", "label": "新增任务标签", "placeholder": "辅种"}}]),
-                    self._col(12, 3, [{"component": "VTextField", "props": {
-                        "model": "skip_tags", "label": "跳过含这些标签的任务",
-                        "placeholder": "辅种",
-                        "hint": "逗号分隔", "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VTextarea", "props": {
-                        "model": "skip_paths", "label": "跳过的保存路径前缀",
-                        "rows": 2, "placeholder": "/downloads/临时\n/downloads/待整理",
-                        "hint": "每行一个前缀，命中即跳过该任务", "persistentHint": True}}]),
-                ],
-            },
-            {
-                "component": "VRow",
-                "content": [
-                    self._col(12, 12, [{"component": "VAlert", "props": {
-                        "type": "info", "variant": "tonal"}, "text": "只对 info_hash 一致，或跨站时文件清单完全一致的种子辅种，"
-                                "免得版本不同导致校验失败。站点请求按间隔串行发，撞上频率限制会自动退避。"}]),
-                ],
-            },
+            {"component": "VRow", "content": [
+                self._col(12, 3, [{"component": "VSwitch", "props": {
+                    "model": "enabled", "label": "启用插件"}}]),
+                self._col(12, 3, [{"component": "VSwitch", "props": {
+                    "model": "notify", "label": "结果通知"}}]),
+                self._col(12, 3, [{"component": "VTextField", "props": {
+                    "model": "cron", "label": "执行周期", "placeholder": "0 4 * * *",
+                    "hint": "默认每天 04:00", "persistentHint": True}}]),
+                self._col(12, 3, [{"component": "VTextField", "props": {
+                    "model": "max_tasks", "label": "每轮处理上限", "placeholder": "0",
+                    "type": "number", "hint": "0 = 不限，扫全下载器",
+                    "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(12, 12, [{"component": "VSelect", "props": {
+                    "model": "downloaders", "label": "下载器", "multiple": True,
+                    "chips": True, "clearable": True, "items": downloader_items,
+                    "hint": "留空就是全部已启用的下载器", "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(12, 6, [{"component": "VTextField", "props": {
+                    "model": "site_url", "label": "站点地址",
+                    "placeholder": DEFAULT_SITE_URL}}]),
+                self._col(12, 6, [{"component": "VTextField", "props": {
+                    "model": "user_agent", "label": "User-Agent",
+                    "placeholder": _DEFAULT_UA,
+                    "hint": "带 cf_clearance 时要与浏览器一致", "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(12, 12, [{"component": "VTextarea", "props": {
+                    "model": "cookie", "label": "站点 Cookie", "rows": 3,
+                    "placeholder": "hdchina=...; PHPSESSID=...; cf_clearance=...",
+                    "hint": "从浏览器开发者工具复制完整 cookie 串。Cookie 属于个人凭据，只存本机配置",
+                    "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
+                self._col(12, 12, [{"component": "VAlert", "props": {
+                    "type": "info", "variant": "tonal"}, "text": (
+                        "装好填 Cookie 就能用。每次会把下载器里已完成的种子全量扫一遍，"
+                        "名称只用来在站点找候选，找到后还要解析 info_hash 和文件清单，"
+                        "完全一致才添加，不会只看名字就辅种。站点请求间隔默认 6 秒，"
+                        "近期核对过的种子不再重复请求，想强制重扫点「清空缓存」。"
+                        "运行日志和逐条结果在详情页实时显示。")}]),
+            ]},
         ]
         return [{"component": "VForm", "content": content}], {
             "enabled": False,
             "notify": True,
             "cron": "0 4 * * *",
+            "max_tasks": 0,
             "downloaders": [],
             "site_url": DEFAULT_SITE_URL,
-            "cookie": "",
             "user_agent": _DEFAULT_UA,
-            "interval": 6,
-            "max_requests": 40,
-            "max_tasks": 20,
-            "max_candidates": 3,
-            "min_score": 0.6,
-            "size_tolerance": 2.0,
-            "match_mode": "strict",
-            "skip_checking": True,
-            "add_paused": False,
-            "tag": "辅种",
-            "skip_tags": "辅种",
-            "skip_paths": "",
-            "min_size_gb": 0,
-            "cache_days": 7,
+            "cookie": "",
         }
 
     @staticmethod
@@ -537,7 +443,7 @@ class HDWinGCrossSeed(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[dict]:
-        """主界面只留按钮和一行状态，辅种明细看插件日志。"""
+        """详情页：操作按钮 + 实时日志 + 本轮全量扫描名录。"""
         stats = self.get_data(_STATS_KEY) or {}
         pid = self.__class__.__name__
         buttons = [
@@ -545,26 +451,28 @@ class HDWinGCrossSeed(_PluginBase):
                 "variant": "tonal", "color": "primary",
                 "prepend-icon": "mdi-play", "class": "ma-1"},
              "text": "立即辅种",
-             "events": {"click": {"api": f"plugin/{pid}/run", "method": "post"}}},
+             "events": {"click": {"api": f"plugin/{pid}/run", "method": "post", "params": {}}}},
             {"component": "VBtn", "props": {
                 "variant": "tonal", "prepend-icon": "mdi-account-check", "class": "ma-1"},
              "text": "检测 Cookie",
-             "events": {"click": {"api": f"plugin/{pid}/check", "method": "post"}}},
+             "events": {"click": {"api": f"plugin/{pid}/check", "method": "post", "params": {}}}},
             {"component": "VBtn", "props": {
                 "variant": "tonal", "color": "warning",
                 "prepend-icon": "mdi-delete-sweep", "class": "ma-1"},
              "text": "清空缓存",
-             "events": {"click": {"api": f"plugin/{pid}/clear_cache", "method": "post"}}},
+             "events": {"click": {"api": f"plugin/{pid}/clear_cache", "method": "post", "params": {}}}},
         ]
-        status = (f"上次运行：{stats.get('last_run_text', '尚未运行')}"
-                  f"｜新增 {stats.get('last_added', 0)}｜失败 {stats.get('last_failed', 0)}"
-                  f"｜待重试 {_to_int(stats.get('pending_retry'), 0)}")
-        if not self._enabled:
-            status = "插件没开｜" + status
+        rows = logview.scan_rows(self)
+        page_html = logview.render(
+            stats=stats,
+            log=logview.log_text(self),
+            rows=rows,
+            running=bool(self._running),
+            truncated=len(rows) >= logview.MAX_ROWS,
+        )
         return [
             {"component": "div", "content": buttons},
-            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
-             "text": status},
+            {"component": "div", "html": page_html},
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:
@@ -578,6 +486,8 @@ class HDWinGCrossSeed(_PluginBase):
              "auth": "bear", "summary": "清空辅种缓存"},
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询运行状态"},
+            {"path": "/log", "endpoint": self.api_log, "methods": ["GET"],
+             "auth": "bear", "summary": "读取实时运行日志与进度"},
         ]
 
     def api_run(self) -> schemas.Response:
@@ -591,7 +501,7 @@ class HDWinGCrossSeed(_PluginBase):
         started = self.start_run(trigger="手动")
         return schemas.Response(
             success=started,
-            message="已开始执行，稍后刷新页面查看结果" if started else "任务启动失败",
+            message="已开始，详情页日志会实时更新" if started else "任务启动失败",
         )
 
     def api_check(self) -> schemas.Response:
@@ -602,12 +512,23 @@ class HDWinGCrossSeed(_PluginBase):
         return schemas.Response(success=ok, message=message)
 
     def api_clear_cache(self) -> schemas.Response:
-        """清空重试缓存，便于下次重新扫描。"""
+        """清空重试缓存与本轮名录，下次会把全部种子重新核一遍。"""
         self.save_data(_CACHE_KEY, {})
+        self.save_data(logview.SCAN_KEY, [])
         stats = dict(self.get_data(_STATS_KEY) or {})
         stats["pending_retry"] = 0
         self.save_data(_STATS_KEY, stats)
-        return schemas.Response(success=True, message="缓存已清空")
+        logview.emit(self, "缓存已清空，下一轮会重新核对下载器里的全部种子。")
+        return schemas.Response(success=True, message="缓存已清空，下轮全量重扫")
+
+    def api_log(self) -> schemas.Response:
+        """页面每 3 秒轮询一次：日志纯文本 + 当前进度。"""
+        stats = self.get_data(_STATS_KEY) or {}
+        return schemas.Response(success=True, data={
+            "text": logview.log_text(self),
+            "progress": logview.progress(stats, bool(self._running), as_html=False),
+            "running": bool(self._running),
+        })
 
     def api_status(self) -> schemas.Response:
         """返回运行状态概要。"""
@@ -638,15 +559,16 @@ class HDWinGCrossSeed(_PluginBase):
             if self._running:
                 # 异常退出可能留下未复位标记，超过阈值后允许重新进入
                 if time.time() - self._run_started < _STALE_RUN_SECONDS:
-                    logger.info("HDWinG 辅种：上一轮尚未结束，本次跳过")
+                    logger.info("瓷器辅种：上一轮尚未结束，本次跳过")
                     return False
-                logger.warning("HDWinG 辅种：上一轮运行状态疑似残留，强制重置后继续")
+                logger.warning("瓷器辅种：上一轮运行状态疑似残留，强制重置后继续")
             self._running = True
             self._run_started = time.time()
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is None:
             self._stop_event = stop_event = threading.Event()
         stop_event.clear()
+        logview.emit(self, f"开始一轮辅种（{trigger}），正在读取下载器里的全部已完成任务…")
 
         add_once = getattr(scheduler_sdk, "add_plugin_once_job", None)
         if callable(add_once):
@@ -655,12 +577,12 @@ class HDWinGCrossSeed(_PluginBase):
                     self.__class__.__name__,
                     _ONCE_JOB_ID,
                     self._run_wrapper,
-                    "HDWinG 辅种执行",
+                    "瓷器辅种执行",
                     delay_seconds=0,
                     func_kwargs={"trigger": trigger},
                 )
             except Exception as err:  # noqa: BLE001 - 调度器异常时退回自建线程
-                logger.warning(f"HDWinG 辅种：提交调度任务失败，改为后台线程执行 {err}")
+                logger.warning(f"瓷器辅种：提交调度任务失败，改为后台线程执行 {err}")
                 scheduled = False
             if scheduled:
                 return True
@@ -679,7 +601,8 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             self._run_once(trigger)
         except Exception as err:  # noqa: BLE001 - 后台任务必须兜底，避免任务静默消失
-            logger.error(f"HDWinG 辅种执行异常：{err} - {traceback.format_exc()}")
+            logger.error(f"瓷器辅种执行异常：{err} - {traceback.format_exc()}")
+            logview.emit(self, f"执行异常：{err}", level="error")
             self._save_result({
                 "trigger": trigger,
                 "scanned": 0, "matched": 0, "added": 0, "failed": 0,
@@ -697,6 +620,7 @@ class HDWinGCrossSeed(_PluginBase):
     # ------------------------------------------------------------------
 
     def _run_once(self, trigger: str) -> None:
+        """跑一轮：全量读取下载器名录，逐条记录结果，实时写日志。"""
         started = time.time()
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is None:
@@ -704,17 +628,21 @@ class HDWinGCrossSeed(_PluginBase):
         stop_event.clear()
         result: Dict[str, Any] = {
             "trigger": trigger,
-            "scanned": 0, "matched": 0, "added": 0, "failed": 0, "skipped": 0,
+            "scanned": 0, "eligible": 0, "processed": 0,
+            "matched": 0, "added": 0, "failed": 0, "skipped": 0,
             "message": "", "records": [],
         }
+        scan_rows: List[Dict[str, Any]] = []
         if not self._cookie:
             result["message"] = "未配置站点 Cookie"
+            logview.emit(self, result["message"], level="warning")
             self._save_result(result, started)
             return
         client = self._build_client()
         ok, message = client.check_login()
         if not ok:
             result["message"] = f"Cookie 检测失败：{message}"
+            logview.emit(self, result["message"], level="warning")
             self._save_result(result, started)
             self._notify_result(result)
             return
@@ -725,31 +653,88 @@ class HDWinGCrossSeed(_PluginBase):
         services = self._services()
         if not services:
             result["message"] = "没有可用的下载器"
+            logview.emit(self, result["message"], level="warning")
             self._save_result(result, started)
             return
 
-        remaining = self._max_tasks
+        limit = self._max_tasks  # 0 = 不限制
+        processed = 0
+        total_seen = 0
+        eligible_total = 0
+        stopped = ""
         for downloader, service in services.items():
-            if self._stop_event.is_set() or remaining <= 0 or self._budget <= 0:
+            if self._stop_event.is_set():
+                stopped = "任务被中止"
                 break
             torrents = self._completed_torrents(service)
             if torrents is None:
                 result["message"] = f"{downloader} 读取任务失败"
-                logger.warning(f"HDWinG 辅种：读取下载器 {downloader} 的完成任务失败")
+                logview.emit(self, result["message"], level="warning")
                 continue
-            views: List[_TorrentView] = []
+            total_seen += len(torrents)
+            logview.emit(self, f"下载器 {downloader}：读到 {len(torrents)} 个已完成任务，逐个核对。")
+
+            queued: List[Tuple[_TorrentView, Dict[str, Any]]] = []
             for item in torrents:
                 view = _view_of(item)
-                if not view or not self._eligible(view, cache, downloader):
+                if not view:
                     continue
-                views.append(view)
-            views.sort(key=lambda v: v.added_on, reverse=True)
-            for view in views[:remaining]:
-                if self._stop_event.is_set() or self._budget <= 0:
-                    break
-                remaining -= 1
-                result["scanned"] += 1
+                row: Dict[str, Any] = {
+                    "downloader": downloader,
+                    "name": view.name[:140],
+                    "size_text": _format_size(view.size),
+                    "state": "ignored", "message": "",
+                }
+                if not self._eligible(view, cache, downloader):
+                    key = f"{downloader}|{view.hash}"
+                    entry = cache.get(key)
+                    if entry and not self._cache_expired(entry):
+                        row["state"] = "cached"
+                        row["message"] = f"近期已核对（{entry.get('r', '')}），不重复请求"
+                    else:
+                        row["state"] = "ignored"
+                        row["message"] = "带跳过标签 / 本站种子 / 体积或路径被排除"
+                    scan_rows.append(row)
+                    continue
+                queued.append((view, row))
+            eligible_total += len(queued)
+            queued.sort(key=lambda pair: pair[0].added_on, reverse=True)
+            logview.emit(
+                self,
+                f"下载器 {downloader}：{len(torrents)} 个里 {len(queued)} 个需要核对，"
+                f"其余 {len(torrents) - len(queued)} 个按策略略过（仍列在名录中）。",
+            )
+
+            for view, row in queued:
+                if self._stop_event.is_set():
+                    row["state"], row["message"] = "pending", "任务被中止"
+                    scan_rows.append(row)
+                    continue
+                if limit and processed >= limit:
+                    stopped = f"达到本轮处理上限 {limit}"
+                    row["state"], row["message"] = "pending", stopped + "，下轮继续"
+                    scan_rows.append(row)
+                    continue
+                if self._budget <= 0:
+                    stopped = "站点请求预算用尽"
+                    row["state"], row["message"] = "pending", stopped + "，下轮继续"
+                    scan_rows.append(row)
+                    continue
+                processed += 1
+                result["processed"] += 1
+                logview.emit(self, f"[{processed}] {view.name[:80]} → 开始在站点找候选…")
                 state, message, site_title = self._handle(downloader, service, view, client)
+                row["state"] = state
+                row["message"] = (f"{site_title[:60]}｜" if site_title else "") + message[:140]
+                scan_rows.append(row)
+                label = logview.state_label(state)
+                logview.emit(
+                    self,
+                    f"[{processed}] {label}：{view.name[:80]}"
+                    + (f" → {site_title[:60]}" if site_title else "")
+                    + f"（{message[:100]}）",
+                    level="warning" if state in ("failed", "error") else "info",
+                )
                 if state in ("added", "exists"):
                     result["matched"] += 1
                 if state == "added":
@@ -766,11 +751,26 @@ class HDWinGCrossSeed(_PluginBase):
                     "state": state,
                     "message": message[:160],
                 })
+
+        result["scanned"] = total_seen
+        result["eligible"] = eligible_total
+        if not stopped and (limit and processed >= limit):
+            stopped = f"达到本轮处理上限 {limit}"
+        if not stopped and self._budget <= 0:
+            stopped = "站点请求预算用尽"
+        result["message"] = stopped
         self.save_data(_CACHE_KEY, cache)
-        # 待重试条目数一次算好写入统计，详情页无需再遍历整份缓存
+        self.save_data(logview.SCAN_KEY, scan_rows[-logview.MAX_ROWS:])
         result["pending_retry"] = sum(
             1 for entry in cache.values()
             if isinstance(entry, dict) and entry.get("r") in ("nomatch", "failed")
+        )
+        logview.emit(
+            self,
+            f"本轮结束：扫到 {total_seen} 个、需要核对 {eligible_total} 个、"
+            f"实际核对 {processed} 个、新增 {result['added']} 个、失败 {result['failed']} 个"
+            + (f"；{stopped}" if stopped else "")
+            + "。明细见下方名录。",
         )
         self._save_result(result, started)
         self._notify_result(result)
@@ -785,7 +785,7 @@ class HDWinGCrossSeed(_PluginBase):
             if not service or not getattr(service, "instance", None):
                 continue
             if service.type not in ("qbittorrent", "transmission"):
-                logger.info(f"HDWinG 辅种：跳过不支持的下载器 {name}（{service.type}）")
+                logger.info(f"瓷器辅种：跳过不支持的下载器 {name}（{service.type}）")
                 continue
             usable[name] = service
         return usable
@@ -802,7 +802,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             completed = service.instance.get_completed_torrents()
         except Exception as err:  # noqa: BLE001
-            logger.warning(f"HDWinG 辅种：读取完成任务异常 {err}")
+            logger.warning(f"瓷器辅种：读取完成任务异常 {err}")
             return None
         if completed is None:
             return None
@@ -811,7 +811,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             all_torrents, error = service.instance.get_torrents()
         except Exception as err:  # noqa: BLE001
-            logger.warning(f"HDWinG 辅种：读取 Transmission 全量任务异常 {err}")
+            logger.warning(f"瓷器辅种：读取 Transmission 全量任务异常 {err}")
             return completed
         if error or not all_torrents:
             return completed
@@ -861,11 +861,11 @@ class HDWinGCrossSeed(_PluginBase):
     def _handle(
         self, downloader: str, service: Any, view: _TorrentView, client: HDWinGClient
     ) -> Tuple[str, str, str]:
-        """处理单个本地任务，返回（状态，说明，站点种子标题）。"""
-        primary, fallback = build_search_key(view.name)
-        if not primary:
+        """处理一个本地任务：名称找候选，体积预筛，再靠 hash / 文件清单定案。"""
+        keywords = build_search_keys(view.name)
+        if not keywords:
             return "skipped", "无法从名称提取搜索词", ""
-        results = self._search(client, primary, fallback)
+        results = self._search(client, keywords)
         if not results:
             return "nomatch", "站点无搜索结果", ""
         ranked = rank_candidates(view.name, view.size, results, self._min_score)
@@ -878,6 +878,12 @@ class HDWinGCrossSeed(_PluginBase):
                 break
             if tried >= self._max_candidates:
                 break
+            # 站点列表页就带体积，差太多就不必下载 .torrent，
+            # 省下的请求留给后面的种子，全量扫描才跑得动。
+            if diff > 0.10:
+                last = f"{candidate.title[:50]} 体积差 {diff * 100:.1f}%"
+                logview.emit(self, f"  ↳ 候选「{candidate.title[:50]}」体积差 {diff * 100:.1f}%，跳过下载")
+                continue
             tried += 1
             content = self._download(client, candidate)
             if not content:
@@ -893,16 +899,18 @@ class HDWinGCrossSeed(_PluginBase):
                 return "exists", f"站点种子已在下载器（{mode}）", candidate.title
             ok, message = self._add(service, view, content)
             if ok:
-                logger.info(
-                    f"HDWinG 辅种成功：{view.name} -> {candidate.title}（{mode}，{diff * 100:.2f}% 体积差）"
+                logview.emit(
+                    self,
+                    f"瓷器辅种成功：{view.name} -> {candidate.title}"
+                    f"（{mode}，体积差 {diff * 100:.2f}%）",
                 )
                 return "added", f"匹配方式 {mode}，体积差 {diff * 100:.2f}%", candidate.title
             last = message
         return "failed", last, ""
 
-    def _search(self, client: HDWinGClient, primary: str, fallback: str) -> List[Any]:
-        """带轮内缓存与预算控制的搜索。"""
-        for keyword in [key for key in (primary, fallback) if key]:
+    def _search(self, client: HDWinGClient, keywords: Any) -> List[Any]:
+        """按多个关键词依次搜索，带轮内缓存与预算控制。"""
+        for keyword in keywords:
             if self._budget <= 0:
                 return []
             if keyword in self._search_cache:
@@ -916,12 +924,6 @@ class HDWinGCrossSeed(_PluginBase):
             if results:
                 return results
         return []
-
-    def _download(self, client: HDWinGClient, candidate: Any) -> Optional[bytes]:
-        if self._budget <= 0:
-            return None
-        self._budget -= 1
-        return client.download(candidate)
 
     def _judge(self, service: Any, view: _TorrentView, meta: Any) -> str:
         """判定站点种子是否与本地任务同源，返回匹配方式或空串。"""
@@ -941,7 +943,7 @@ class HDWinGCrossSeed(_PluginBase):
         try:
             local_files = service.instance.get_files(view.hash)
         except Exception as err:  # noqa: BLE001
-            logger.warning(f"HDWinG 辅种：读取文件清单失败 {err}")
+            logger.warning(f"瓷器辅种：读取文件清单失败 {err}")
             return False
         if not local_files:
             return False
@@ -1000,7 +1002,7 @@ class HDWinGCrossSeed(_PluginBase):
                 )
                 return bool(ret), "已添加" if ret else "下载器拒绝添加"
         except Exception as err:  # noqa: BLE001
-            logger.error(f"HDWinG 辅种：添加种子异常 {err}")
+            logger.error(f"瓷器辅种：添加种子异常 {err}")
             return False, f"添加异常：{err}"
         return False, f"不支持的下载器类型 {service.type}"
 
@@ -1030,6 +1032,8 @@ class HDWinGCrossSeed(_PluginBase):
             "last_run_text": _format_time(stamp),
             "last_trigger": result.get("trigger", ""),
             "last_scanned": result.get("scanned", 0),
+            "last_eligible": result.get("eligible", 0),
+            "last_processed": result.get("processed", 0),
             "last_matched": result.get("matched", 0),
             "last_added": result.get("added", 0),
             "last_failed": result.get("failed", 0),
@@ -1064,20 +1068,24 @@ class HDWinGCrossSeed(_PluginBase):
         failed = result.get("failed", 0)
         if not added and not failed and not result.get("message"):
             return
-        title = "HDWinG 辅种完成" if added else "HDWinG 辅种未新增"
+        title = "瓷器辅种完成" if added else "瓷器辅种未新增"
         lines = [
-            f"扫描 {result.get('scanned', 0)} 个已完成任务，"
-            f"新增 {added}，失败 {failed}，跳过 {result.get('skipped', 0)}",
+            f"扫到 {result.get('scanned', 0)} 个已完成种子，"
+            f"实际核对 {result.get('processed', 0)} 个，"
+            f"新增 {added}，失败 {failed}",
         ]
         if result.get("message"):
             lines.append(str(result["message"]))
-        for record in (result.get("records") or [])[:5]:
-            if record.get("state") == "added":
-                lines.append(f"· {record.get('local', '')[:50]} → {record.get('site', '')[:50]}")
+        added_records = [r for r in (result.get("records") or [])
+                         if r.get("state") == "added"]
+        for record in added_records[:10]:
+            lines.append(f"· {record.get('local', '')[:50]} → {record.get('site', '')[:50]}")
+        if len(added_records) > 10:
+            lines.append(f"· 另有 {len(added_records) - 10} 条，详见插件详情页日志")
         try:
             self.post_message(title=title, text="\n".join(lines))
         except Exception as err:  # noqa: BLE001 - 通知失败不影响主流程
-            logger.warning(f"HDWinG 辅种：发送通知失败 {err}")
+            logger.warning(f"瓷器辅种：发送通知失败 {err}")
 
     # ------------------------------------------------------------------
     # 工具
@@ -1109,7 +1117,7 @@ class HDWinGCrossSeed(_PluginBase):
                     use_session=True,
                 ).get_res(url)
             except Exception as err:  # noqa: BLE001
-                logger.warning(f"HDWinG 请求异常：{err}")
+                logger.warning(f"瓷器辅种：站点请求异常：{err}")
                 return None
             if not response:
                 return None
