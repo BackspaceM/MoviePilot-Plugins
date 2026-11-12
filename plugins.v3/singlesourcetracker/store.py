@@ -38,6 +38,24 @@ def _as_list(value: Any) -> List[Any]:
     return []
 
 
+def _iter(value: Any) -> List[Any]:
+    """宿主数据的容器可能是 None / dict / 生成器，统一成 list，绝不抛 TypeError。
+
+    宿主 get_data(key, plugin_id=None) 没有 default 参数，数据不存在时返回 None；
+    所有遍历入口都走这里，避免 "NoneType object is not iterable"。
+    """
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return list(value)
+    try:
+        return list(value)
+    except Exception:
+        return []
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -49,7 +67,7 @@ def _jsonable(value: Any) -> Any:
 
 
 def catalog(plugin: Any) -> Dict[str, Any]:
-    raw = plugin.get_data(CATALOG_KEY, {})
+    raw = plugin.get_data(CATALOG_KEY)
     return dict(raw) if isinstance(raw, dict) else {}
 
 
@@ -61,7 +79,7 @@ def save_catalog(plugin: Any, subs: List[Dict[str, Any]], sites: List[Dict[str, 
 
 
 def original_settings(plugin: Any) -> Dict[str, Any]:
-    raw = plugin.get_data(ORIGINAL_KEY, {})
+    raw = plugin.get_data(ORIGINAL_KEY)
     return dict(raw) if isinstance(raw, dict) else {}
 
 
@@ -70,7 +88,7 @@ def save_original(plugin: Any, items: Dict[str, Any]) -> None:
 
 
 def last_snapshot(plugin: Any) -> Dict[str, Any]:
-    raw = plugin.get_data(SNAPSHOT_KEY, {})
+    raw = plugin.get_data(SNAPSHOT_KEY)
     return dict(raw) if isinstance(raw, dict) else {}
 
 
@@ -79,7 +97,7 @@ def save_snapshot(plugin: Any, data: Dict[str, Any]) -> None:
 
 
 def template(plugin: Any) -> str:
-    raw = plugin.get_data(TEMPLATE_KEY, "")
+    raw = plugin.get_data(TEMPLATE_KEY)
     return str(raw) if isinstance(raw, str) else ""
 
 
@@ -88,7 +106,7 @@ def save_template(plugin: Any, text: str) -> None:
 
 
 def log_lines(plugin: Any, limit: int = 40) -> List[str]:
-    raw = plugin.get_data(LOG_KEY, [])
+    raw = _iter(plugin.get_data(LOG_KEY))
     return [str(item) for item in raw if isinstance(item, str)][:limit]
 
 
@@ -100,7 +118,7 @@ def append_log(plugin: Any, text: str, limit: int = 40) -> None:
 def make_plan(plugin: Any, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
     targets = [{"hash": str(item.get("hash") or ""), "name": str(item.get("name") or ""),
                 "downloader": str(item.get("downloader") or "")}
-               for item in issues if item.get("hash")][:20]
+               for item in _iter(issues) if isinstance(item, dict) and item.get("hash")][:20]
     plan = {"id": uuid.uuid4().hex[:12], "created": datetime.datetime.now().timestamp(),
             "targets": targets}
     plugin.save_data(PLAN_KEY, _jsonable(plan))
@@ -108,7 +126,7 @@ def make_plan(plugin: Any, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def take_plan(plugin: Any, plan_id: Any) -> Optional[Dict[str, Any]]:
-    raw = plugin.get_data(PLAN_KEY, {})
+    raw = plugin.get_data(PLAN_KEY)
     if not isinstance(raw, dict) or str(raw.get("id") or "") != str(plan_id or ""):
         return None
     try:
@@ -154,11 +172,11 @@ def site_options() -> List[Dict[str, Any]]:
 
         oper = SiteOper()
         fn = getattr(oper, "list_order_by_pri", None) or getattr(oper, "list", None)
-        rows = fn() or [] if callable(fn) else []
+        rows = _iter(fn()) if callable(fn) else []
     except Exception:
         return []
     out = []
-    for row in rows:
+    for row in _iter(rows):
         try:
             get = _getter(row)
             name = str(get("name") or "").strip()
@@ -266,8 +284,8 @@ def apply_rules(plugin: Any, rule_list: List[Dict[str, Any]],
                 subs: List[Dict[str, Any]]) -> Tuple[int, List[str], List[str]]:
     saved = original_settings(plugin)
     done, applied, messages = 0, [], []
-    for rule in rule_list:
-        matched = [sub for sub in subs if rules.rule_matches(rule, sub)]
+    for rule in _iter(rule_list):
+        matched = [sub for sub in _iter(subs) if rules.rule_matches(rule, sub)]
         if not matched:
             messages.append(f"{rule.get('target')} 没匹配到订阅")
             continue
@@ -334,7 +352,7 @@ def sites_text(sub: Dict[str, Any], sites: List[Dict[str, Any]]) -> str:
         return "未限制"
     names = []
     for value in values:
-        for site in sites:
+        for site in _iter(sites):
             if str(site.get("id")) == str(value):
                 names.append(str(site.get("name")))
                 break
@@ -347,11 +365,16 @@ def inspect(rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
             records: List[Dict[str, Any]], sites: List[Dict[str, Any]],
             applied: Optional[List[str]] = None,
             rule_errors: Optional[List[str]] = None) -> Dict[str, Any]:
-    applied = list(applied or [])
+    rule_list = _iter(rule_list)
+    subs = _iter(subs)
+    records = _iter(records)
+    sites = _iter(sites)
+    applied = _iter(applied)
+    errors = [str(item) for item in _iter(rule_errors)]
     sub_rows, issues, rule_rows = [], [], []
 
-    for rule in rule_list:
-        matched = [sub for sub in subs if rules.rule_matches(rule, sub)]
+    for rule in _iter(rule_list):
+        matched = [sub for sub in _iter(subs) if rules.rule_matches(rule, sub)]
         rule_rows.append({
             "source": rule.get("source"),
             "target": rule.get("target"),
@@ -406,7 +429,7 @@ def inspect(rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
         "subscriptions": sub_rows,
         "rules": rule_rows,
         "issues": issues,
-        "errors": list(rule_errors or []),
+        "errors": errors,
         "stats": {
             "subscriptions": len(subs),
             "ruled": sum(1 for row in sub_rows if row["rule"]),

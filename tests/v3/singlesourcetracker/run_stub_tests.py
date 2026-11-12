@@ -174,8 +174,65 @@ class StubTests(unittest.TestCase):
         self.assertEqual(self.plugin.get_command()[0]["cmd"], "/single_source")
 
 
+class HostSignatureTests(unittest.TestCase):
+    """宿主 _PluginBase.get_data(key=None, plugin_id=None) 没有 default 参数。
+
+    离线 stub 的 get_data(key, default) 有默认值语义，会掩盖「数据不存在返回 None」
+    导致的 TypeError。这里按真实签名跑一遍首次扫描，防止回归。
+    """
+
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+        self.plugin.init_plugin(dict(CONFIG))
+        self.db = {}
+        self.plugin.get_data = lambda key=None, plugin_id=None: self.db.get(key)
+        self.plugin.save_data = lambda key, value, plugin_id=None: self.db.__setitem__(key, value)
+
+    def test_first_scan_with_empty_host_data_succeeds(self):
+        result = self.plugin.api_scan({})
+        self.assertTrue(result.success, result.message)
+        self.assertNotIn("NoneType", result.message)
+        self.assertEqual(len(self.db.get("sst_log") or []), 1)
+
+    def test_every_endpoint_survives_empty_host_data(self):
+        for name in ("api_snapshot", "api_refresh", "api_template", "api_clean_preview"):
+            result = getattr(self.plugin, name)({}) if name != "api_snapshot" else self.plugin.api_snapshot()
+            self.assertNotIn("NoneType", str(getattr(result, "message", "")), name)
+        self.assertIsInstance(self.plugin.get_page(), list)
+        form, defaults = self.plugin.get_form()
+        self.assertTrue(form)
+
+    def test_form_has_no_zero_placeholder_or_default(self):
+        form, defaults = self.plugin.get_form()
+        text = json.dumps(form, ensure_ascii=False)
+        self.assertNotIn('"value": 0', text)
+        self.assertNotIn("先去详情页点「扫描 MP 订阅」", text)
+        self.assertEqual(defaults["quick_sub"], "")
+        self.assertEqual(defaults["quick_site"], "")
+        self.assertTrue(any("clearable" in json.dumps(node, ensure_ascii=False)
+                            for node in [form]))
+
+    def test_store_collections_tolerate_none(self):
+        store = MODULE.store
+        self.assertEqual(store.log_lines(self.plugin), [])
+        store.append_log(self.plugin, "一条日志")
+        self.assertEqual(len(store.log_lines(self.plugin)), 1)
+        stats = store.inspect(None, None, None, None)["stats"]
+        self.assertEqual(stats["subscriptions"], 0)
+        self.assertEqual(store.site_options(), [])
+
+    def test_source_has_no_fake_default_argument(self):
+        """get_data 第二参数是 plugin_id，不是默认值；源码里不许再出现伪 default。"""
+        import re
+        for path in (PLUGIN_DIR / "store.py", PLUGIN_DIR / "__init__.py"):
+            text = path.read_text(encoding="utf-8")
+            bad = re.findall(r"get_data\([^)]*,\s*(?:\{\}|\[\]|\"\"|'')", text)
+            self.assertEqual(bad, [], f"{path.name}: {bad}")
+
+
 if __name__ == "__main__":
-    result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(StubTests)
-    )
+    suite = unittest.TestSuite()
+    for case in (StubTests, HostSignatureTests):
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(case))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     raise SystemExit(0 if result.wasSuccessful() else 1)

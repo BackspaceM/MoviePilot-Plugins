@@ -57,6 +57,11 @@ _APPLIED_KEY = "sst_applied"
 _CRON = {15: "*/15 * * * *", 30: "*/30 * * * *", 60: "0 * * * *", 120: "0 */2 * * *"}
 
 
+def _not_zero(value: Any) -> Any:
+    """旧配置里存过 0 当作「未选择」，统一改成空串，别让下拉框显示一个 0。"""
+    return "" if value in (None, "", 0, "0") else value
+
+
 def _why(exc: Exception) -> str:
     # 报错只给类型名没法定位，带上原文再写进 MP 日志，方便事后翻
     text = f"{type(exc).__name__}: {exc}"[:180]
@@ -84,7 +89,7 @@ class SingleSourceTracker(_PluginBase):
         "会写正则的还能用批量规则表；应用前的原设置会记下来，一键还原。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/singlesourcetracker.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "singlesource_"
@@ -138,16 +143,18 @@ class SingleSourceTracker(_PluginBase):
         try:
             cat = store.catalog(self)
             subs = [item for item in (cat.get("subscriptions") or [])
-                    if isinstance(item, dict)]
-            sites = [item for item in (cat.get("sites") or []) if isinstance(item, dict)]
-            sub_items = [{"title": f"{item.get('name')}（#{item.get('id')}）", "value": item.get("id")}
-                         for item in subs]
-            if not sub_items:
-                sub_items = [{"title": "先去详情页点「扫描 MP 订阅」", "value": 0}]
+                    if isinstance(item, dict) and item.get("id") is not None]
+            sites = [item for item in (cat.get("sites") or [])
+                     if isinstance(item, dict) and item.get("id") is not None]
+            sub_items = [{"title": f"{item.get('name') or '未命名'}（#{item.get('id')}）",
+                          "value": item.get("id")} for item in subs]
             site_items = [{"title": str(item.get("name")), "value": item.get("id")}
                           for item in sites]
-            if not site_items:
-                site_items = [{"title": "先去详情页点「扫描 MP 订阅」", "value": 0}]
+            # 空目录就留空下拉，不再塞 value=0 的假选项（界面上会显示成一个「0」）
+            sub_hint = ("还没扫描过：去详情页点「扫描 MP 订阅」，也可以直接在这里输入剧名"
+                        if not sub_items else "下拉选订阅，也可以直接输入剧名")
+            site_hint = ("还没扫描过：去详情页点「扫描 MP 订阅」；也可以先不选，不限站点"
+                         if not site_items else "只从这一站下载；清空就是不限站点")
 
             def col(md, component):
                 return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [component]}
@@ -156,10 +163,10 @@ class SingleSourceTracker(_PluginBase):
                 {"component": "VRow", "content": [
                     col(6, {"component": "VCombobox", "props": {
                         "model": "quick_sub", "label": "这部剧", "items": sub_items,
-                        "hint": "下拉选订阅，也可以直接输入剧名", "persistentHint": True}}),
+                        "clearable": True, "hint": sub_hint, "persistentHint": True}}),
                     col(6, {"component": "VSelect", "props": {
                         "model": "quick_site", "label": "固定站点", "items": site_items,
-                        "hint": "只从这一站下载", "persistentHint": True}}),
+                        "clearable": True, "hint": site_hint, "persistentHint": True}}),
                 ]},
                 {"component": "VRow", "content": [
                     col(12, {"component": "VSelect", "props": {
@@ -212,8 +219,8 @@ class SingleSourceTracker(_PluginBase):
                 ]},
             ]
             defaults = {
-                "quick_sub": self._cfg.get("quick_sub") or 0,
-                "quick_site": self._cfg.get("quick_site") or 0,
+                "quick_sub": _not_zero(self._cfg.get("quick_sub")),
+                "quick_site": _not_zero(self._cfg.get("quick_site")),
                 "quick_tags": self._cfg.get("quick_tags")
                 if isinstance(self._cfg.get("quick_tags"), list) else [],
                 "quick_include": self._cfg.get("quick_include") or "",
@@ -291,7 +298,7 @@ class SingleSourceTracker(_PluginBase):
             return
 
     def _applied(self) -> List[str]:
-        raw = self.get_data(_APPLIED_KEY, [])
+        raw = self.get_data(_APPLIED_KEY)
         return [str(item) for item in raw] if isinstance(raw, list) else []
 
     def _save_applied(self, ids: List[str]) -> None:
@@ -334,7 +341,7 @@ class SingleSourceTracker(_PluginBase):
         data["mode"] = self._action_mode
         data["log"] = store.log_lines(self)
         data["template"] = store.template(self)
-        plan = self.get_data(store.PLAN_KEY, {})
+        plan = self.get_data(store.PLAN_KEY)
         if isinstance(plan, dict) and plan.get("id"):
             data["notice"] = f"有 {len(plan.get('targets') or [])} 个任务待确认清理，10 分钟内有效。"
         return data
@@ -363,7 +370,7 @@ class SingleSourceTracker(_PluginBase):
             self._button("生成规则模板", "template", icon="mdi-text-box-outline"),
             self._button("预览清理", "clean-preview", color="warning", icon="mdi-delete-outline"),
         ]
-        plan = self.get_data(store.PLAN_KEY, {})
+        plan = self.get_data(store.PLAN_KEY)
         if isinstance(plan, dict) and plan.get("id"):
             buttons.append(self._button(
                 f"确认清理 {len(plan.get('targets') or [])} 个任务", "clean",
