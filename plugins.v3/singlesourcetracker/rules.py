@@ -254,10 +254,22 @@ def build_quick_rule(cfg: Dict[str, Any], catalog: Dict[str, Any]) -> Tuple[List
     sid = cfg.get("quick_sub")
     if sid in (None, "", 0, "0"):
         return [], []
+    if isinstance(sid, str):
+        text = sid.strip()
+        if not text:
+            return [], []
+        # 手填 #11 或 11 都当订阅 ID；其他文字当剧名
+        if text.lstrip("#").isdigit() and text.lstrip("#"):
+            sid = int(text.lstrip("#"))
+        else:
+            return _rule_for_name(text, cfg, catalog)
     subs = catalog.get("subscriptions") if isinstance(catalog, dict) else []
     sub = next((item for item in (subs or [])
                 if isinstance(item, dict) and str(item.get("id")) == str(sid)), None)
-    if not sub:
+    # 目录里没有也照样生成规则，写订阅时会现查一次订阅再匹配
+    if sub is None and not (subs or []):
+        sub = {"id": sid, "name": f"#{sid}", "season": None}
+    elif sub is None:
         return [], ["选的订阅不在扫描结果里，回详情页点一次「扫描 MP 订阅」"]
     sites = catalog.get("sites") if isinstance(catalog, dict) else []
     site_value = cfg.get("quick_site")
@@ -274,6 +286,37 @@ def build_quick_rule(cfg: Dict[str, Any], catalog: Dict[str, Any]) -> Tuple[List
         "target_name": str(sub.get("name") or ""),
         "season": sub.get("season"),
         "sid": sid,
+        "site_value": site_value,
+        "site_id": site.get("id") if site else None,
+        "site_name": site.get("name") if site else (site_value or ""),
+        "include_regex": include_regex,
+        "exclude_regex": exclude_regex,
+        "include_display": "、".join(display),
+        "exclude_display": "、".join(exclude_display),
+    }
+    return [rule], errors
+
+
+def _rule_for_name(name: str, cfg: Dict[str, Any],
+                   catalog: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    # 手填剧名：按剧名模糊匹配订阅，找不到也照常生成规则，扫描后就能匹配上
+    parsed = parse_target(name)
+    season = parsed.get("season")
+    sites = catalog.get("sites") if isinstance(catalog, dict) else []
+    site_value = cfg.get("quick_site")
+    site = next((item for item in (sites or [])
+                 if isinstance(item, dict) and str(item.get("id")) == str(site_value)), None)
+    include_regex, display = build_include_regex(
+        cfg.get("quick_tags"), cfg.get("quick_include"), cfg.get("quick_regex"))
+    exclude_regex, exclude_display, errors = build_exclude_regex(cfg.get("quick_exclude"))
+    rule = {
+        "source": "快捷配置",
+        "target": name,
+        "target_kind": "name",
+        "target_id": None,
+        "target_name": parsed.get("name") or name,
+        "season": season,
+        "sid": None,
         "site_value": site_value,
         "site_id": site.get("id") if site else None,
         "site_name": site.get("name") if site else (site_value or ""),

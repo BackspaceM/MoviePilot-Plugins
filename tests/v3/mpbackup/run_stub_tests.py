@@ -89,7 +89,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self) -> None:
         self.assertEqual(PLUGIN_ID, "MPBackup")
         expected = {
-            "plugin_name": "MP 备份迁移", "plugin_version": "1.2.0",
+            "plugin_name": "MP 备份迁移", "plugin_version": "1.2.1",
             "plugin_author": "BackspaceM", "plugin_config_prefix": "mpbackup_",
             "plugin_color": "#6366F1", "system_version": ">=3.0.0", "plugin_order": 95,
         }
@@ -169,7 +169,56 @@ class TestContract(unittest.TestCase):
                 if i.get("component") == "div" and i.get("html")]
         self.assertEqual(len(divs), 1)
         self.assertIn("MP 备份迁移", divs[0]["html"])
-        self.assertIn("mpbk-grid", divs[0]["html"])
+        self.assertIn("mpbk-stats", divs[0]["html"])
+
+    def test_delete_confirm_button_sits_beside_its_snapshot(self) -> None:
+        # 点了删除后，确认按钮要出现在同一份快照的按钮旁边，而不是单独一行
+        import time as _time
+
+        self.plugin._cache = dict(self.plugin._cache, snapshots=[
+            {"name": "mpbackup_20260101_000000_000001.zip", "size": 1024,
+             "size_text": "1.0 KB", "mtime": "2026-01-01 00:00:00", "count": 3},
+            {"name": "mpbackup_20260102_000000_000002.zip", "size": 2048,
+             "size_text": "2.0 KB", "mtime": "2026-01-02 00:00:00", "count": 5},
+        ])
+        self.plugin._delete_plan = {"plan_id": "abc", "name": "mpbackup_20260101_000000_000001.zip",
+                                    "expires_at": _time.time() + 600}
+        page = self.plugin.get_page()
+        texts = json.dumps(page, ensure_ascii=False)
+        self.assertIn("确认删除这份", texts)
+        # 确认按钮的 params 必须带上计划号和口令
+        btns = []
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("component") == "VBtn" and "确认删除" in str(node.get("text")):
+                    btns.append(node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+        walk(page)
+        self.assertEqual(len(btns), 1)
+        params = btns[0]["events"]["click"]["params"]
+        self.assertEqual(params["plan_id"], "abc")
+        self.assertEqual(params["confirm"], PLUGIN_CLS.DELETE_CONFIRM)
+        # 确认按钮和被删快照在同一个 VCol 里
+        def find_col(node, needle):
+            if isinstance(node, dict):
+                if node.get("component") == "VCol" and isinstance(node.get("content"), list):
+                    blob = json.dumps(node, ensure_ascii=False)
+                    if needle in blob and "确认删除这份" in blob:
+                        return True
+                for value in node.values():
+                    if find_col(value, needle):
+                        return True
+            elif isinstance(node, list):
+                for value in node:
+                    if find_col(value, needle):
+                        return True
+            return False
+        self.assertTrue(find_col(page, "mpbackup_20260101_000000_000001.zip"))
+        self.assertFalse(find_col(page, "mpbackup_20260102_000000_000002.zip"))
 
     def test_page_components_are_json_safe(self) -> None:
         assert_json_safe(self.plugin.get_page())
@@ -475,7 +524,7 @@ class TestBackupFiles(unittest.TestCase):
             self.assertNotIn(bad, html)
         self.assertIn("&lt;img", html)
         self.assertIn("&lt;script", html)
-        self.assertIn("mpbk-grid", html)
+        self.assertIn("mpbk-stats", html)
         self.assertIn("导入预览", html)
         self.assertIn("导入结果", html)
 

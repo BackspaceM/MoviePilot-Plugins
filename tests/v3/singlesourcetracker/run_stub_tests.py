@@ -85,6 +85,31 @@ class StubTests(unittest.TestCase):
         self.assertEqual(set(defaults), set(models))
         self.assertIsInstance(defaults["quick_tags"], list)
 
+    def test_form_sub_is_combobox(self):
+        form, _ = self.plugin.get_form()
+        text = json.dumps(form, ensure_ascii=False)
+        # 这部剧要能下拉也能手填
+        self.assertIn("VCombobox", text)
+        self.assertEqual(text.count("VCombobox"), 1)
+
+    def test_scan_error_message_has_reason(self):
+        # 接口兜底要带具体原因，方便定位，不能只给类型名
+        text = MODULE._why(TypeError("列表读不出来"))
+        self.assertIn("列表读不出来", text)
+
+        original = MODULE.store.subscriptions
+        def boom():
+            raise TypeError("订阅接口炸了")
+
+        MODULE.store.subscriptions = boom
+        try:
+            result = self.plugin.api_scan({})
+        finally:
+            MODULE.store.subscriptions = original
+        self.assertFalse(result.success)
+        self.assertIn("订阅接口炸了", result.message)
+        self.assertIn("TypeError", result.message)
+
     def test_page_never_raises(self):
         for value in (None, {}, {"x": 1}, [{"x": 1}], "text", 1, True):
             self.plugin._data = cc._AnyData(value)

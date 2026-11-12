@@ -20,14 +20,18 @@ _STYLE = """
 .mpbk-time{font-size:12px;opacity:.58;white-space:nowrap}
 .mpbk-pill{font-size:11px;font-weight:600;padding:4px 10px;border-radius:8px;
   background:rgba(99,102,241,.13);color:#8B8BF5;white-space:nowrap}
-.mpbk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(146px,1fr));gap:12px;margin-bottom:16px}
+.mpbk-stats{display:flex;flex-direction:column;border:1px solid rgba(127,127,127,.16);
+  border-radius:14px;background:rgba(127,127,127,.045);padding:6px 16px;margin-bottom:16px}
+.mpbk-stat{display:flex;align-items:baseline;justify-content:space-between;gap:14px;
+  padding:9px 0;border-bottom:1px dashed rgba(127,127,127,.16);font-size:12.5px;min-width:0}
+.mpbk-stat:last-child{border-bottom:0}
+.mpbk-stat .mpbk-label{opacity:.68;white-space:nowrap}
+.mpbk-stat b{font-size:14.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  background:linear-gradient(135deg,#6366F1,#A855F7);-webkit-background-clip:text;background-clip:text;color:transparent}
+.mpbk-stat .mpbk-stat-hint{font-size:11px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none;max-width:44%}
 .mpbk-card{background:rgba(127,127,127,.075);border:1px solid rgba(127,127,127,.16);border-radius:14px;padding:14px 15px;min-width:0}
-.mpbk-kpi-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
 .mpbk-label{font-size:12px;opacity:.66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mpbk-kpi-icon{width:19px;height:19px;opacity:.62;flex:none}
-.mpbk-num{font-size:27px;font-weight:750;line-height:1.15;letter-spacing:-.5px;
-  background:linear-gradient(135deg,#6366F1,#A855F7);-webkit-background-clip:text;background-clip:text;color:transparent}
-.mpbk-hint{font-size:11px;opacity:.55;margin-top:5px}
 .mpbk-section{margin-bottom:14px}
 .mpbk-sec-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:650;margin:0 0 10px}
 .mpbk-sec-title:before{content:'';width:3px;height:13px;border-radius:3px;background:linear-gradient(135deg,#4F46E5,#A855F7)}
@@ -53,18 +57,11 @@ _STYLE = """
 .mpbk-note{font-size:12px;opacity:.74;line-height:1.85}
 .mpbk-note b{font-weight:700}
 .mpbk-foot{font-size:11px;opacity:.46;margin-top:14px;line-height:1.7}
+@media (max-width:620px){.mpbk-head{gap:10px}.mpbk-stat{padding:7px 0}.mpbk-stat .mpbk-stat-hint{display:none}}
 .mpbk-badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;
   background:rgba(99,102,241,.16);color:#8B8BF5;margin-left:8px;vertical-align:middle}
-@media (max-width:620px){.mpbk-num{font-size:23px}.mpbk-head{gap:10px}}
 </style>
 """
-
-_ICONS = {
-    "box": '<path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4 9-4V7M12 11v10"/>',
-    "disk": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 14h18M7 18h.01"/>',
-    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
-    "swap": '<path d="M4 8h13m0 0-3-3m3 3-3 3"/><path d="M20 16H7m0 0 3-3m-3 3 3 3"/>',
-}
 
 _SECTION_NAMES = {
     "subscriptions": "订阅", "download_history": "下载历史", "transfer_history": "整理历史",
@@ -85,21 +82,10 @@ def _e(value: Any) -> str:
     return html.escape(str(value if value is not None else ""), quote=True)
 
 
-def _icon(name: str) -> str:
-    return (
-        '<svg class="mpbk-kpi-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-        'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
-        + _ICONS.get(name, _ICONS["box"]) + "</svg>"
-    )
-
-
-def _kpi(label: str, value: Any, hint: str, icon: str) -> str:
-    return (
-        '<div class="mpbk-card"><div class="mpbk-kpi-top">'
-        f'<span class="mpbk-label">{_e(label)}</span>{_icon(icon)}</div>'
-        f'<div class="mpbk-num">{_e(value)}</div>'
-        f'<div class="mpbk-hint">{_e(hint)}</div></div>'
-    )
+def _stat(label: str, value: Any, hint: str) -> str:
+    return (f'<div class="mpbk-stat"><span class="mpbk-label">{_e(label)}</span>'
+            f'<span class="mpbk-stat-hint">{_e(hint)}</span>'
+            f'<b>{_e(value)}</b></div>')
 
 
 def _status_block(data: Dict[str, Any]) -> str:
@@ -159,7 +145,7 @@ def _delete_plan_block(data: Dict[str, Any]) -> str:
             '<div class="mpbk-sec-title">待确认删除'
             '<span class="mpbk-sec-note">10 分钟内有效</span></div>'
             f'<div class="mpbk-note">要删的是 <b>{_e(name)}</b>。'
-            '再点一次详情页里的「确认删除」，才会真的从备份目录删掉；'
+            '确认按钮就在这份快照的「删除」旁边，点它才会真的从备份目录删掉；'
             '不点就啥事没有，过期自动作废。</div></div></div>')
 
 
@@ -311,13 +297,12 @@ def render(data: Dict[str, Any]) -> str:
     count = data.get("backup_count", 0)
     last = str(data.get("last_backup_at") or "").strip()
     kpis = [
-        _kpi("快照份数", len(snapshots), "保存在备份目录", "box"),
-        _kpi("已备份", f"{count} 次", "累计成功备份", "disk"),
-        _kpi("最近一次备份", last[5:10] if last else "—",
-             last or "还没有成功备份过", "clock"),
-        _kpi("占用空间", data.get("total_size_text") or "—", "所有快照合计", "disk"),
-        _kpi("保留份数", data.get("keep", 7), "超出的旧快照会自动清掉", "clock"),
-        _kpi("最近变更", changed, hint, "swap"),
+        _stat("快照份数", f"{len(snapshots)} 份", "保存在备份目录"),
+        _stat("已备份", f"{count} 次", "累计成功次数"),
+        _stat("最近一次备份", last[5:16] if last else "—", last or "还没成功备份过"),
+        _stat("占用空间", data.get("total_size_text") or "—", "所有快照合计"),
+        _stat("保留份数", data.get("keep", 7), "超出的旧快照自动清"),
+        _stat("最近变更", f"{changed} 处", hint or "还没有对比结果"),
     ]
     foot = ("备份默认脱敏；导入默认试运行，确认后才写回，不写回时零风险。"
             "含凭据的快照含明文，别外传，用完及时清掉。")
@@ -334,7 +319,7 @@ def render(data: Dict[str, Any]) -> str:
         f'<span class="mpbk-time">更新于 {_e(data.get("generated_at"))}</span>',
         '<span class="mpbk-pill">可导出 · 可导入</span>',
         '</div></div>',
-        '<div class="mpbk-grid">' + "".join(kpis) + "</div>",
+        '<div class="mpbk-stats">' + "".join(kpis) + "</div>",
         _status_block(data),
         _snapshots_block(data),
         _delete_plan_block(data),

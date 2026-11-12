@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body
@@ -56,6 +57,18 @@ _APPLIED_KEY = "sst_applied"
 _CRON = {15: "*/15 * * * *", 30: "*/30 * * * *", 60: "0 * * * *", 120: "0 */2 * * *"}
 
 
+def _why(exc: Exception) -> str:
+    # 报错只给类型名没法定位，带上原文再写进 MP 日志，方便事后翻
+    text = f"{type(exc).__name__}: {exc}"[:180]
+    try:
+        from app.sdk.logging import logger
+
+        logger.error(f"单源追剧异常：{text}\n{traceback.format_exc()[-1000:]}")
+    except Exception:
+        pass
+    return text
+
+
 class Response(BaseModel):
     success: bool = True
     message: str = ""
@@ -71,7 +84,7 @@ class SingleSourceTracker(_PluginBase):
         "会写正则的还能用批量规则表；应用前的原设置会记下来，一键还原。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/singlesourcetracker.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "singlesource_"
@@ -141,9 +154,9 @@ class SingleSourceTracker(_PluginBase):
 
             form = [
                 {"component": "VRow", "content": [
-                    col(6, {"component": "VSelect", "props": {
+                    col(6, {"component": "VCombobox", "props": {
                         "model": "quick_sub", "label": "这部剧", "items": sub_items,
-                        "hint": "从扫描到的订阅里选一部", "persistentHint": True}}),
+                        "hint": "下拉选订阅，也可以直接输入剧名", "persistentHint": True}}),
                     col(6, {"component": "VSelect", "props": {
                         "model": "quick_site", "label": "固定站点", "items": site_items,
                         "hint": "只从这一站下载", "persistentHint": True}}),
@@ -190,9 +203,10 @@ class SingleSourceTracker(_PluginBase):
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text": (
+                        {"component": "VAlert", "props": {"type": "info", "variant": "tonal"},                         "text": (
                             "保存后回详情页点「写进 MP 订阅」才会改订阅；应用前的原设置会记下来，"
-                            "点「还原订阅设置」可退回。扫描后要重开一次设置页，下拉才有新内容。"
+                            "点「还原订阅设置」可退回。「这部剧」下拉选或直接输入剧名都行，"
+                            "扫描后要重开一次设置页，下拉才有新内容。"
                         )},
                     ]},
                 ]},
@@ -361,7 +375,7 @@ class SingleSourceTracker(_PluginBase):
         try:
             return Response(success=True, data=self._page_data())
         except Exception as exc:
-            return Response(success=False, message=f"读取快照失败：{type(exc).__name__}")
+            return Response(success=False, message=f"读取快照失败：{_why(exc)}")
 
     def api_scan(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -375,7 +389,7 @@ class SingleSourceTracker(_PluginBase):
                             message=f"扫到 {len(subs)} 条订阅、{len(sites)} 个站点，重开设置页就能选",
                             data={"html": renderer.render(self._collect(notify=False))})
         except Exception as exc:
-            return Response(success=False, message=f"扫描失败：{type(exc).__name__}")
+            return Response(success=False, message=f"扫描失败：{_why(exc)}")
 
     def api_apply(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -396,7 +410,7 @@ class SingleSourceTracker(_PluginBase):
             return Response(success=done > 0, message=text,
                             data={"html": renderer.render(self._collect(notify=False))})
         except Exception as exc:
-            return Response(success=False, message=f"写入订阅失败：{type(exc).__name__}")
+            return Response(success=False, message=f"写入订阅失败：{_why(exc)}")
 
     def api_restore(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -408,7 +422,7 @@ class SingleSourceTracker(_PluginBase):
             return Response(success=True, message=text,
                             data={"html": renderer.render(self._collect(notify=False))})
         except Exception as exc:
-            return Response(success=False, message=f"还原失败：{type(exc).__name__}")
+            return Response(success=False, message=f"还原失败：{_why(exc)}")
 
     def api_check(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -419,14 +433,14 @@ class SingleSourceTracker(_PluginBase):
                                     f"{data['stats']['problems']} 条下载不合规则",
                             data={"html": renderer.render(data), "stats": data["stats"]})
         except Exception as exc:
-            return Response(success=False, message=f"巡检失败：{type(exc).__name__}")
+            return Response(success=False, message=f"巡检失败：{_why(exc)}")
 
     def api_refresh(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
             return Response(success=True, message="页面已刷新",
                             data={"html": renderer.render(self._page_data())})
         except Exception as exc:
-            return Response(success=False, message=f"刷新失败：{type(exc).__name__}")
+            return Response(success=False, message=f"刷新失败：{_why(exc)}")
 
     def api_template(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -438,7 +452,7 @@ class SingleSourceTracker(_PluginBase):
             return Response(success=True, message=f"生成 {len(text.splitlines())} 行，复制去设置页改",
                             data={"template": text, "html": renderer.render(self._page_data())})
         except Exception as exc:
-            return Response(success=False, message=f"生成模板失败：{type(exc).__name__}")
+            return Response(success=False, message=f"生成模板失败：{_why(exc)}")
 
     def api_clean_preview(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -450,7 +464,7 @@ class SingleSourceTracker(_PluginBase):
             return Response(success=True, message=f"已列出 {count} 个任务，点「确认清理」才会动",
                             data={"plan_id": plan.get("id"), "html": renderer.render(self._page_data())})
         except Exception as exc:
-            return Response(success=False, message=f"预览失败：{type(exc).__name__}")
+            return Response(success=False, message=f"预览失败：{_why(exc)}")
 
     def api_clean(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
         try:
@@ -474,4 +488,4 @@ class SingleSourceTracker(_PluginBase):
                             data={"html": renderer.render(self._collect(notify=False)),
                                   "removed": done})
         except Exception as exc:
-            return Response(success=False, message=f"清理失败：{type(exc).__name__}")
+            return Response(success=False, message=f"清理失败：{_why(exc)}")

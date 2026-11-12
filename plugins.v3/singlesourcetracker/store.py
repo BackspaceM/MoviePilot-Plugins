@@ -125,22 +125,50 @@ def clear_plan(plugin: Any) -> None:
     plugin.save_data(PLAN_KEY, {})
 
 
+def page_rows(page: Any) -> Tuple[List[Any], int]:
+    # 分页结果可能是 QueryPage 对象，也可能个别版本给 dict 或别的容器；
+    # dict 上直接 .items 会拿到绑定方法，list() 会炸 TypeError，这里统一兼容
+    if isinstance(page, dict):
+        items, total = page.get("items"), page.get("total")
+    else:
+        items, total = getattr(page, "items", None), getattr(page, "total", 0)
+    if callable(items):
+        try:
+            items = items()
+        except Exception:
+            items = None
+    try:
+        items = list(items or [])
+    except Exception:
+        items = []
+    try:
+        total = int(total or 0)
+    except (TypeError, ValueError):
+        total = 0
+    return items, total
+
+
 def site_options() -> List[Dict[str, Any]]:
     try:
         from app.db.oper.site import SiteOper
 
-        rows = SiteOper().list_order_by_pri() or []
+        oper = SiteOper()
+        fn = getattr(oper, "list_order_by_pri", None) or getattr(oper, "list", None)
+        rows = fn() or [] if callable(fn) else []
     except Exception:
         return []
     out = []
     for row in rows:
-        get = _getter(row)
-        name = str(get("name") or "").strip()
-        sid = get("id")
-        if not name or sid is None:
+        try:
+            get = _getter(row)
+            name = str(get("name") or "").strip()
+            sid = get("id")
+            if not name or sid is None:
+                continue
+            out.append({"id": _jsonable(sid), "name": name,
+                        "domain": str(get("domain") or "").strip()})
+        except Exception:
             continue
-        out.append({"id": _jsonable(sid), "name": name,
-                    "domain": str(get("domain") or "").strip()})
     return out
 
 
@@ -154,29 +182,26 @@ def subscriptions(max_pages: int = 10) -> List[Dict[str, Any]]:
     while page_no <= max_pages:
         try:
             page = queries.list_subscriptions(page={"page": page_no, "count": 200})
+            items, total = page_rows(page)
+            for item in items:
+                get = _getter(item)
+                sid = get("id")
+                if sid is None:
+                    continue
+                out.append({
+                    "id": _jsonable(sid),
+                    "name": str(get("name") or "").strip(),
+                    "season": _jsonable(get("season")),
+                    "type": str(get("type") or "").strip(),
+                    "state": str(get("state") or "").strip(),
+                    "sites": _jsonable(_as_list(get("sites"))),
+                    "include": str(get("include") or "").strip(),
+                    "exclude": str(get("exclude") or "").strip(),
+                    "lack_episode": _jsonable(get("lack_episode")),
+                })
+            if (total and len(out) >= total) or len(items) < 200:
+                break
         except Exception:
-            break
-        items = list(getattr(page, "items", None) or [])
-        if not items:
-            break
-        for item in items:
-            get = _getter(item)
-            sid = get("id")
-            if sid is None:
-                continue
-            out.append({
-                "id": _jsonable(sid),
-                "name": str(get("name") or "").strip(),
-                "season": _jsonable(get("season")),
-                "type": str(get("type") or "").strip(),
-                "state": str(get("state") or "").strip(),
-                "sites": _jsonable(_as_list(get("sites"))),
-                "include": str(get("include") or "").strip(),
-                "exclude": str(get("exclude") or "").strip(),
-                "lack_episode": _jsonable(get("lack_episode")),
-            })
-        total = int(getattr(page, "total", 0) or 0)
-        if (total and len(out) >= total) or len(items) < 200:
             break
         page_no += 1
     return out
@@ -192,25 +217,22 @@ def downloads(max_items: int = 3000) -> List[Dict[str, Any]]:
     while len(out) < max_items:
         try:
             page = queries.list_download_history(page={"page": page_no, "count": 200})
+            items, total = page_rows(page)
+            for item in items:
+                get = _getter(item)
+                out.append({
+                    "title": str(get("title") or "").strip(),
+                    "seasons": str(get("seasons") or "").strip(),
+                    "episodes": str(get("episodes") or "").strip(),
+                    "torrent_name": str(get("torrent_name") or "").strip(),
+                    "torrent_site": str(get("torrent_site") or "").strip(),
+                    "download_hash": str(get("download_hash") or "").strip(),
+                    "downloader": str(get("downloader") or "").strip(),
+                    "date": str(get("date") or "").strip(),
+                })
+            if (total and len(out) >= total) or len(items) < 200:
+                break
         except Exception:
-            break
-        items = list(getattr(page, "items", None) or [])
-        if not items:
-            break
-        for item in items:
-            get = _getter(item)
-            out.append({
-                "title": str(get("title") or "").strip(),
-                "seasons": str(get("seasons") or "").strip(),
-                "episodes": str(get("episodes") or "").strip(),
-                "torrent_name": str(get("torrent_name") or "").strip(),
-                "torrent_site": str(get("torrent_site") or "").strip(),
-                "download_hash": str(get("download_hash") or "").strip(),
-                "downloader": str(get("downloader") or "").strip(),
-                "date": str(get("date") or "").strip(),
-            })
-        total = int(getattr(page, "total", 0) or 0)
-        if (total and len(out) >= total) or len(items) < 200:
             break
         page_no += 1
     return out[:max_items]

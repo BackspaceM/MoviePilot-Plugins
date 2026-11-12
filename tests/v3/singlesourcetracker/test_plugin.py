@@ -111,6 +111,40 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(parsed, [])
         self.assertTrue(errors)
 
+    def test_quick_rule_typed_name(self):
+        cfg = {"quick_sub": "海贼王", "quick_site": 1, "quick_tags": ["HDR"]}
+        parsed, errors = rules.build_quick_rule(cfg, CATALOG)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["target_kind"], "name")
+        self.assertEqual(parsed[0]["target_name"], "海贼王")
+        self.assertTrue(rules.rule_matches(parsed[0], SUBS[0]))
+        self.assertFalse(rules.rule_matches(parsed[0], SUBS[1]))
+
+    def test_quick_rule_typed_hash_id(self):
+        cfg = {"quick_sub": "#11", "quick_site": 1}
+        parsed, errors = rules.build_quick_rule(cfg, CATALOG)
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed[0]["sid"], 11)
+
+    def test_quick_rule_typed_name_with_season(self):
+        cfg = {"quick_sub": "海贼王#S2", "quick_site": 1}
+        parsed, _ = rules.build_quick_rule(cfg, CATALOG)
+        self.assertEqual(parsed[0]["season"], 2)
+        self.assertFalse(rules.rule_matches(parsed[0], SUBS[0]))
+
+    def test_quick_rule_typed_id_without_catalog(self):
+        cfg = {"quick_sub": 11, "quick_site": 1}
+        parsed, errors = rules.build_quick_rule(cfg, {"subscriptions": [], "sites": SITES})
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed[0]["sid"], 11)
+        self.assertTrue(rules.rule_matches(parsed[0], SUBS[0]))
+
+    def test_quick_rule_id_not_in_catalog_warns(self):
+        parsed, errors = rules.build_quick_rule({"quick_sub": 999}, CATALOG)
+        self.assertEqual(parsed, [])
+        self.assertTrue(errors)
+
     def test_rule_matches_by_id_and_season(self):
         rule, _ = rules.build_quick_rule({"quick_sub": 11, "quick_site": 1}, CATALOG)
         self.assertTrue(rules.rule_matches(rule[0], SUBS[0]))
@@ -134,6 +168,32 @@ class RuleTests(unittest.TestCase):
 
 
 class StoreTests(unittest.TestCase):
+    def test_page_rows_object(self):
+        class Page:
+            items = [{"id": 1}]
+            total = 1
+
+        items, total = store.page_rows(Page())
+        self.assertEqual(items, [{"id": 1}])
+        self.assertEqual(total, 1)
+
+    def test_page_rows_dict(self):
+        # 旧形态：直接返回 dict，不能走 .items 属性（那是绑定方法，会 TypeError）
+        items, total = store.page_rows({"items": [{"id": 2}], "total": 2})
+        self.assertEqual(items, [{"id": 2}])
+        self.assertEqual(total, 2)
+
+    def test_page_rows_garbage(self):
+        for weird in (None, [], "text", 5, {"total": "x"}, object()):
+            items, total = store.page_rows(weird)
+            self.assertIsInstance(items, list)
+            self.assertIsInstance(total, int)
+
+    def test_page_rows_dict_items_view(self):
+        holder = {"items": {"a": 1}.items(), "total": 1}
+        items, _ = store.page_rows(holder)
+        self.assertEqual(items, [("a", 1)])
+
     def test_rule_payload_only_three_fields(self):
         parsed, _ = rules.parse_line_rules(rules.EXAMPLE, SITES)
         payload = store.rule_payload(parsed[0])

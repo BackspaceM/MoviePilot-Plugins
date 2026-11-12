@@ -44,7 +44,7 @@ class MPBackup(_PluginBase):
         "导入默认试运行，确认后才写回。敏感字段默认打码，站点凭据可按需含明文导出。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/mpbackup.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "mpbackup_"
@@ -660,6 +660,16 @@ class MPBackup(_PluginBase):
         snapshots = state.get("snapshots") or []
         latest = str(snapshots[0].get("name") or "") if snapshots else ""
         strategy = self._strategy if self._strategy in ("skip", "overwrite") else "skip"
+        plan = self._delete_plan
+        plan_name = ""
+        if isinstance(plan, dict) and plan.get("name"):
+            try:
+                fresh = float(plan.get("expires_at") or 0) > time.time()
+            except (TypeError, ValueError):
+                fresh = False
+            if fresh:
+                plan_name = str(plan.get("name") or "")
+                plan_id = str(plan.get("plan_id") or "")
 
         top = [
             ("立即备份", "backup", "post", {}, "mdi-backup-restore", "primary", "tonal"),
@@ -696,6 +706,7 @@ class MPBackup(_PluginBase):
         top_cols = [col(*item) for item in top]
         import_cols = [col(*item) for item in import_top]
 
+        # 每份快照一行：预览导入 / 执行导入 / 删除；确认删除紧挨着对应的删除按钮
         for row in snapshots[:20]:
             name = str(row.get("name") or "")
             label = "{} · {} · {} 条".format(
@@ -704,7 +715,7 @@ class MPBackup(_PluginBase):
             run_params = {"name": name, "confirm": restore.CONFIRM,
                           "sections": list(restore.IMPORT_SECTIONS),
                           "strategy": strategy, "dry_run": False}
-            import_cols.append({
+            snapshot_col = {
                 "component": "VCol", "props": {"cols": 12, "md": 6, "lg": 4},
                 "content": [
                     {"component": "VAlert", "text": html.escape(name + " · " + label),
@@ -722,41 +733,25 @@ class MPBackup(_PluginBase):
                      "events": {"click": {"api": "plugin/MPBackup/delete",
                                           "method": "post", "params": {"name": name}}}},
                 ],
-            })
+            }
+            if plan_name and name == plan_name:
+                snapshot_col["content"].append(
+                    {"component": "VAlert", "text": "就是这份要删，再点右边确认，"
+                     f"{backup.DELETE_PLAN_TTL // 60} 分钟内有效",
+                     "props": {"type": "warning", "variant": "tonal", "density": "compact"}})
+                snapshot_col["content"].append(
+                    {"component": "VBtn", "text": "确认删除这份",
+                     "props": {"color": "error", "variant": "tonal", "class": "mb-2"},
+                     "events": {"click": {"api": "plugin/MPBackup/delete", "method": "post",
+                                          "params": {"plan_id": plan_id, "name": name,
+                                                     "confirm": self.DELETE_CONFIRM}}}})
+            import_cols.append(snapshot_col)
 
-        confirm_cols: List[Dict[str, Any]] = []
-        plan = self._delete_plan
-        if isinstance(plan, dict) and plan.get("plan_id") and plan.get("name"):
-            try:
-                fresh = float(plan.get("expires_at") or 0) > time.time()
-            except (TypeError, ValueError):
-                fresh = False
-            if fresh:
-                target_name = str(plan.get("name") or "")
-                confirm_cols.append({
-                    "component": "VCol", "props": {"cols": 12},
-                    "content": [
-                        {"component": "VAlert", "text": html.escape(
-                            "待确认删除 " + target_name + "，再点右边才会真删，10 分钟内有效"),
-                         "props": {"type": "warning", "variant": "tonal", "density": "compact"}},
-                        {"component": "VBtn", "text": f"确认删除 {target_name}",
-                         "props": {"color": "error", "variant": "tonal", "class": "mt-2"},
-                         "events": {"click": {
-                             "api": "plugin/MPBackup/delete", "method": "post",
-                             "params": {"plan_id": str(plan.get("plan_id") or ""),
-                                        "name": target_name,
-                                        "confirm": self.DELETE_CONFIRM}}}},
-                    ],
-                })
-
-        page = [
+        return [
             {"component": "VRow", "content": top_cols},
             {"component": "VRow", "content": import_cols},
             {"component": "div", "html": self._render()},
         ]
-        if confirm_cols:
-            page.insert(1, {"component": "VRow", "content": confirm_cols})
-        return page
 
     def get_service(self) -> List[Dict[str, Any]]:
         if not self.get_state():
