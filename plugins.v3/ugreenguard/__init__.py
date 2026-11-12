@@ -1,6 +1,12 @@
-"""绿联 NAS 守护：读一段状态 JSON，按几条规则看着下载别出事。"""
+"""绿联 NAS 守护：SSH 连上 NAS 持续读状态，按规则自动处置。
+
+采集走 SSH 复合探针（df / 负载 / 内存 / 容器 / 盘温 / SMART / UPS），
+读不到的段落一律标未上报。页面是宿主渲染的静态 HTML，不做脚本轮询；
+后台巡检由宿主调度器按秒级间隔驱动，异常处置和页面是否打开无关。
+"""
 
 import time
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
@@ -13,8 +19,8 @@ except Exception:  # 离线桩 / 文档检查时也要能加载
             self._data: Dict[str, Any] = {}
             self._config: Dict[str, Any] = {}
 
-        def get_data(self, key: str, default: Any = None) -> Any:
-            return self._data.get(key, default)
+        def get_data(self, key: str) -> Any:
+            return self._data.get(key)
 
         def save_data(self, key: str, value: Any) -> None:
             self._data[key] = value
@@ -23,8 +29,8 @@ except Exception:  # 离线桩 / 文档检查时也要能加载
             self._config = dict(config or {})
             return True
 
-        def get_config(self, key: str = "", default: Any = None) -> Any:
-            return self._config.get(key, default) if key else dict(self._config)
+        def get_config(self, key: str = "") -> Any:
+            return self._config.get(key) if key else dict(self._config)
 
         def post_message(self, **kwargs: Any) -> None:
             return None
@@ -36,7 +42,10 @@ _STATE_KEY = "ugn_state"
 _LOG_KEY = "ugn_log"
 _SNAPSHOT_KEY = "ugn_snapshot"
 _CLEAR_ARM_KEY = "ugn_clear_arm"
+_SERIES_KEY = "ugn_series"
+_SSH_TEST_KEY = "ugn_ssh_test"
 _MAX_LOG = 60
+_MAX_SERIES = 40
 _PAUSE_METHODS = ("pause_torrents", "stop_torrents", "pause_all")
 _RESUME_METHODS = ("start_torrents", "resume_torrents", "resume_all")
 
@@ -73,17 +82,20 @@ def _to_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
+
 class UGreenGuard(_PluginBase):
     plugin_name = "绿联 NAS 守护"
     plugin_desc = (
-        "绿联 NAS 的开放接口是 HTTPS + protobuf，还要按权限节点发令牌，目前令牌只放开了 docker ps，"
-        "storage、taskmgr、ctl 都返回 403，MP 容器里不方便直连。这个插件只读："
-        "状态桥给一段简单 JSON，或者用 SSH 账号直接跑 df -kP 读磁盘占用空间，也能读本地状态文件，"
-        "最后用容器内自检兜底。按磁盘占用空间、盘温、容器和 UPS 设几条规则，默认试运行只记录不改动，"
-        "可切到自动处置去暂停或恢复下载。"
+        "SSH 直连绿联 NAS 秒级巡检：一次连接读回磁盘占用空间、CPU、内存、容器、盘温、SMART 和 UPS，"
+        "读不到的段落标未上报，不装作正常。按规则自动暂停/恢复下载、重启异常容器或执行一条自定义命令；"
+        "远程动作默认全关，切到自动处置才会真动手，所有动作留日志。带分步连接测试，"
+        "paramiko 缺失时可用容器自带的 ssh 命令加私钥，也可降级到状态桥 / 本地文件 / 容器自检。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png"
-    plugin_version = "1.1.0"
+    plugin_version = "2.0.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "ugreenguard_"
@@ -101,12 +113,22 @@ class UGreenGuard(_PluginBase):
         self._ssh_port = 22
         self._ssh_user = ""
         self._ssh_password = ""
+        self._ssh_key = ""
+        self._ssh_sudo = False
         self._water = 88
         self._temp = 52
+        self._cpu = 90
+        self._mem = 95
         self._mode = "试运行"
         self._interval = 5
+        self._poll_seconds = 30
+        self._resume_scope = "已上报"
         self._watch: List[str] = list(nas.DEFAULT_CONTAINERS)
         self._cooldown = _COOLDOWN
+        self._allow_remote_action = False
+        self._restart_containers = False
+        self._alert_command = ""
+        self._lock = threading.Lock()
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = dict(config or {})
@@ -116,15 +138,33 @@ class UGreenGuard(_PluginBase):
         source_mode = str(cfg.get("source_mode") or "自动").strip()
         self._source_mode = source_mode if source_mode in (
             "自动", "状态桥", "本地文件", "SSH", "容器自检") else "自动"
-        self._ssh_host = str(cfg.get("ssh_host") or "").strip()
-        self._ssh_port = _to_int(cfg.get("ssh_port"), 22)
+        raw_host = str(cfg.get("ssh_host") or "").strip()
+        # 允许直接写 192.168.1.10:2222，省掉一个端口输入框
+        host, port_text = raw_host, ""
+        if raw_host.startswith("[") and "]" in raw_host:
+            end = raw_host.find("]")
+            host = raw_host[1:end]
+            port_text = raw_host[end + 1:].lstrip(":")
+        elif raw_host.count(":") == 1 and not raw_host.startswith("http"):
+            host, port_text = raw_host.rsplit(":", 1)
+        self._ssh_host = host.strip()
+        self._ssh_port = _clamp(_to_int(cfg.get("ssh_port"), 22), 1, 65535)
+        if port_text.strip().isdigit():
+            self._ssh_port = _clamp(int(port_text.strip()), 1, 65535)
         self._ssh_user = str(cfg.get("ssh_user") or "").strip()
         self._ssh_password = str(cfg.get("ssh_password") or "")
-        self._water = _to_int(cfg.get("water_threshold"), 88)
-        self._temp = _to_int(cfg.get("temp_threshold"), 52)
+        self._ssh_key = str(cfg.get("ssh_key") or "").strip()
+        self._ssh_sudo = _to_bool(cfg.get("ssh_sudo"), False)
+        self._water = _clamp(_to_int(cfg.get("water_threshold"), 88), 50, 99)
+        self._temp = _clamp(_to_int(cfg.get("temp_threshold"), 52), 20, 100)
+        self._cpu = _clamp(_to_int(cfg.get("cpu_threshold"), 90), 30, 100)
+        self._mem = _clamp(_to_int(cfg.get("mem_threshold"), 95), 30, 100)
         mode = str(cfg.get("mode") or "试运行")
         self._mode = mode if mode in ("仅提醒", "试运行", "自动处置") else "试运行"
         self._interval = max(1, min(59, _to_int(cfg.get("interval_minutes"), 5)))
+        self._poll_seconds = _clamp(_to_int(cfg.get("poll_seconds"), 30), 5, 300)
+        scope = str(cfg.get("resume_scope") or "已上报").strip()
+        self._resume_scope = scope if scope in ("已上报", "严格") else "已上报"
         watch = cfg.get("watch_containers")
         if isinstance(watch, str) and watch.strip():
             self._watch = [x.strip() for x in watch.replace("，", ",").split(",") if x.strip()]
@@ -132,13 +172,18 @@ class UGreenGuard(_PluginBase):
             self._watch = [str(x).strip() for x in watch if str(x).strip()]
         else:
             self._watch = list(nas.DEFAULT_CONTAINERS)
-        self._cooldown = _to_int(cfg.get("cooldown"), _COOLDOWN)
+        self._cooldown = max(0, _to_int(cfg.get("cooldown"), _COOLDOWN))
+        self._allow_remote_action = _to_bool(cfg.get("allow_remote_action"), False)
+        self._restart_containers = _to_bool(cfg.get("restart_containers"), False)
+        self._alert_command = str(cfg.get("alert_command") or "").strip()[:300]
+        # 连接参数和账号可能改了，旧会话不能复用
+        nas.close_session()
 
     def get_state(self) -> bool:
         return self._enabled
 
     def stop_service(self) -> None:
-        return None
+        nas.close_session()
 
     def _cfg(self) -> Dict[str, Any]:
         return {
@@ -150,33 +195,58 @@ class UGreenGuard(_PluginBase):
             "ssh_port": self._ssh_port,
             "ssh_user": self._ssh_user,
             "ssh_password": self._ssh_password,
+            "ssh_key": self._ssh_key,
+            "ssh_sudo": self._ssh_sudo,
             "water_threshold": self._water,
             "temp_threshold": self._temp,
+            "cpu_threshold": self._cpu,
+            "mem_threshold": self._mem,
             "mode": self._mode,
             "interval_minutes": self._interval,
+            "poll_seconds": self._poll_seconds,
+            "resume_scope": self._resume_scope,
             "watch_containers": list(self._watch),
             "cooldown": self._cooldown,
+            "allow_remote_action": self._allow_remote_action,
+            "restart_containers": self._restart_containers,
+            "alert_command": self._alert_command,
         }
 
     def get_service(self) -> List[Dict[str, Any]]:
+        """秒级巡检交给宿主调度器，不自己起线程，避免插件重载后线程泄漏。"""
         if not self._enabled:
             return []
-        expr = f"*/{max(1, min(59, self._interval))} * * * *"
+        trigger = None
         try:
-            from apscheduler.triggers.cron import CronTrigger
-            trigger = CronTrigger.from_crontab(expr)
+            from apscheduler.triggers.interval import IntervalTrigger
+            trigger = IntervalTrigger(seconds=self._poll_seconds)
         except Exception:
-            return []
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+                expr = f"*/{max(1, min(59, self._interval))} * * * *"
+                trigger = CronTrigger.from_crontab(expr)
+            except Exception:
+                return []
         return [{
             "id": "UGreenGuard",
-            "name": "绿联 NAS 守护 · 周期巡检",
+            "name": "绿联 NAS 守护 · 实时巡检",
             "trigger": trigger,
             "func": self.run_scheduled,
             "kwargs": {},
         }]
 
     def run_scheduled(self) -> None:
-        self.run_check(trigger="定时巡检")
+        # 上一次没跑完就跳过，别让慢探针叠成一串
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            self.run_check(trigger="实时巡检")
+        except Exception as exc:
+            self._append_log("ERROR", f"实时巡检异常：{self._scrub(exc)}")
+        finally:
+            self._lock.release()
+
+    # ---------------- 设置页 ----------------
 
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         try:
@@ -189,71 +259,103 @@ class UGreenGuard(_PluginBase):
         def col(cols: int, md: int, component: Dict[str, Any]) -> Dict[str, Any]:
             return {"component": "VCol", "props": {"cols": cols, "md": md}, "content": [component]}
 
-        form: List[Dict[str, Any]] = [
-            {"component": "VRow", "content": [
-                col(12, 6, {"component": "VSwitch", "props": {
-                    "model": "enabled", "label": "启用守护", "color": "primary",
-                    "hint": "关掉之后定时巡检也会停", "persistentHint": True}}),
-                col(12, 6, {"component": "VSelect", "props": {
-                    "model": "source_mode", "label": "状态从哪儿来",
-                    "items": [
-                        {"title": "自动（SSH→状态桥→本地文件→容器自检 降级）", "value": "自动"},
-                        {"title": "状态桥", "value": "状态桥"},
-                        {"title": "本地文件", "value": "本地文件"},
-                        {"title": "SSH", "value": "SSH"},
-                    ],
-                    "hint": "自动一路降级，取到哪层算哪层", "persistentHint": True}}),
-            ]},
-            {"component": "VRow", "content": [
-                col(12, 6, {"component": "VTextField", "props": {
-                    "model": "ssh_host", "label": "SSH 地址",
-                    "placeholder": "192.168.1.10",
-                    "hint": "NAS 地址，容器里填宿主网关 IP 也行", "persistentHint": True, "clearable": True}}),
-                col(12, 6, {"component": "VTextField", "props": {
-                    "model": "ssh_port", "label": "SSH 端口",
-                    "placeholder": "22", "hint": "默认 22", "persistentHint": True, "clearable": True}}),
-            ]},
-            {"component": "VRow", "content": [
-                col(12, 6, {"component": "VTextField", "props": {
-                    "model": "ssh_user", "label": "SSH 账号",
-                    "hint": "能跑 df -kP 的账号就够", "persistentHint": True, "clearable": True}}),
-                col(12, 6, {"component": "VTextField", "props": {
-                    "model": "ssh_password", "label": "SSH 密码", "type": "password",
-                    "hint": "密码只存插件配置，不会写进日志或快照", "persistentHint": True, "clearable": True}}),
-            ]},
-            {"component": "VRow", "content": [
-                col(12, 6, {"component": "VTextField", "props": {
-                    "model": "bridge_url", "label": "状态桥地址",
-                    "placeholder": "http://127.0.0.1:8787/status",
-                    "hint": "留空就跳过状态桥", "persistentHint": True, "clearable": True}}),
-                col(12, 6, {"component": "VTextField", "props": {
-                    "model": "status_file", "label": "本地状态文件",
-                    "placeholder": "/config/ugn_status.json",
-                    "hint": "选本地文件时读这个 JSON", "persistentHint": True, "clearable": True}}),
-            ]},
-            {"component": "VRow", "content": [
-                col(12, 6, {"component": "VSelect", "props": {
-                    "model": "water_threshold", "label": "磁盘占用到多少就暂停",
-                    "items": [{"title": f"{v}%", "value": v} for v in (80, 85, 88, 90, 95)],
-                    "hint": "磁盘占用空间到了这条线就先停下载", "persistentHint": True}}),
-                col(12, 6, {"component": "VSelect", "props": {
-                    "model": "mode", "label": "怎么处理",
-                    "items": [
-                        {"title": "仅提醒", "value": "仅提醒"},
-                        {"title": "试运行（只记录）", "value": "试运行"},
-                        {"title": "自动处置", "value": "自动处置"},
-                    ],
-                    "hint": "默认试运行，只记动作和日志，不动下载器", "persistentHint": True}}),
-            ]},
-            {"component": "VRow", "content": [
+        def head(text: str) -> Dict[str, Any]:
+            return {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12}, "content": [
-                    {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text": (
-                        "状态桥、本地文件、SSH、容器内自检四路都在，自动按 SSH → 状态桥 → 本地文件 → 容器自检 降级。"
-                        "SSH 要在 MoviePilot 容器里装 paramiko，连不上或缺依赖就自动换下一路；"
-                        "SSH 只用 df -kP 读磁盘占用空间，磁盘、容器、UPS 一律标未上报，不会装作正常。"
-                        "盘温阈值和巡检间隔沿用已保存的配置，不会丢。"
-                    )},
-                ]},
+                    {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
+                                                      "density": "compact"}, "text": text}]}]}
+
+        def switch(model: str, label: str, hint: str) -> Dict[str, Any]:
+            return {"component": "VSwitch", "props": {
+                "model": model, "label": label, "color": "primary",
+                "hint": hint, "persistentHint": True}}
+
+        def field(model: str, label: str, hint: str, placeholder: str = "",
+                  password: bool = False) -> Dict[str, Any]:
+            props: Dict[str, Any] = {
+                "model": model, "label": label, "hint": hint,
+                "persistentHint": True, "clearable": True,
+            }
+            if placeholder:
+                props["placeholder"] = placeholder
+            if password:
+                props["type"] = "password"
+            return {"component": "VTextField", "props": props}
+
+        def select(model: str, label: str, items: List[Dict[str, Any]], hint: str) -> Dict[str, Any]:
+            return {"component": "VSelect", "props": {
+                "model": model, "label": label, "items": items,
+                "hint": hint, "persistentHint": True}}
+
+        form: List[Dict[str, Any]] = [
+            head("① 采集方式：只填 ② 的地址、账号和密码就能跑；不填也能用状态桥 / 本地文件 / 容器自检兜底。"),
+            {"component": "VRow", "content": [
+                col(12, 6, switch("enabled", "启用守护", "关掉之后秒级巡检也会停")),
+                col(12, 6, select("source_mode", "状态从哪儿来", [
+                    {"title": "自动（SSH 优先，逐级降级）", "value": "自动"},
+                    {"title": "SSH", "value": "SSH"},
+                    {"title": "状态桥", "value": "状态桥"},
+                    {"title": "本地文件", "value": "本地文件"},
+                    {"title": "容器自检", "value": "容器自检"},
+                ], "默认自动，取到哪层算哪层")),
+            ]},
+            head("② SSH 连接：密码或私钥二选一；私钥只存插件配置，不写日志、不进快照。"),
+            {"component": "VRow", "content": [
+                col(12, 6, field("ssh_host", "SSH 地址",
+                                 "默认 22 端口；别的端口写成 192.168.1.10:2222", "192.168.1.10")),
+                col(12, 6, field("ssh_user", "SSH 账号", "能跑 df 的账号就够")),
+            ]},
+            {"component": "VRow", "content": [
+                col(12, 6, field("ssh_password", "SSH 密码", "密码只存插件配置，不会写进日志或快照", "", True)),
+                col(12, 6, {"component": "VTextarea", "props": {
+                    "model": "ssh_key", "label": "SSH 私钥（可选）",
+                    "placeholder": "-----BEGIN OPENSSH PRIVATE KEY-----",
+                    "rows": 2, "autoGrow": True,
+                    "hint": "填了就优先用私钥；没装 paramiko 时也能走容器自带的 ssh 命令",
+                    "persistentHint": True}}),
+            ]},
+            head("③ 巡检与阈值：后台按间隔持续采集，页面点「刷新页面」看最新一帧。"),
+            {"component": "VRow", "content": [
+                col(12, 6, select("poll_seconds", "巡检间隔", [
+                    {"title": "10 秒", "value": 10},
+                    {"title": "15 秒", "value": 15},
+                    {"title": "30 秒（推荐）", "value": 30},
+                    {"title": "60 秒", "value": 60},
+                    {"title": "120 秒", "value": 120},
+                ], "由宿主调度器驱动，不依赖页面是否打开")),
+                col(12, 6, select("mode", "怎么处理", [
+                    {"title": "仅提醒", "value": "仅提醒"},
+                    {"title": "试运行（只记录）", "value": "试运行"},
+                    {"title": "自动处置", "value": "自动处置"},
+                ], "默认试运行，只记动作和日志")),
+            ]},
+            {"component": "VRow", "content": [
+                col(12, 6, select("water_threshold", "磁盘占用到多少就暂停", [
+                    {"title": f"{v}%", "value": v} for v in (80, 85, 88, 90, 95)
+                ], "取所有卷里最高的那个")),
+                col(12, 6, select("temp_threshold", "盘温到多少算异常", [
+                    {"title": f"{v}℃", "value": v} for v in (45, 50, 52, 55, 60)
+                ], "SMART 告警单独算异常")),
+            ]},
+            head("④ 自动处置：默认全关，关注的容器是 moviepilot / qbittorrent / transmission / emby / plex。"
+                 "远程动作会在 NAS 上真执行命令，先看清风险再开。"),
+            {"component": "VRow", "content": [
+                col(12, 6, switch("allow_remote_action", "允许 SSH 远程动作",
+                                  "总开关：关着时只会提醒和暂停下载")),
+                col(12, 6, switch("restart_containers", "容器挂了自动重启",
+                                  "只对关注的容器执行 docker restart")),
+            ]},
+            {"component": "VRow", "content": [
+                col(12, 12, field("alert_command", "异常时执行的自定义命令（可留空）",
+                                  "留空最安全；只放行单条简单命令，禁止管道、重定向、删除和关机类命令",
+                                  "/volume1/scripts/notify.sh")),
+            ]},
+            head("⑤ 备用数据源（可留空）：SSH 连不上时按状态桥 → 本地文件 → 容器自检降级。"),
+            {"component": "VRow", "content": [
+                col(12, 6, field("bridge_url", "状态桥地址", "留空就跳过状态桥",
+                                 "http://127.0.0.1:8787/status")),
+                col(12, 6, field("status_file", "本地状态文件", "选本地文件时读这个 JSON",
+                                 "/config/ugn_status.json")),
             ]},
         ]
         defaults = {
@@ -263,16 +365,27 @@ class UGreenGuard(_PluginBase):
             "ssh_port": str(self._ssh_port),
             "ssh_user": self._ssh_user,
             "ssh_password": self._ssh_password,
-            "bridge_url": self._bridge_url,
-            "status_file": self._status_file,
+            "ssh_key": self._ssh_key,
+            "ssh_sudo": self._ssh_sudo,
+            "poll_seconds": self._poll_seconds,
             "water_threshold": self._water,
             "temp_threshold": self._temp,
+            "cpu_threshold": self._cpu,
+            "mem_threshold": self._mem,
             "mode": self._mode,
+            "resume_scope": self._resume_scope,
             "interval_minutes": self._interval,
             "watch_containers": list(self._watch),
             "cooldown": self._cooldown,
+            "allow_remote_action": self._allow_remote_action,
+            "restart_containers": self._restart_containers,
+            "alert_command": self._alert_command,
+            "bridge_url": self._bridge_url,
+            "status_file": self._status_file,
         }
         return form, defaults
+
+    # ---------------- 接口与页面 ----------------
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
@@ -280,6 +393,8 @@ class UGreenGuard(_PluginBase):
              "methods": ["GET"], "summary": "当前状态、命中规则与动作日志"},
             {"path": "/check", "auth": "bear", "endpoint": self.api_check,
              "methods": ["POST"], "summary": "立即巡检一次"},
+            {"path": "/test_ssh", "auth": "bear", "endpoint": self.api_test_ssh,
+             "methods": ["POST"], "summary": "分步测试 SSH 连接与状态探针"},
             {"path": "/resume", "auth": "bear", "endpoint": self.api_resume,
              "methods": ["POST"], "summary": "手动恢复下载"},
             {"path": "/clear", "auth": "bear", "endpoint": self.api_clear,
@@ -288,13 +403,22 @@ class UGreenGuard(_PluginBase):
              "methods": ["POST"], "summary": "重新读状态并刷新页面"},
         ]
 
+    def _scrub(self, text: Any) -> str:
+        out = str(text or "")
+        for secret in (self._ssh_password, self._ssh_key):
+            value = str(secret or "").strip()
+            if not value:
+                continue
+            out = out.replace(value, "***")
+            for line in value.splitlines():
+                line = line.strip()
+                if len(line) > 8:
+                    out = out.replace(line, "***")
+        return out
+
     def _fail(self, exc: Exception) -> Response:
         """endpoint 里的异常一律收成具体原因，绝不抛到宿主变成「未知错误」。"""
-        text = f"具体原因：{type(exc).__name__} {exc}"
-        secret = str(getattr(self, "_ssh_password", "") or "")
-        if secret:
-            text = text.replace(secret, "***")
-        return Response(success=False, message=text, data=None)
+        return Response(success=False, message=f"具体原因：{self._scrub(exc)}", data=None)
 
     def api_snapshot(self) -> Response:
         try:
@@ -306,6 +430,16 @@ class UGreenGuard(_PluginBase):
         try:
             view = self.run_check(trigger="手动巡检")
             return self._payload_from(view, "巡检完成")
+        except Exception as exc:
+            return self._fail(exc)
+
+    def api_test_ssh(self) -> Response:
+        try:
+            report = nas.ssh_diagnostics(self._cfg())
+            self.save_data(_SSH_TEST_KEY, report)
+            summary = str(report.get("summary") or "测试完成")
+            self._append_log("INFO" if report.get("ok") else "WARN", f"[连接测试] {summary}")
+            return self._payload_from(self._view(), summary, ssh_test=report)
         except Exception as exc:
             return self._fail(exc)
 
@@ -369,6 +503,7 @@ class UGreenGuard(_PluginBase):
         buttons = [
             button("立即巡检", "mdi-refresh", "check", "post"),
             button("刷新页面", "mdi-page-refresh-outline", "refresh", "post", "info"),
+            button("测试连接", "mdi-lan-connect", "test_ssh", "post", "info"),
             button("查看快照", "mdi-code-json", "snapshot", "get", "info"),
             button("恢复下载", "mdi-play-outline", "resume", "post", "success"),
             button("清空日志", "mdi-delete-outline", "clear", "post", "warning", {"confirm": "yes"}),
@@ -377,7 +512,7 @@ class UGreenGuard(_PluginBase):
                                 "html": renderer.render(self._view())}
         return buttons + [body]
 
-    # 巡检与处置
+    # ---------------- 数据与日志 ----------------
 
     def _load_state(self) -> Dict[str, Any]:
         raw = self.get_data(_STATE_KEY)
@@ -391,18 +526,18 @@ class UGreenGuard(_PluginBase):
     def _append_log(self, level: str, message: str) -> None:
         logs = self.get_data(_LOG_KEY)
         logs = list(logs) if isinstance(logs, list) else []
-        logs.insert(0, {"time": _now_text(), "level": level, "message": message})
+        logs.insert(0, {"time": _now_text(), "level": level, "message": self._scrub(message)})
         self.save_data(_LOG_KEY, logs[:_MAX_LOG])
         try:
             from app.sdk.logging import logger
             getattr(logger, {"WARN": "warning", "ERROR": "error"}.get(level, "info"))(
-                f"绿联 NAS 守护：{message}")
+                f"绿联 NAS 守护：{self._scrub(message)}")
         except Exception:
             pass
 
     def _notify(self, title: str, text: str) -> None:
         try:
-            self.post_message(title=title, text=text)
+            self.post_message(title=title, text=self._scrub(text))
         except Exception:
             pass
 
@@ -438,27 +573,84 @@ class UGreenGuard(_PluginBase):
                 target[1]()
                 lines.append(f"下载器 {index} 已{word}（{target[0]}）")
             except Exception as err:
-                lines.append(f"下载器 {index} {word}失败：{err}")
+                lines.append(f"下载器 {index} {word}失败：{self._scrub(err)}")
+        return lines
+
+    # ---------------- 规则动作 ----------------
+
+    def _planned_actions(self, hit: Dict[str, Any], cfg: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        if hit["action"] == "pause_download":
+            parts.append("暂停下载器任务")
+        if cfg.get("allow_remote_action"):
+            if cfg.get("restart_containers") and hit["rule"] == "container_down":
+                for name in [str(x) for x in (hit.get("targets") or [])[:3]]:
+                    command = nas.restart_command(cfg, name)
+                    if command:
+                        parts.append(f"SSH 执行 {command}")
+            command = str(cfg.get("alert_command") or "").strip()
+            if command and hit["action"] in ("pause_download", "notify"):
+                parts.append(f"SSH 执行 {command}")
+        return "、".join(parts) or "只记一笔提醒"
+
+    def _action_result(self, cfg: Dict[str, Any], command: str) -> Dict[str, Any]:
+        """普通账号跑不动 docker 时，自动重试一次免密 sudo，不额外要一堆配置。"""
+        result = nas.run_remote_action(cfg, command)
+        blob = f"{result.get('error') or ''} {result.get('output') or ''}".lower()
+        if (not result.get("ok") and not command.startswith("sudo -n ")
+                and ("permission" in blob or "denied" in blob or "not authorized" in blob)):
+            retry = nas.run_remote_action(cfg, "sudo -n " + command)
+            if retry.get("ok"):
+                return retry
+        return result
+
+    def _remote_actions(self, hit: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
+        lines: List[str] = []
+        if not cfg.get("allow_remote_action"):
+            return lines
+        if cfg.get("restart_containers") and hit["rule"] == "container_down":
+            for name in [str(x) for x in (hit.get("targets") or [])[:3]]:
+                command = nas.restart_command(cfg, name)
+                if not command:
+                    lines.append(f"容器名 {name} 不合法，跳过重启")
+                    continue
+                result = self._action_result(cfg, command)
+                detail = result["output"] if result["ok"] else (result["error"] or "没有返回")
+                lines.append(f"重启 {name}：{'成功' if result['ok'] else '失败'}（{detail}）")
+        command = str(cfg.get("alert_command") or "").strip()
+        if command and hit["action"] in ("pause_download", "notify"):
+            result = self._action_result(cfg, command)
+            detail = result["output"] if result["ok"] else (result["error"] or "没有返回")
+            lines.append(f"自定义命令：{'成功' if result['ok'] else '失败'}（{detail}）")
         return lines
 
     def _apply_hit(self, hit: Dict[str, Any], cfg: Dict[str, Any], trigger: str) -> None:
         mode = cfg["mode"]
         detail = hit["detail"]
+        plan = self._planned_actions(hit, cfg)
         if hit["action"] == "notify":
-            self._append_log("WARN", f"[{mode}] {detail}（触发：{trigger}）")
-            self._notify("绿联 NAS 守护 · 容器异常", f"{detail}\n当前处置：{mode}，先记一笔提醒")
+            if mode == "自动处置" and cfg.get("allow_remote_action"):
+                lines = self._remote_actions(hit, cfg)
+                text = "；".join(lines) if lines else "未配置远程动作"
+                self._append_log("WARN", f"[自动处置] {detail}｜{text}（触发：{trigger}）")
+                self._notify("绿联 NAS 守护", f"按规则处理容器/资源异常\n{detail}\n{text}")
+            else:
+                self._append_log("WARN", f"[{mode}] {detail}｜计划：{plan}（触发：{trigger}）")
+                self._notify("绿联 NAS 守护", f"发现异常，当前处置：{mode}\n{detail}\n计划：{plan}")
             return
         if mode == "仅提醒":
-            self._append_log("WARN", f"[仅提醒] 本应暂停下载：{detail}")
+            self._append_log("WARN", f"[仅提醒] 本应暂停下载：{detail}｜计划：{plan}")
             self._notify("绿联 NAS 守护", f"发现异常，按设置只提醒，不改动\n{detail}")
             return
         if mode == "试运行":
-            self._append_log("WARN", f"[试运行] 本应暂停下载：{detail}（未实际改动）")
-            self._notify("绿联 NAS 守护", f"发现异常，试运行只记录不改动\n{detail}")
+            self._append_log("WARN", f"[试运行] 本应暂停下载：{detail}｜计划：{plan}（未实际改动）")
+            self._notify("绿联 NAS 守护", f"发现异常，试运行只记录不改动\n{detail}\n计划：{plan}")
             return
         lines = self._call_downloaders(_PAUSE_METHODS, "暂停", "该下载器不支持暂停，仅告警")
-        self._append_log("WARN", f"[自动处置] 暂停下载：{detail}｜{'；'.join(lines)}")
-        self._notify("绿联 NAS 守护", f"已按规则暂停下载\n{detail}\n{'；'.join(lines)}")
+        lines += self._remote_actions(hit, cfg)
+        text = "；".join(lines)
+        self._append_log("WARN", f"[自动处置] 暂停下载：{detail}｜{text}（触发：{trigger}）")
+        self._notify("绿联 NAS 守护", f"已按规则暂停下载\n{detail}\n{text}")
 
     def _apply_resume(self, cfg: Dict[str, Any], trigger: str) -> None:
         mode = cfg["mode"]
@@ -512,21 +704,55 @@ class UGreenGuard(_PluginBase):
             "active_rules": sorted(current),
         })
         self._save_snapshot(status, hits, collected)
+        self._save_series(status, hits, collected.get("source"))
         return self._view(status=status, hits=hits, collected=collected)
 
     def _save_snapshot(self, status: Dict[str, Any], hits: List[Dict[str, Any]],
                        collected: Dict[str, Any]) -> None:
+        cfg = self._cfg()
         ssh = collected.get("ssh") if isinstance(collected.get("ssh"), dict) \
-            else nas.ssh_info({"ssh_host": self._ssh_host})
+            else nas.ssh_info(cfg)
         self.save_data(_SNAPSHOT_KEY, {
             "generated_at": _now_text(),
+            "last_check_epoch": time.time(),
             "status": status,
             "hits": hits,
-            "source": collected["source"],
+            "source": collected.get("source"),
             "services": collected.get("services"),
             "ssh": ssh,
+            "probe": collected.get("probe"),
             "source_mode": collected.get("source_mode") or self._source_mode,
+            "poll_seconds": self._poll_seconds,
         })
+
+    def _save_series(self, status: Dict[str, Any], hits: List[Dict[str, Any]],
+                     source: Any) -> None:
+        rows = self.get_data(_SERIES_KEY)
+        rows = list(rows) if isinstance(rows, list) else []
+        volumes = status.get("volumes") if isinstance(status.get("volumes"), list) else []
+        disks = status.get("disks") if isinstance(status.get("disks"), list) else []
+        system = status.get("system") if isinstance(status.get("system"), dict) else {}
+
+        def pick(items: List[Any], key: str) -> Any:
+            values = []
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get(key), (int, float)) \
+                        and not isinstance(item.get(key), bool):
+                    values.append(float(item[key]))
+            return round(max(values), 1) if values else None
+
+        rows.append({
+            "time": _now_text(),
+            "epoch": time.time(),
+            "volume": pick(volumes, "percent"),
+            "temp": pick(disks, "temp"),
+            "cpu": system.get("cpu") if isinstance(system.get("cpu"), (int, float)) else None,
+            "mem": system.get("mem") if isinstance(system.get("mem"), (int, float)) else None,
+            "alerts": len([h for h in hits if isinstance(h, dict)
+                           and h.get("action") in ("pause_download", "notify")]),
+            "source": str(source or nas.MISSING),
+        })
+        self.save_data(_SERIES_KEY, rows[-_MAX_SERIES:])
 
     def _refresh_view(self) -> Dict[str, Any]:
         cfg = self._cfg()
@@ -542,6 +768,7 @@ class UGreenGuard(_PluginBase):
 
     def _view(self, status: Any = None, hits: Any = None,
               collected: Any = None) -> Dict[str, Any]:
+        cfg = self._cfg()
         stored = self.get_data(_SNAPSHOT_KEY)
         stored = dict(stored) if isinstance(stored, dict) else {}
         if status is None:
@@ -553,28 +780,50 @@ class UGreenGuard(_PluginBase):
                 "source": stored.get("source") or nas.MISSING,
                 "services": stored.get("services"),
                 "ssh": stored.get("ssh") if isinstance(stored.get("ssh"), dict)
-                       else nas.ssh_info({"ssh_host": self._ssh_host}),
+                       else nas.ssh_info(cfg),
+                "probe": stored.get("probe"),
                 "source_mode": stored.get("source_mode") or self._source_mode,
             }
         state = self._load_state()
         logs = self.get_data(_LOG_KEY)
         logs = list(logs) if isinstance(logs, list) else []
+        series = self.get_data(_SERIES_KEY)
+        series = list(series) if isinstance(series, list) else []
+        ssh_test = self.get_data(_SSH_TEST_KEY)
+        ssh_test = dict(ssh_test) if isinstance(ssh_test, dict) else {}
         ssh = collected.get("ssh") if isinstance(collected.get("ssh"), dict) \
-            else nas.ssh_info({"ssh_host": self._ssh_host})
+            else nas.ssh_info(cfg)
+        last_epoch = stored.get("last_check_epoch")
+        try:
+            age = max(0, int(time.time() - float(last_epoch))) if last_epoch else None
+        except (TypeError, ValueError):
+            age = None
         return {
             "generated_at": stored.get("generated_at") or _now_text(),
             "status": status,
             "hits": hits,
-            "source": collected["source"],
+            "source": collected.get("source") or nas.MISSING,
             "services": collected.get("services"),
             "ssh": ssh,
+            "probe": collected.get("probe"),
             "source_mode": collected.get("source_mode") or self._source_mode,
             "log": logs,
+            "series": series,
+            "ssh_test": ssh_test,
+            "age_seconds": age,
+            "poll_seconds": self._poll_seconds,
             "paused": bool(state.get("paused")),
             "mode": self._mode,
             "cfg": {"water_threshold": self._water, "temp_threshold": self._temp,
                     "watch_containers": list(self._watch)},
             "cooldown": self._cooldown,
+            "actions": {
+                "mode": self._mode,
+                "allow_remote_action": self._allow_remote_action,
+                "restart_containers": self._restart_containers,
+                "alert_command": self._alert_command,
+                "resume_scope": self._resume_scope,
+            },
         }
 
     def _payload_from(self, view: Dict[str, Any], message: str, **extra: Any) -> Response:

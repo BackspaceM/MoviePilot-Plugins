@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -51,7 +52,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self):
         self.assertEqual(PLUGIN_ID, "UGreenGuard")
         self.assertEqual(PLUGIN_CLS.plugin_name, "绿联 NAS 守护")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.1.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "2.0.0")
         self.assertEqual(PLUGIN_CLS.plugin_author, "BackspaceM")
         self.assertEqual(PLUGIN_CLS.plugin_config_prefix, "ugreenguard_")
         self.assertEqual(PLUGIN_CLS.plugin_color, "#6366F1")
@@ -97,7 +98,7 @@ class TestContract(unittest.TestCase):
         }
         prefix = f"plugin/{PLUGIN_ID}/"
         clicks = cc.collect_click_events(self.plugin.get_page())
-        self.assertEqual(len(clicks), 5)
+        self.assertEqual(len(clicks), 6)
         for click in list(clicks) + cc.collect_page_clicks(PLUGIN_CLS()):
             self.assertTrue(click["api"].startswith(prefix), click["api"])
             action = click["api"][len(prefix):].split("?", 1)[0].split("/", 1)[0]
@@ -119,14 +120,16 @@ class TestContract(unittest.TestCase):
         self.assertEqual(clear_btn["events"]["click"]["params"], {"confirm": "yes"})
 
     def test_api_returns_three_part_envelope(self):
-        for name in ("api_snapshot", "api_check", "api_refresh", "api_resume", "api_clear"):
+        for name in ("api_snapshot", "api_check", "api_refresh", "api_resume",
+                     "api_clear", "api_test_ssh"):
             result = getattr(self.plugin, name)()
             self.assertIsInstance(result, MODULE.Response)
             self.assertIsInstance(result.success, bool)
             self.assertIsInstance(result.message, str)
             self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
         snap = self.plugin.api_snapshot()
-        for key in ("status", "hits", "log", "source", "mode", "ssh", "source_mode"):
+        for key in ("status", "hits", "log", "source", "mode", "ssh", "source_mode",
+                    "series", "age_seconds", "ssh_test", "probe", "actions", "poll_seconds"):
             self.assertIn(key, snap.data)
 
 
@@ -142,6 +145,11 @@ class TestEndpointErrors(unittest.TestCase):
             ("api_refresh", "_refresh_view", {}),
             ("api_clear", "save_data", {"confirm": "yes"}),
         ]
+        # ssh_diagnostics 在 nas 模块上，单独注入异常
+        with patch.object(NAS, "ssh_diagnostics", side_effect=RuntimeError("炸了")):
+            result = self.plugin.api_test_ssh()
+        self.assertIs(result.success, False)
+        self.assertIn("具体原因", result.message)
         for name, broken, kwargs in cases:
             with self.subTest(endpoint=name):
                 with patch.object(self.plugin, broken, side_effect=RuntimeError("炸了")):
@@ -165,8 +173,10 @@ class TestEndpointErrors(unittest.TestCase):
     def test_corrupted_stored_data_never_raises(self):
         for value in ("text", 1, True, [{"x": 1}], {"status": 3, "hits": "bad"}):
             with self.subTest(value=value):
-                self.plugin.save_data("ugn_snapshot", value)
-                for name in ("api_snapshot", "api_refresh"):
+                for key in ("ugn_snapshot", "ugn_series", "ugn_ssh_test",
+                            "ugn_log", "ugn_state"):
+                    self.plugin.save_data(key, value)
+                for name in ("api_snapshot", "api_refresh", "api_check", "api_test_ssh"):
                     result = getattr(self.plugin, name)()
                     self.assertIsInstance(result, MODULE.Response)
                     self.assertIsInstance(result.message, str)
@@ -209,7 +219,7 @@ class TestPageAndForm(unittest.TestCase):
     def test_page_has_buttons_and_one_html_node(self):
         self.assertIsInstance(self.page, list)
         components = [item.get("component") for item in self.page]
-        self.assertEqual(components.count("VBtn"), 5)
+        self.assertEqual(components.count("VBtn"), 6)
         html_nodes = [item for item in self.page if item.get("html")]
         self.assertEqual(len(html_nodes), 1)
         self.assertIn("绿联 NAS 守护", html_nodes[0]["html"])
@@ -220,7 +230,7 @@ class TestPageAndForm(unittest.TestCase):
         for marker in ("<script", "onclick=", "onchange=", "onload=", "javascript:"):
             self.assertNotIn(marker, html, marker)
 
-    def test_form_has_at_most_ten_controls(self):
+    def test_form_stays_compact_and_keeps_compat_defaults(self):
         form, defaults = PLUGIN_CLS().get_form()
         controls = []
 
@@ -235,17 +245,22 @@ class TestPageAndForm(unittest.TestCase):
                     walk(value)
 
         walk(form)
-        self.assertLessEqual(len(controls), 10, f"设置项要精简，实际 {controls}")
-        self.assertEqual(len(controls), 10)
-        self.assertEqual(controls.count("VSwitch"), 1)
+        self.assertEqual(len(controls), 15, f"设置项要精简，实际 {controls}")
+        self.assertEqual(controls.count("VSwitch"), 3)
         self.assertEqual(controls.count("VTextField"), 6)
-        self.assertEqual(controls.count("VSelect"), 3)
+        self.assertEqual(controls.count("VTextarea"), 1)
+        self.assertEqual(controls.count("VSelect"), 5)
+        # 老配置键仍然留在 defaults 里，升级不会丢设置
         self.assertTrue({
             "enabled", "source_mode", "ssh_host", "ssh_port", "ssh_user", "ssh_password",
-            "bridge_url", "status_file", "water_threshold", "temp_threshold", "mode",
-            "interval_minutes", "watch_containers", "cooldown",
+            "ssh_key", "ssh_sudo", "bridge_url", "status_file", "water_threshold",
+            "temp_threshold", "cpu_threshold", "mem_threshold", "mode", "poll_seconds",
+            "resume_scope", "interval_minutes", "watch_containers", "cooldown",
+            "allow_remote_action", "restart_containers", "alert_command",
         }.issubset(defaults))
         self.assertEqual(defaults["water_threshold"], 88)
+        self.assertFalse(defaults["allow_remote_action"])
+        self.assertEqual(defaults["mode"], "试运行")
 
     def test_form_source_mode_options_and_password_field(self):
         form, _ = PLUGIN_CLS().get_form()
@@ -264,7 +279,7 @@ class TestPageAndForm(unittest.TestCase):
 
         walk(form)
         items = {item["value"] for item in models["source_mode"]["items"]}
-        self.assertEqual(items, {"自动", "状态桥", "本地文件", "SSH"})
+        self.assertEqual(items, {"自动", "状态桥", "本地文件", "SSH", "容器自检"})
         self.assertEqual(models["ssh_password"].get("type"), "password")
         self.assertIn("不会写进日志或快照", models["ssh_password"]["hint"])
         self.assertEqual(models["water_threshold"]["label"], "磁盘占用到多少就暂停")
@@ -486,6 +501,227 @@ class TestCollectAndInspect(unittest.TestCase):
         self.assertEqual(status["ts"], NAS.MISSING)
         self.assertEqual(status["ups"], {"on_battery": NAS.MISSING, "battery": NAS.MISSING})
         self.assertEqual(status["system"], {"cpu": NAS.MISSING, "mem": NAS.MISSING})
+
+
+def down_raw(name="qbittorrent"):
+    raw = full_raw()
+    raw["containers"] = [{"name": name, "status": "exited"}]
+    return raw
+
+
+class TestLiveMonitoring(unittest.TestCase):
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+
+    def test_service_uses_second_level_interval(self):
+        captured = {}
+
+        class FakeInterval:
+            def __init__(self, seconds):
+                captured["seconds"] = seconds
+
+        fake = types.ModuleType("apscheduler.triggers.interval")
+        fake.IntervalTrigger = FakeInterval
+        self.plugin.init_plugin({"poll_seconds": 15})
+        with patch.dict(sys.modules, {"apscheduler.triggers.interval": fake}):
+            services = self.plugin.get_service()
+        self.assertEqual(captured["seconds"], 15)
+        self.assertEqual(len(services), 1)
+        self.assertEqual(services[0]["id"], "UGreenGuard")
+
+    def test_poll_seconds_are_clamped(self):
+        for raw, expected in ((1, 5), (0, 5), (999, 300), ("abc", 30), (60, 60)):
+            self.plugin.init_plugin({"poll_seconds": raw})
+            self.assertEqual(self.plugin._cfg()["poll_seconds"], expected)
+
+    def test_host_port_shorthand(self):
+        self.plugin.init_plugin({"ssh_host": "10.0.0.2:2222"})
+        cfg = self.plugin._cfg()
+        self.assertEqual(cfg["ssh_host"], "10.0.0.2")
+        self.assertEqual(cfg["ssh_port"], 2222)
+        self.plugin.init_plugin({"ssh_host": "[::1]:2200"})
+        self.assertEqual(self.plugin._cfg()["ssh_host"], "::1")
+        self.assertEqual(self.plugin._cfg()["ssh_port"], 2200)
+        self.plugin.init_plugin({"ssh_host": "10.0.0.2", "ssh_port": 2222})
+        self.assertEqual(self.plugin._cfg()["ssh_port"], 2222)
+
+    def test_scheduled_failure_is_logged_not_raised(self):
+        with patch.object(self.plugin, "run_check", side_effect=RuntimeError("探针炸了")):
+            self.plugin.run_scheduled()
+        logs = self.plugin.get_data("ugn_log")
+        self.assertTrue(logs)
+        self.assertIn("实时巡检异常", logs[0]["message"])
+
+    def test_series_and_freshness_are_saved(self):
+        self.plugin.init_plugin({"mode": "试运行", "cooldown": 0})
+        with patch.object(NAS, "collect", return_value=bridge_collected(full_raw())):
+            self.plugin.run_check("第一次")
+            view = self.plugin.run_check("第二次")
+        series = self.plugin.get_data("ugn_series")
+        self.assertEqual(len(series), 2)
+        self.assertEqual(series[0]["source"], "状态桥")
+        self.assertIsInstance(series[0]["volume"], float)
+        self.assertIsInstance(view["age_seconds"], int)
+        self.assertGreaterEqual(view["age_seconds"], 0)
+        self.assertEqual(view["poll_seconds"], 30)
+
+    def test_series_ring_is_bounded(self):
+        self.plugin.init_plugin({"mode": "试运行", "cooldown": 0})
+        with patch.object(NAS, "collect", return_value=bridge_collected(full_raw())):
+            for _ in range(45):
+                self.plugin.run_check("巡检")
+        self.assertLessEqual(len(self.plugin.get_data("ugn_series")), 40)
+
+    def test_stop_service_closes_ssh_session(self):
+        with patch.object(NAS, "close_session") as close:
+            self.plugin.stop_service()
+        close.assert_called_once()
+
+
+class TestAutoActions(unittest.TestCase):
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+        self.plugin.init_plugin({"mode": "自动处置", "cooldown": 0})
+
+    def test_remote_actions_off_by_default(self):
+        with patch.object(NAS, "collect", return_value=bridge_collected(down_raw())), \
+             patch.object(NAS, "run_remote_action", side_effect=AssertionError("不该远程执行")):
+            self.plugin.run_check("容器挂了")
+        logs = self.plugin.get_data("ugn_log")
+        self.assertTrue(logs)
+        self.assertIn("qbittorrent", logs[0]["message"])
+
+    def test_restart_container_when_explicitly_enabled(self):
+        self.plugin.init_plugin({"mode": "自动处置", "cooldown": 0,
+                                 "allow_remote_action": True, "restart_containers": True})
+        with patch.object(NAS, "collect", return_value=bridge_collected(down_raw())), \
+             patch.object(NAS, "run_remote_action", return_value={
+                 "ok": True, "output": "qbittorrent", "error": "",
+                 "command": "docker restart qbittorrent"}) as run:
+            self.plugin.run_check("容器挂了")
+        self.assertEqual(run.call_args[0][1], "docker restart qbittorrent")
+        self.assertIn("重启 qbittorrent", self.plugin.get_data("ugn_log")[0]["message"])
+
+    def test_trial_mode_only_plans(self):
+        self.plugin.init_plugin({"mode": "试运行", "cooldown": 0,
+                                 "allow_remote_action": True, "restart_containers": True})
+        with patch.object(NAS, "collect", return_value=bridge_collected(down_raw())), \
+             patch.object(NAS, "run_remote_action", side_effect=AssertionError("不该远程执行")):
+            self.plugin.run_check("容器挂了")
+        self.assertIn("计划", self.plugin.get_data("ugn_log")[0]["message"])
+
+    def test_pause_mode_only_reminds(self):
+        self.plugin.init_plugin({"mode": "仅提醒", "cooldown": 0})
+        high = full_raw()
+        high["volumes"][0]["percent"] = 95.0
+        with patch.object(NAS, "collect", return_value=bridge_collected(high)), \
+             patch.object(NAS, "run_remote_action", side_effect=AssertionError("不该远程执行")), \
+             patch.object(self.plugin, "_call_downloaders", side_effect=AssertionError("不该动下载器")):
+            self.plugin.run_check("磁盘满")
+        self.assertIn("仅提醒", self.plugin.get_data("ugn_log")[0]["message"])
+
+    def test_dangerous_custom_command_is_never_sent(self):
+        self.plugin.init_plugin({"mode": "自动处置", "cooldown": 0,
+                                 "allow_remote_action": True, "alert_command": "rm -rf /"})
+        high = full_raw()
+        high["volumes"][0]["percent"] = 95.0
+        with patch.object(NAS, "collect", return_value=bridge_collected(high)), \
+             patch.object(NAS, "_run_remote", side_effect=AssertionError("不该下发危险命令")):
+            self.plugin.run_check("磁盘满")
+        logs = self.plugin.get_data("ugn_log")
+        self.assertIn("含受限片段", logs[0]["message"])
+
+    def test_sudo_fallback_after_permission_denied(self):
+        self.plugin.init_plugin({"mode": "自动处置", "cooldown": 0,
+                                 "allow_remote_action": True, "restart_containers": True})
+        results = [
+            {"ok": False, "output": "", "error": "permission denied", "command": "docker restart qbittorrent"},
+            {"ok": True, "output": "ok", "error": "", "command": "sudo -n docker restart qbittorrent"},
+        ]
+        with patch.object(NAS, "collect", return_value=bridge_collected(down_raw())), \
+             patch.object(NAS, "run_remote_action", side_effect=results) as run:
+            self.plugin.run_check("容器挂了")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1][0][1], "sudo -n docker restart qbittorrent")
+        self.assertIn("成功", self.plugin.get_data("ugn_log")[0]["message"])
+
+    def test_password_and_key_never_reach_logs_or_snapshot(self):
+        self.plugin.init_plugin({"mode": "自动处置", "cooldown": 0,
+                                 "ssh_password": "S3cr3tPW", "ssh_key": "PRIVATE-KEY-LINE",
+                                 "allow_remote_action": True})
+        with patch.object(NAS, "run_remote_action", return_value={
+                "ok": False, "output": "", "error": "S3cr3tPW PRIVATE-KEY-LINE", "command": "x"}):
+            self.plugin._append_log("WARN", "连不上 S3cr3tPW PRIVATE-KEY-LINE")
+        blob = repr(self.plugin.get_data("ugn_log"))
+        self.assertNotIn("S3cr3tPW", blob)
+        self.assertNotIn("PRIVATE-KEY-LINE", blob)
+
+
+class TestSSHTestEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+
+    def test_report_is_saved_and_returned(self):
+        report = {"ok": True, "checked_at": "10:00:00", "host": "10.0.0.2", "port": 22,
+                  "user": "admin", "transport": "paramiko", "summary": "连接正常",
+                  "hint": "一切就绪", "steps": [{"name": "登录", "ok": True, "detail": "通过"}],
+                  "sections": {"volumes": True}}
+        with patch.object(NAS, "ssh_diagnostics", return_value=report):
+            result = self.plugin.api_test_ssh()
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["ssh_test"]["summary"], "连接正常")
+        self.assertEqual(self.plugin.get_data("ugn_ssh_test"), report)
+        self.assertIn("连接正常", result.data["html"])
+        self.assertIn("连接测试", self.plugin.get_data("ugn_log")[0]["message"])
+
+    def test_failed_report_is_logged_as_warning(self):
+        with patch.object(NAS, "ssh_diagnostics", return_value={
+                "ok": False, "summary": "SSH 端口连不上", "hint": "检查 SSH 服务",
+                "steps": [], "sections": {}}):
+            self.plugin.api_test_ssh()
+        self.assertEqual(self.plugin.get_data("ugn_log")[0]["level"], "WARN")
+
+
+class TestRealHostSignature(unittest.TestCase):
+    """宿主 _PluginBase.get_data(key=None, plugin_id=None) 没有 default 参数，
+    数据不存在时返回 None；桩里的 get_data(key, default) 会把这个 bug 盖住。"""
+
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+        self.db = {}
+        self.plugin.get_data = lambda key=None, plugin_id=None: self.db.get(key)
+        self.plugin.save_data = lambda key, value, plugin_id=None: self.db.__setitem__(key, value)
+
+    def test_all_endpoints_work_when_nothing_is_stored(self):
+        for name, kwargs in (("api_snapshot", {}), ("api_check", {}),
+                             ("api_test_ssh", {}), ("api_resume", {}),
+                             ("api_refresh", {}), ("api_clear", {"confirm": "yes"})):
+            with self.subTest(name=name):
+                result = getattr(self.plugin, name)(**kwargs)
+                self.assertIsInstance(result, MODULE.Response)
+                self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
+
+    def test_page_and_form_work_with_none_data(self):
+        self.assertIsInstance(self.plugin.get_page(), list)
+        self.assertIsInstance(self.plugin.get_form()[0], list)
+
+    def test_run_check_with_none_data(self):
+        self.plugin.init_plugin({"mode": "试运行", "cooldown": 0})
+        with patch.object(NAS, "collect", return_value=bridge_collected(full_raw())):
+            view = self.plugin.run_check("真实签名")
+        self.assertIsInstance(view["series"], list)
+        self.assertEqual(len(self.db["ugn_series"]), 1)
+
+
+class TestButtonWording(unittest.TestCase):
+    def test_buttons_are_short_and_plain(self):
+        page = PLUGIN_CLS().get_page()
+        labels = [item.get("text") for item in page if item.get("component") == "VBtn"]
+        self.assertEqual(labels, ["立即巡检", "刷新页面", "测试连接", "查看快照", "恢复下载", "清空日志"])
+        for label in labels:
+            self.assertLessEqual(len(label), 5)
+            for word in ("第一步", "三步走", "智能", "一键"):
+                self.assertNotIn(word, label)
 
 
 def main():

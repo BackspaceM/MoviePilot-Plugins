@@ -74,6 +74,22 @@ _STYLE = """
 .ugn-foot{font-size:11px;opacity:.46;margin-top:14px;line-height:1.8}
 .ugn-badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;
   background:rgba(99,102,241,.16);color:#8B8BF5;margin-left:8px;vertical-align:middle}
+.ugn-ok{color:#10B981}.ugn-bad{color:#EF4444}.ugn-mute{opacity:.55}
+.ugn-live{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.ugn-chip{font-size:11px;font-weight:650;padding:4px 10px;border-radius:8px;white-space:nowrap;
+  background:rgba(16,185,129,.14);color:#10B981}
+.ugn-chip-stale{background:rgba(239,68,68,.14);color:#EF4444}
+.ugn-spark{width:100%;height:64px;display:block;margin:4px 0 10px}
+.ugn-step{display:flex;gap:9px;align-items:flex-start;padding:6px 0;font-size:12px;
+  border-bottom:1px solid rgba(127,127,127,.10)}
+.ugn-step:last-child{border-bottom:0}
+.ugn-step-name{font-weight:650;min-width:48px;white-space:nowrap}
+.ugn-step-detail{flex:1;min-width:0;word-break:break-word;opacity:.78}
+.ugn-flags{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px 14px}
+.ugn-flag{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;
+  padding:6px 9px;border-radius:9px;background:rgba(127,127,127,.07)}
+.ugn-command{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  word-break:break-all;opacity:.72;margin-top:8px}
 @media (max-width:620px){.ugn-num{font-size:22px}.ugn-head{gap:10px}.ugn-cols{grid-template-columns:1fr}}
 </style>
 """
@@ -186,6 +202,7 @@ def _note_block(data: Dict[str, Any]) -> str:
     mode = _esc(data.get("source_mode") or "自动")
     services = data.get("services")
     ssh = data.get("ssh") if isinstance(data.get("ssh"), dict) else {}
+    probe = data.get("probe") if isinstance(data.get("probe"), dict) else {}
     service_line = ""
     if isinstance(services, dict):
         service_line = (
@@ -193,32 +210,40 @@ def _note_block(data: Dict[str, Any]) -> str:
             f'下载器 {_esc(_fmt(services.get("download")))} 个。'
         )
     host = _esc(str(ssh.get("host") or "未配置"))
+    reason = str(ssh.get("reason") or ssh.get("transport_note") or "")
     if ssh.get("available"):
-        pstate = "paramiko 可用"
-        reason_line = ""
+        pstate = f'传输 {_esc(str(ssh.get("transport") or "paramiko"))}'
+        if not ssh.get("paramiko", True):
+            pstate += f'（{_esc(str(ssh.get("transport_note") or "paramiko 未安装"))}）'
+        reason_line = f'；{_esc(ssh.get("note") or "")}' if ssh.get("note") else ""
     else:
-        pstate = "paramiko 不可用"
-        reason_line = f'，{_esc(ssh.get("reason") or "")}' if ssh.get("reason") else ""
+        pstate = "paramiko 不可用" if "paramiko" in reason else "SSH 传输不可用"
+        reason_line = f'；{_esc(reason)}' if reason else ""
     ssh_line = (
         f'<p>采集设置：{mode}；当前生效来源：{source}。{pstate}{reason_line}。'
-        f'SSH 主机：{host}（密码只存插件配置，不写日志、不进快照、不显示在页面上）。{service_line}</p>'
+        f'SSH 主机：{host}（密码和私钥只存插件配置，不写日志、不进快照、不显示在页面上）。{service_line}</p>'
     )
-    ssh_note = ""
-    if source == "SSH":
-        ssh_note = (
-            '<p>SSH 模式只跑 df -kP 读磁盘占用空间，磁盘温度、容器、UPS 一律未上报，'
-            '不会当成正常，也不会乱恢复下载。</p>'
+    probe_line = ""
+    if probe:
+        labels = (("volumes", "存储卷"), ("cpu", "CPU"), ("mem", "内存"),
+                  ("containers", "容器"), ("disks", "盘温"), ("ups", "UPS"))
+        got = [name for key, name in labels if probe.get(key)]
+        missed = [name for key, name in labels if not probe.get(key)]
+        probe_line = (
+            '<p>这次探针读到：' + _esc("、".join(got) or "无")
+            + '；没读到：' + _esc("、".join(missed) or "无")
+            + '，没读到的一律标「未上报」，不会当成正常。</p>'
         )
     return (
         '<div class="ugn-note">'
-        '<p>绿联 NAS 的开放接口是 HTTPS + protobuf，还要按权限节点发令牌，目前令牌只放开了 docker ps，'
-        'storage、taskmgr、ctl 都返回 403，MP 容器里不方便直连。</p>'
-        '<p>所以这里只读：状态桥给一段简单 JSON，或者用 SSH 账号直接跑 df -kP 读磁盘占用空间，'
-        '也可以读本地状态文件，最后用容器内看得见的目录磁盘占用空间兜底。'
-        '缺哪段就标「未上报」，不会当成正常，也不会乱恢复下载。</p>'
+        '<p>绿联 NAS 的开放接口是 HTTPS + protobuf，还要按权限节点发令牌，'
+        'storage、taskmgr、ctl 这些节点在现有令牌下返回 403，MP 容器里不方便直连。</p>'
+        '<p>所以走 SSH：一次连接跑一段只读探针，读磁盘占用空间、CPU、内存、容器、盘温、SMART 和 UPS；'
+        '盘温和 UPS 需要 smartctl / NUT 或 root 权限，读不到就标未上报。'
+        '状态桥、本地状态文件、容器自检三路留作兜底，缺哪段都不会当成正常。</p>'
         '<p>状态桥大概给成这样就行，缺哪段就空着：'
         f'<code class="ugn-code">{_esc(_JSON_EXAMPLE)}</code></p>'
-        f'{ssh_line}{ssh_note}'
+        f'{ssh_line}{probe_line}'
         "</div>"
     )
 
@@ -288,7 +313,7 @@ def _ups_system_block(status: Dict[str, Any]) -> str:
         '<div class="ugn-stat"><span class="ugn-label">剩余电量</span>'
         f'<b>{_esc(_fmt(ups.get("battery"), "%"))}</b></div>',
     ]
-    for label, key in (("CPU 占用", "cpu"), ("内存占用", "mem")):
+    for label, key in (("CPU 负载", "cpu"), ("内存占用", "mem")):
         value = system.get(key)
         lines.append(
             '<div class="ugn-sys-item"><div class="ugn-sys-line">'
@@ -308,6 +333,132 @@ def _log_block(logs: List[Dict[str, Any]]) -> str:
             f'{_esc(entry.get("message") or "")}</span></div>'
         )
     return '<div class="ugn-log">' + ("".join(rows) or '<div class="ugn-empty">还没记录过动作</div>') + "</div>"
+
+
+def _sparkline(rows: List[Dict[str, Any]], key: str, color: str) -> str:
+    """用内联 SVG 画一条趋势线，不注入任何脚本。"""
+    values: List[Optional[float]] = []
+    for row in rows[-30:]:
+        value = row.get(key) if isinstance(row, dict) else None
+        values.append(float(value) if isinstance(value, (int, float))
+                      and not isinstance(value, bool) else None)
+    if len(values) < 2:
+        return '<div class="ugn-empty">样本还不够，多巡检几次就有趋势了</div>'
+    points = []
+    for index, value in enumerate(values):
+        if value is None:
+            continue
+        x = 8 + index * (664.0 / max(1, len(values) - 1))
+        y = 58 - max(0.0, min(100.0, value)) / 100.0 * 50.0
+        points.append(f"{x:.1f},{y:.1f}")
+    if len(points) < 2:
+        return '<div class="ugn-empty">还没有可用数值</div>'
+    line = " ".join(points)
+    return (
+        '<svg class="ugn-spark" viewBox="0 0 680 64" preserveAspectRatio="none" role="img">'
+        '<line x1="8" y1="58" x2="672" y2="58" stroke="currentColor" stroke-opacity=".15" '
+        'stroke-width="1"/>'
+        f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round"/>'
+        "</svg>"
+    )
+
+
+def _live_block(data: Dict[str, Any]) -> str:
+    series = data.get("series") if isinstance(data.get("series"), list) else []
+    series = [row for row in series if isinstance(row, dict)]
+    try:
+        poll = int(data.get("poll_seconds") or 30)
+    except (TypeError, ValueError):
+        poll = 30
+    age = data.get("age_seconds")
+    if isinstance(age, (int, float)) and not isinstance(age, bool):
+        age_text = f"{int(age)} 秒前"
+        stale = age > max(90, poll * 3)
+        chip = ('<span class="ugn-chip ugn-chip-stale">采集可能停了</span>' if stale
+                else '<span class="ugn-chip">后台巡检正常</span>')
+    else:
+        age_text = "还没巡检过"
+        chip = '<span class="ugn-chip ugn-chip-stale">等第一次巡检</span>'
+    head = (
+        '<div class="ugn-live">'
+        f'<span>{_esc(age_text)}更新 · 每 {poll} 秒采一次 · '
+        f'保留 {len(series)} 帧</span>{chip}</div>'
+    )
+    rows = []
+    for row in series[-6:][::-1]:
+        rows.append(
+            "<tr>"
+            f'<td>{_esc(row.get("time") or "")}</td>'
+            f'<td>{_esc(_fmt(row.get("volume"), "%"))}</td>'
+            f'<td>{_esc(_fmt(row.get("cpu"), "%"))}</td>'
+            f'<td>{_esc(_fmt(row.get("mem"), "%"))}</td>'
+            f'<td>{_esc(_fmt(row.get("temp"), "℃"))}</td>'
+            f'<td>{_esc(_fmt(row.get("alerts")))}</td>'
+            "</tr>"
+        )
+    table = _table(["时间", "磁盘占用", "CPU 负载", "内存", "盘温", "命中"],
+                   rows, "还没有巡检样本")
+    return (head + '<div class="ugn-label">磁盘占用空间趋势（最近 30 帧）</div>'
+            + _sparkline(series, "volume", "#8B8BF5") + table)
+
+
+def _ssh_block(data: Dict[str, Any]) -> str:
+    test = data.get("ssh_test") if isinstance(data.get("ssh_test"), dict) else {}
+    if not test:
+        return ('<div class="ugn-empty">还没测过连接。点上面的「测试连接」，'
+                '会按地址 → 端口 → 传输 → 登录 → 探针逐项给出结果，不会改动 NAS。</div>')
+    checked = _esc(test.get("checked_at") or "")
+    summary = _esc(test.get("summary") or "")
+    hint = _esc(test.get("hint") or "")
+    steps = test.get("steps") if isinstance(test.get("steps"), list) else []
+    rows = []
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        ok = bool(item.get("ok"))
+        color = "#10B981" if ok else "#EF4444"
+        word = "通过" if ok else "没过"
+        rows.append(
+            '<div class="ugn-step">'
+            f'<span class="ugn-step-name">{_esc(item.get("name") or "")}</span>'
+            f'<span class="ugn-step-detail">{_esc(item.get("detail") or "")}</span>'
+            f'<span style="color:{color};font-size:11px;white-space:nowrap">{word}</span></div>'
+        )
+    chip_class = "ugn-chip" if test.get("ok") else "ugn-chip ugn-chip-stale"
+    return (
+        f'<div class="ugn-live"><span>最近一次：{checked}</span>'
+        f'<span class="{chip_class}">{summary}</span></div>'
+        + ("".join(rows) or '<div class="ugn-empty">没有分步结果</div>')
+        + (f'<div class="ugn-foot">{hint}</div>' if hint else "")
+    )
+
+
+def _actions_block(data: Dict[str, Any]) -> str:
+    flags = data.get("actions") if isinstance(data.get("actions"), dict) else {}
+    entries = (
+        ("处置方式", str(flags.get("mode") or "试运行")),
+        ("SSH 远程动作总开关", "已开启" if flags.get("allow_remote_action") else "关闭"),
+        ("容器异常自动重启", "已开启" if flags.get("restart_containers") else "关闭"),
+        ("恢复判断", "按已上报项" if flags.get("resume_scope") == "已上报" else "四段全齐"),
+    )
+    rows = []
+    for label, value in entries:
+        tone = "ugn-ok" if value.startswith("已开启") else ("ugn-mute" if value == "关闭" else "")
+        rows.append(
+            f'<div class="ugn-flag"><span>{_esc(label)}</span>'
+            f'<b class="{tone}">{_esc(value)}</b></div>'
+        )
+    command = str(flags.get("alert_command") or "").strip()
+    command_line = (f'<div class="ugn-command">自定义命令：{_esc(command)}</div>'
+                    if command else '<div class="ugn-foot">没有配置自定义命令。</div>')
+    return (
+        '<div class="ugn-flags">' + "".join(rows) + "</div>"
+        + command_line
+        + '<div class="ugn-foot">远程动作默认全关，切到「自动处置」才会真执行；'
+        '只放行单条简单命令，删除、关机、管道和重定向类命令会被拒掉。'
+        '危险动作请先在「试运行」里看一遍计划再开。</div>'
+    )
 
 
 def render(data: Dict[str, Any]) -> str:
@@ -340,9 +491,10 @@ def render(data: Dict[str, Any]) -> str:
 
     badge = '<span class="ugn-badge">暂停中</span>' if data.get("paused") else ""
     foot = (
-        '默认试运行，只记动作和日志不动下载器；切到自动处置才会真的暂停或恢复。'
-        '同一条规则 30 分钟内不重复提醒，状态变了才记一笔。容器自检的数据不全，'
-        '不会自动恢复下载，需要时点页面上的「恢复下载」。'
+        '后台巡检和自动处置不依赖页面是否打开；宿主详情页是静态渲染的，不会自己跳数字，'
+        '想看最新一帧点「刷新页面」。默认试运行只记动作和日志，切到自动处置才会真动手。'
+        '同一条规则在冷却时间内不重复提醒，状态变了才记一笔。'
+        '容器自检的数据不全，不会自动恢复下载，需要时点「恢复下载」。'
     )
 
     parts = [
@@ -353,13 +505,14 @@ def render(data: Dict[str, Any]) -> str:
         'stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/>'
         '<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01M12 3v2M12 19v2"/></svg></div>',
         f'<div><div class="ugn-title">绿联 NAS 守护{badge}</div>'
-        '<div class="ugn-sub">盯住磁盘占用空间、盘温、容器和 UPS</div></div>',
+        '<div class="ugn-sub">盯住磁盘占用空间、CPU、内存、盘温、容器和 UPS</div></div>',
         '</div><div class="ugn-actions">',
         f'<span class="ugn-time">更新于 {_esc(data.get("generated_at") or "")}</span>',
-        '<span class="ugn-pill">只读采集</span>',
+        '<span class="ugn-pill">SSH 巡检</span>',
         '</div></div>',
         _note_block(data),
         '<div class="ugn-grid">' + "".join(kpis) + "</div>",
+        _section("实时巡检", "后台持续采集，页面手动刷新", _live_block(data)),
         _section("当前命中", "按规则逐条判断", _hits_block(hits)),
         '<div class="ugn-cols">',
         _section("存储卷", f'共 {len(volumes)} 个', _volumes_block(volumes)),
@@ -367,6 +520,8 @@ def render(data: Dict[str, Any]) -> str:
         _section("关注容器", f'共 {len(containers)} 个', _containers_block(containers)),
         _section("UPS 与系统", "没上报就显示未上报", _ups_system_block(status)),
         "</div>",
+        _section("SSH 连接", "分步诊断", _ssh_block(data)),
+        _section("自动处置", "默认全关", _actions_block(data)),
         _section("最近动作", f'保留最近 {min(len(logs), 10)} 条', _log_block(logs)),
         f'<div class="ugn-foot">{_esc(foot)}</div></div>',
     ]

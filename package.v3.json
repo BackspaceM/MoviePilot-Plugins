@@ -401,9 +401,9 @@
   },
   "UGreenGuard": {
     "name": "绿联 NAS 守护",
-    "description": "绿联 NAS 的开放 CLI 是 protobuf 网关，插件不直连。可选 SSH 直连读 NAS 的磁盘占用空间，或用只读状态桥、本地状态文件、容器内自检兜底。按磁盘占用空间、盘温、SMART、容器状态和 UPS盯住下载：超阈值可暂停下载器任务，恢复后自动恢复；默认试运行，只记动作不改动。",
-    "labels": "绿联NAS,SSH,磁盘占用空间,盘温,UPS,容器,暂停下载,守护",
-    "version": "1.1.0",
+    "description": "SSH 直连绿联 NAS 按秒级间隔持续巡检：一次连接读回磁盘占用空间、CPU、内存、容器、盘温、SMART 与 UPS，读不到的段落标未上报。带分步连接测试、私钥登录、paramiko 缺失时的 ssh 命令兜底与复用连接；支持按规则自动暂停/恢复下载、重启异常容器、执行一条自定义命令，远程动作默认全关、危险命令被拒、全程留日志。",
+    "labels": "绿联NAS,SSH,实时监控,磁盘占用空间,盘温,UPS,容器,自动处置,守护",
+    "version": "2.0.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -412,6 +412,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v2.0.0": "SSH 从只跑 df -kP 升级成一次连接的复合只读探针，补齐 CPU、内存、docker 容器、盘温/SMART 与 UPS 采集；连接支持密码/私钥、复用会话、paramiko 缺失时走容器自带 ssh 命令，新增分步「测试连接」按钮与逐段上报清单。巡检改由宿主调度器按 10~120 秒间隔驱动，保存最近 40 帧趋势与数据新鲜度；新增 CPU/内存规则、按已上报项恢复、远程自动处置（重启关注容器 / 执行一条自定义命令），远程动作总开关默认关闭，命令含删除、关机、管道、重定向一律拒绝，容器名严格白名单化。设置项精简到 15 个并分组，支持 地址:端口 写法与免密 sudo 自动重试；新增连接诊断、实时趋势、自动处置三个页面区块，密码与私钥全链路脱敏。单插件 78 + 58 个离线用例。",
       "v1.1.0": "新增 SSH 采集模式：可填 NAS 地址、端口、账户和密码，读 df -kP 得到各挂载点的磁盘占用空间；paramiko 延迟加载，容器里没装时给出安装提示并自动降级到状态桥 / 本地文件 / 容器自检，不引入 pyproject 依赖以免安装被回滚。面向用户的「水位」全部改成「磁盘占用空间」，页面显示生效的采集来源与 SSH 主机（不显示密码）。所有按钮端点整体兜底。",
       "v1.0.1": "补上宿主基类的 stop_service 抽象方法（V3 是 ABCMeta，缺一个会导致插件重载不 ACTIVE、整次安装回滚）；页面渲染不再触发状态桥采集，调度器不可用时返回空任务。",
       "v1.0.0": "首个版本：状态桥 URL / 本地状态文件 / 容器内磁盘自检三路降级，磁盘占用、盘温、SMART、容器状态与 UPS 规则，默认试运行，30 分钟冷却。"

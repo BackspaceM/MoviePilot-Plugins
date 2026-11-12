@@ -435,6 +435,351 @@ class TestRendererText(unittest.TestCase):
         self.assertIn("paramiko 不可用", html)
 
 
+PROBE_SAMPLE = """===UGN:meta===
+1000
+Linux
+===UGN:df===
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/sdb1 3907003264 3600000000 307003264 93% /volume1
+tmpfs 8192000 0 8192000 0% /dev/shm
+===UGN:cpu===
+2.40 1.80 1.20 2/500 1234
+4
+===UGN:mem===
+MemTotal:        8192000 kB
+MemAvailable:    2048000 kB
+MemFree:         1000000 kB
+===UGN:docker===
+moviepilot|running|Up 3 days
+qbittorrent|exited|Exited (1) 2 minutes ago
+===UGN:temp===
+/sys/class/hwmon/hwmon0/temp1_input 41000
+/dev/sda 194 Temperature_Celsius 0x0022 100 100 000 Old_age Always - 48 (Min/Max 20/50)
+/dev/nvme0n1 Temperature: 39 Celsius
+===UGN:health===
+/dev/sda SMART overall-health self-assessment test result: FAILED
+===UGN:ups===
+ups battery.charge: 88
+ups ups.status: OL
+===UGN:end===
+"""
+
+
+class TestProbeParsing(unittest.TestCase):
+    def test_all_sections_are_parsed(self):
+        raw, reported = nas.parse_probe(PROBE_SAMPLE, {"_transport": "paramiko"})
+        status = nas.parse_status(raw)
+        self.assertTrue(reported["volumes"])
+        self.assertTrue(reported["cpu"])
+        self.assertTrue(reported["mem"])
+        self.assertTrue(reported["containers"])
+        self.assertTrue(reported["disks"])
+        self.assertTrue(reported["ups"])
+        self.assertEqual(reported["uid"], 1000)
+        self.assertEqual(reported["transport"], "paramiko")
+        self.assertEqual(len(status["volumes"]), 1)
+        self.assertEqual(status["volumes"][0]["name"], "/volume1")
+        self.assertEqual(status["system"]["cpu"], 60.0)
+        self.assertEqual(status["system"]["mem"], 75.0)
+        self.assertEqual(status["ups"]["on_battery"], False)
+        self.assertEqual(status["ups"]["battery"], 88.0)
+
+    def test_disk_temp_and_smart_health(self):
+        _raw, _meta = nas.parse_probe(PROBE_SAMPLE)
+        disks = {d["name"]: d for d in nas.parse_status(_raw)["disks"]}
+        self.assertEqual(disks["hwmon0/temp1"]["temp"], 41.0)
+        self.assertEqual(disks["sda"]["temp"], 48.0)
+        self.assertIs(disks["sda"]["smart_alert"], True)
+        self.assertEqual(disks["sda"]["health"], "异常")
+        self.assertEqual(disks["nvme0n1"]["temp"], 39.0)
+
+    def test_containers_and_probe_schema(self):
+        raw, _meta = nas.parse_probe(PROBE_SAMPLE)
+        containers = nas.parse_status(raw)["containers"]
+        self.assertEqual([c["name"] for c in containers], ["moviepilot", "qbittorrent"])
+        self.assertEqual(containers[1]["status"], "exited")
+        self.assertEqual(containers[1]["restarts"], MISSING)
+
+    def test_old_docker_without_state_field(self):
+        text = ("===UGN:docker===\nmoviepilot||Up 3 days\nqbittorrent||Exited (1) 2 minutes ago\n"
+                "===UGN:end===")
+        raw, _meta = nas.parse_probe(text)
+        containers = nas.parse_status(raw)["containers"]
+        self.assertEqual([c["status"] for c in containers], ["running", "exited"])
+        hits = nas.evaluate(nas.parse_status(raw), cfg(watch_containers=["moviepilot", "qbittorrent"]))
+        hit = next(h for h in hits if h["rule"] == "container_down")
+        self.assertEqual(hit["targets"], ["qbittorrent"])
+
+    def test_empty_or_broken_probe_is_harmless(self):
+        for text in ("", None, "随便一行", "===UGN:df===\nnot a df line\n===UGN:end==="):
+            raw, reported = nas.parse_probe(text)
+            self.assertIsInstance(nas.parse_status(raw), dict)
+            self.assertFalse(reported["volumes"])
+            self.assertFalse(reported["ups"])
+
+    def test_missing_sections_are_marked_not_faked(self):
+        raw, reported = nas.parse_probe("===UGN:df===\n===UGN:end===")
+        self.assertFalse(reported["cpu"])
+        self.assertFalse(reported["containers"])
+        self.assertFalse(reported["ups"])
+        status = nas.parse_status(raw)
+        self.assertEqual(status["ups"]["on_battery"], MISSING)
+        self.assertEqual(status["system"]["cpu"], MISSING)
+
+    def test_ups_on_battery_and_apcaccess(self):
+        text = ("===UGN:ups===\nups ups.status: OB DISCHRG\nups battery.charge: 42\n"
+                "STATUS : ONBATT\nBATTCHG : 41.0 Percent\n===UGN:end===")
+        raw, reported = nas.parse_probe(text)
+        status = nas.parse_status(raw)
+        self.assertTrue(reported["ups"])
+        self.assertIs(status["ups"]["on_battery"], True)
+
+    def test_probe_script_is_one_readonly_command(self):
+        script = nas.probe_script()
+        for marker in ("===UGN:df===", "===UGN:cpu===", "===UGN:mem===",
+                       "===UGN:docker===", "===UGN:temp===", "===UGN:health===",
+                       "===UGN:ups===", "===UGN:end==="):
+            self.assertIn(marker, script)
+        for dangerous in ("rm -rf", "mkfs", "shutdown", "reboot", "dd if="):
+            self.assertNotIn(dangerous, script)
+
+
+class TestTransportAndDiagnostics(unittest.TestCase):
+    def test_paramiko_missing_but_ssh_cli_plus_key_works(self):
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "ssh_cli_state", return_value={"available": True, "path": "/usr/bin/ssh", "reason": ""}):
+            state = nas.transport_state({"ssh_key": "-----BEGIN KEY-----"})
+        self.assertTrue(state["available"])
+        self.assertIn("ssh 命令", state["transport"])
+        self.assertFalse(state["paramiko"])
+
+    def test_paramiko_missing_and_no_key_has_clear_reason(self):
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "ssh_cli_state", return_value={"available": True, "path": "/usr/bin/ssh", "reason": ""}):
+            state = nas.transport_state({})
+        self.assertFalse(state["available"])
+        self.assertIn("paramiko", state["reason"])
+
+    def test_ssh_info_never_leaks_credentials(self):
+        cfg = {"ssh_host": "10.0.0.2", "ssh_password": "S3cr3tPW", "ssh_key": "KEYLINE-secrets"}
+        info = nas.ssh_info(cfg)
+        self.assertNotIn("S3cr3tPW", repr(info))
+        self.assertNotIn("KEYLINE-secrets", repr(info))
+        self.assertEqual(info["host"], "10.0.0.2")
+
+    def test_diagnostics_without_host_does_not_touch_network(self):
+        with patch.object(nas.socket, "create_connection", side_effect=AssertionError("不该联网")):
+            report = nas.ssh_diagnostics({})
+        self.assertFalse(report["ok"])
+        self.assertIn("没填 SSH 地址", report["summary"])
+        self.assertTrue(report["steps"])
+
+    def test_diagnostics_reports_unreachable_port(self):
+        with patch.object(nas.socket, "create_connection", side_effect=OSError("拒绝连接")):
+            report = nas.ssh_diagnostics({"ssh_host": "10.0.0.2"})
+        self.assertFalse(report["ok"])
+        self.assertIn("端口连不上", report["summary"])
+        self.assertFalse(report["steps"][1]["ok"])
+
+    def test_diagnostics_reports_login_failure(self):
+        with patch.object(nas.socket, "create_connection", return_value=None), \
+             patch.object(nas, "transport_state", return_value={
+                 "available": True, "transport": "paramiko", "note": "", "reason": "",
+                 "paramiko": True, "paramiko_reason": "", "cli": False, "password": True}), \
+             patch.object(nas, "_run_remote", return_value=(False, "", "认证失败 S3cr3tPW")):
+            report = nas.ssh_diagnostics({"ssh_host": "10.0.0.2", "ssh_password": "S3cr3tPW"})
+        self.assertFalse(report["ok"])
+        self.assertIn("登录没通过", report["summary"])
+        self.assertNotIn("S3cr3tPW", repr(report))
+        self.assertIn("***", repr(report))
+
+    def test_diagnostics_full_success_lists_sections(self):
+        calls = []
+
+        def fake_run(cfg, command, timeout=None):
+            calls.append(command)
+            if "echo UGN_OK" in command:
+                return True, "UGN_OK\n", ""
+            return True, PROBE_SAMPLE, ""
+
+        with patch.object(nas.socket, "create_connection", return_value=None), \
+             patch.object(nas, "transport_state", return_value={
+                 "available": True, "transport": "paramiko", "note": "", "reason": "",
+                 "paramiko": True, "paramiko_reason": "", "cli": False, "password": True}), \
+             patch.object(nas, "_run_remote", side_effect=fake_run):
+            report = nas.ssh_diagnostics({"ssh_host": "10.0.0.2"})
+        self.assertTrue(report["ok"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("6/6", report["summary"])
+        self.assertTrue(all(report["sections"][k] for k in
+                            ("volumes", "cpu", "mem", "containers", "disks", "ups")))
+
+    def test_read_ssh_sets_error_and_returns_none_when_transport_missing(self):
+        with patch.object(nas, "transport_state", return_value={
+                "available": False, "transport": "", "note": "", "reason": "没装 paramiko",
+                "paramiko": False, "paramiko_reason": nas._PARAMIKO_REASON,
+                "cli": False, "password": False}):
+            self.assertIsNone(nas._read_ssh({"ssh_host": "10.0.0.2"}))
+        self.assertIn("paramiko", nas._LAST_SSH_ERROR["text"])
+
+    def test_read_ssh_returns_full_raw_from_probe(self):
+        with patch.object(nas, "transport_state", return_value={
+                "available": True, "transport": "paramiko", "note": "", "reason": "",
+                "paramiko": True, "paramiko_reason": "", "cli": False, "password": True}), \
+             patch.object(nas, "_run_remote", return_value=(True, PROBE_SAMPLE, "")):
+            raw = nas._read_ssh({"ssh_host": "10.0.0.2"})
+        self.assertIsInstance(raw, dict)
+        self.assertTrue(raw["ugn_probe"]["volumes"])
+        self.assertTrue(raw["disks"])
+
+    def test_collect_exposes_probe_metadata(self):
+        with patch.object(nas, "transport_state", return_value={
+                "available": True, "transport": "paramiko", "note": "", "reason": "",
+                "paramiko": True, "paramiko_reason": "", "cli": False, "password": True}), \
+             patch.object(nas, "_run_remote", return_value=(True, PROBE_SAMPLE, "")):
+            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2"})
+        self.assertEqual(result["source"], "SSH")
+        self.assertTrue(result["ssh"]["used"])
+        self.assertTrue(result["probe"]["volumes"])
+        self.assertEqual(result["status"]["ups"]["on_battery"], False)
+
+
+class TestCommandGuard(unittest.TestCase):
+    def test_safe_commands_allowed(self):
+        for text in ("docker restart qbittorrent", "sudo -n docker restart qbittorrent",
+                     "/volume1/scripts/notify.sh 磁盘满", "logger NAS告警"):
+            ok, reason = nas.validate_command(text)
+            self.assertTrue(ok, f"{text} -> {reason}")
+
+    def test_dangerous_commands_rejected(self):
+        for text in ("rm -rf /", "echo x; reboot", "echo x | sh", "echo x > /tmp/a",
+                     "mkfs.ext4 /dev/sda", "echo $(whoami)", "echo `id`", "echo x && shutdown",
+                     "dd if=/dev/zero of=/dev/sda", "sudo reboot", "echo a\necho b"):
+            ok, _reason = nas.validate_command(text)
+            self.assertFalse(ok, text)
+
+    def test_long_command_rejected(self):
+        self.assertFalse(nas.validate_command("a" * 400)[0])
+
+    def test_container_name_is_whitelisted(self):
+        self.assertEqual(nas.restart_command({}, "qbittorrent"), "docker restart qbittorrent")
+        self.assertEqual(nas.restart_command({"ssh_sudo": True}, "emby"),
+                         "sudo -n docker restart emby")
+        for bad in ("a;rm -rf /", "", "foo bar", "../etc", "a" * 80, None):
+            self.assertEqual(nas.restart_command({}, bad), "")
+
+    def test_invalid_command_is_never_executed(self):
+        with patch.object(nas, "_run_remote", side_effect=AssertionError("不该执行")) as run:
+            result = nas.run_remote_action({}, "rm -rf /")
+        self.assertFalse(result["ok"])
+        self.assertFalse(run.called)
+
+    def test_action_output_is_truncated_and_scrubbed(self):
+        with patch.object(nas, "_run_remote", return_value=(True, "S3cr3tPW" + "x" * 900, "")):
+            result = nas.run_remote_action({"ssh_password": "S3cr3tPW"}, "docker restart qbittorrent")
+        self.assertTrue(result["ok"])
+        self.assertNotIn("S3cr3tPW", repr(result))
+        self.assertLessEqual(len(result["output"]), 300)
+
+
+class TestNewRules(unittest.TestCase):
+    def test_cpu_and_memory_hits(self):
+        status = full(system={"cpu": 96.0, "mem": 97.0})
+        hits = nas.evaluate(status, cfg())
+        self.assertIn("cpu_high", rules(hits))
+        self.assertIn("mem_high", rules(hits))
+        self.assertTrue(all(h["action"] == "notify" for h in hits))
+
+    def test_normal_cpu_and_memory_do_not_hit(self):
+        self.assertNotIn("cpu_high", rules(nas.evaluate(full(), cfg())))
+        self.assertNotIn("mem_high", rules(nas.evaluate(full(), cfg())))
+
+    def test_container_down_has_restart_targets(self):
+        status = full(containers=[{"name": "qbittorrent", "status": "exited"}])
+        hit = next(h for h in nas.evaluate(status, cfg()) if h["rule"] == "container_down")
+        self.assertEqual(hit["targets"], ["qbittorrent"])
+
+    def test_resume_scope_partial_data(self):
+        status = nas.parse_status({"volumes": [{"name": "v", "percent": 40}]})
+        self.assertIn("resume_download", actions(nas.evaluate(status, cfg(resume_scope="已上报"))))
+        self.assertIn("no_data", rules(nas.evaluate(status, cfg())))
+        self.assertNotIn("resume_download", actions(nas.evaluate(status, cfg(resume_scope="严格"))))
+
+    def test_resume_scope_never_resumes_with_no_data(self):
+        self.assertNotIn("resume_download",
+                         actions(nas.evaluate(nas.parse_status({}), cfg(resume_scope="已上报"))))
+
+    def test_custom_cpu_threshold(self):
+        status = full(system={"cpu": 70.0, "mem": 20.0})
+        self.assertIn("cpu_high", rules(nas.evaluate(status, cfg(cpu_threshold=60))))
+        self.assertNotIn("cpu_high", rules(nas.evaluate(status, cfg(cpu_threshold=90))))
+
+
+class TestNewRenderBlocks(unittest.TestCase):
+    def _view(self, **overrides):
+        data = {
+            "generated_at": "2026-11-12 10:00:00",
+            "status": full(),
+            "hits": [],
+            "source": "SSH",
+            "services": None,
+            "ssh": {"available": True, "reason": "", "transport": "paramiko",
+                    "transport_note": "", "paramiko": True, "host": "10.0.0.2",
+                    "used": True, "note": ""},
+            "probe": {"volumes": True, "cpu": True, "mem": True,
+                      "containers": True, "disks": False, "ups": False},
+            "source_mode": "SSH",
+            "log": [],
+            "series": [{"time": "10:00:0%d" % i, "volume": 40 + i, "cpu": 20 + i,
+                        "mem": 45 + i, "temp": 40, "alerts": 0} for i in range(4)],
+            "ssh_test": {"ok": True, "checked_at": "10:00:00", "summary": "连接正常",
+                         "hint": "没读到的段落标未上报",
+                         "steps": [{"name": "登录", "ok": True, "detail": "<img src=x onerror=alert(1)>"}]},
+            "age_seconds": 4,
+            "poll_seconds": 30,
+            "paused": False,
+            "mode": "试运行",
+            "cfg": {"water_threshold": 88, "temp_threshold": 52, "watch_containers": []},
+            "cooldown": 1800,
+            "actions": {"mode": "试运行", "allow_remote_action": False,
+                        "restart_containers": False, "alert_command": "", "resume_scope": "已上报"},
+        }
+        data.update(overrides)
+        return data
+
+    def test_live_block_has_sparkline_and_samples(self):
+        html = renderer.render(self._view())
+        self.assertIn("<svg", html)
+        self.assertIn("实时巡检", html)
+        self.assertIn("后台巡检正常", html)
+        self.assertIn("4 帧", html)
+
+    def test_stale_data_is_flagged(self):
+        self.assertIn("采集可能停了", renderer.render(self._view(age_seconds=999)))
+
+    def test_ssh_test_detail_is_escaped(self):
+        html = renderer.render(self._view())
+        self.assertNotIn("<img src=x onerror=alert(1)>", html)
+        self.assertIn("&lt;img", html)
+        self.assertIn("分步诊断", html)
+
+    def test_actions_block_escapes_command(self):
+        dirty = "<img src=x onerror=alert(1)>"
+        actions = self._view()["actions"]
+        actions = dict(actions, alert_command=dirty, allow_remote_action=True)
+        html = renderer.render(self._view(actions=actions))
+        self.assertNotIn(dirty, html)
+        self.assertIn("&lt;img", html)
+        self.assertIn("已开启", html)
+
+    def test_full_page_has_no_script_no_ai_words_no_water(self):
+        html = renderer.render(self._view())
+        for marker in ("<script", "onclick=", "onload=", "javascript:", "AI", "水位", "智能赋能"):
+            self.assertNotIn(marker, html, marker)
+        for section in ("实时巡检", "SSH 连接", "自动处置", "当前命中", "最近动作"):
+            self.assertIn(section, html)
+
+
 def main():
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
