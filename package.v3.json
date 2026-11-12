@@ -359,5 +359,53 @@
       "v1.1.0": "新增批量导入：可上传 .rsc 文件、粘贴规则文本或填容器内路径，解析后逐条展示中文含义与风险提示，确认后一次性批量写入 RouterOS；详情页卡片分区与按钮分组美化；修复按钮 API 路径导致的 404。",
       "v1.0.0": "首个版本：RouterOS 防火墙可视化管理器。(1) 读取 filter/nat/mangle/raw 四表全部规则并按执行顺序展示；(2) 自动检测影子规则(放行被兜底 drop 遮挡)、被架空的拒绝规则、重复规则、缺失兜底 drop 四类隐患；(3) 逐条启用/禁用/上移/下移/置顶/置底/删除，破坏性操作二次确认；(4) 配置页表单新增规则，默认插到兜底 drop 之前避免变成死规则，可置顶/置底/指定位置；(5) 改动前自动在 RouterOS 执行 /system/backup/save 留后路，规则快照存 MP；(6) cron 定时扫描 + MP 分级通知 + 远程命令；(7) 详情页每个按钮绑定真实 API、无禁用按钮，所有动态文本全角转义杜绝 Markdown 空药丸。定位为管理器，绝不批量删除用户真实规则。"
     }
+  },
+  "SingleSourceTracker": {
+    "name": "单源追剧",
+    "description": "一条剧集订阅只从一个站下：绑定时把订阅的站点范围写成单站，解除绑定会还原原来的范围。同时记下第一集标题里的画质标记，后面每一集都对一遍杜比视界 / HDR、H.264 / H.265、帧率、高码、分辨率与来源，来源或画质混了就列成清单。标题没写的维度只作提示，不算冲突。默认只提醒，可选自动移除冲突的下载任务，不碰媒体库文件。",
+    "labels": "订阅,单站点,站点锁定,画质一致,杜比视界,HDR,追剧,下载",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/singlesourcetracker.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：绑定表存插件数据目录，绑定时记下订阅原有 sites，再用 SubscribeOper 单字段写回单站；画质基线取该订阅最近一条下载记录的标题解析结果，巡检按剧名和季集关联下载历史，逐条比对站点与画质指纹。支持逐剧绑定 / 解除、批量锁定、重取基线、二次确认清理；注册 DownloadAdded 事件与 /single_source 命令，巡检间隔可选。响应模型用 Pydantic BaseModel，按钮路径与方法已纳入全仓 API 契约校验。"
+    }
+  },
+  "MPBackup": {
+    "name": "MP 备份迁移",
+    "description": "把 MoviePilot 里能读到的东西打成一个 zip：订阅、下载与整理历史、站点、媒体服务器 / 下载器配置、插件清单和插件数据。Cookie、Token 一类字段统一脱敏。支持定时备份、保留份数轮转、两份快照的配置漂移对比，以及一份写清楚恢复顺序的清单；只导出，不写回数据库。",
+    "labels": "备份,迁移,快照,脱敏,配置漂移,恢复清单,cron",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/mpbackup.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：宿主 SDK 一律延迟导入，任一来源读不到就在 manifest 里记 unavailable，不中断打包；zip 内含 manifest 与分项 JSON，敏感键递归替换为 ***，站点只留名称与域名。快照按 mpbackup_*.zip 命名并轮转，删除只认本插件产物；漂移对比覆盖订阅 / 站点 / 服务 / 插件的新增删除与字段变化；恢复清单只给步骤不动数据库。详情页含快照列表与差异表，设置页六项。"
+    }
+  },
+  "UGreenGuard": {
+    "name": "绿联 NAS 守护",
+    "description": "绿联 NAS 的开放 CLI 是 protobuf 网关，插件不直连，改由一个只读状态桥提供 JSON；没配桥就用容器内磁盘自检兜底。按存储水位、盘温、SMART、容器状态和 UPS 盯住下载：超阈值可暂停下载器任务，恢复正常后再恢复；默认试运行，只记动作不改动任何任务。",
+    "labels": "绿联NAS,状态桥,磁盘水位,温度,UPS,容器,暂停下载,守护",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：三条采集路径自动降级（状态桥 URL / 本地状态文件 / shutil.disk_usage 容器自检），缺字段一律标未上报，绝不把查不到当正常；规则引擎是纯函数，命中水位、温度、SMART、容器异常与市电中断，同类动作 30 分钟冷却。暂停 / 恢复通过 DownloaderHelper 容错探测下载器方法，不支持时仅告警；动作日志持久化，详情页给出状态桥 JSON 示例。"
+    }
   }
 }
