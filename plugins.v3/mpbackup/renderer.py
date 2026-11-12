@@ -70,7 +70,7 @@ _SECTION_NAMES = {
     "subscriptions": "订阅", "download_history": "下载历史", "transfer_history": "整理历史",
     "sites": "站点", "services": "服务", "plugin_data": "插件数据", "users": "用户",
     "subscription_history": "订阅历史", "system_config": "系统配置",
-    "plugin_configs": "插件配置",
+    "plugin_configs": "插件配置", "settings": "关键目录设置", "plugins": "插件清单",
 }
 
 _IMPORT_NOTICE = (
@@ -141,11 +141,26 @@ def _snapshots_block(data: Dict[str, Any]) -> str:
         body = ('<div class="mpbk-scroll"><table class="mpbk-table"><thead><tr>'
                 '<th>文件名</th><th>大小</th><th>条目数</th><th>生成时间</th></tr></thead><tbody>'
                 + trs + "</tbody></table></div>")
-    note = f'共 {len(rows)} 份' if rows else ""
+    note = f'共 {len(rows)} 份 · 累计已备份 {data.get("backup_count", 0)} 次'
     return ('<div class="mpbk-section"><div class="mpbk-card">'
             '<div class="mpbk-sec-title">快照列表'
             f'<span class="mpbk-sec-note">{_e(note)}</span></div>'
             + body + "</div></div>")
+
+
+def _delete_plan_block(data: Dict[str, Any]) -> str:
+    plan = data.get("delete_plan")
+    if not isinstance(plan, dict):
+        return ""
+    name = str(plan.get("name") or "")
+    if not name:
+        return ""
+    return ('<div class="mpbk-section"><div class="mpbk-card">'
+            '<div class="mpbk-sec-title">待确认删除'
+            '<span class="mpbk-sec-note">10 分钟内有效</span></div>'
+            f'<div class="mpbk-note">要删的是 <b>{_e(name)}</b>。'
+            '再点一次详情页里的「确认删除」，才会真的从备份目录删掉；'
+            '不点就啥事没有，过期自动作废。</div></div></div>')
 
 
 def _diff_block(data: Dict[str, Any]) -> str:
@@ -293,8 +308,13 @@ def render(data: Dict[str, Any]) -> str:
     totals = (diff or {}).get("totals") or {}
     changed = totals.get("added", 0) + totals.get("removed", 0) + totals.get("changed", 0)
     hint = (diff or {}).get("summary") if diff else "还没有对比结果"
+    count = data.get("backup_count", 0)
+    last = str(data.get("last_backup_at") or "").strip()
     kpis = [
         _kpi("快照份数", len(snapshots), "保存在备份目录", "box"),
+        _kpi("已备份", f"{count} 次", "累计成功备份", "disk"),
+        _kpi("最近一次备份", last[5:10] if last else "—",
+             last or "还没有成功备份过", "clock"),
         _kpi("占用空间", data.get("total_size_text") or "—", "所有快照合计", "disk"),
         _kpi("保留份数", data.get("keep", 7), "超出的旧快照会自动清掉", "clock"),
         _kpi("最近变更", changed, hint, "swap"),
@@ -317,6 +337,7 @@ def render(data: Dict[str, Any]) -> str:
         '<div class="mpbk-grid">' + "".join(kpis) + "</div>",
         _status_block(data),
         _snapshots_block(data),
+        _delete_plan_block(data),
         _import_notice_block(data),
         _preview_block(data),
         _restore_block(data),

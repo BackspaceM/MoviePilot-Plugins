@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import secrets
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,7 +44,7 @@ class MPBackup(_PluginBase):
         "导入默认试运行，确认后才写回。敏感字段默认打码，站点凭据可按需含明文导出。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/mpbackup.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "mpbackup_"
@@ -51,6 +53,7 @@ class MPBackup(_PluginBase):
     plugin_order = 95
 
     CLEAN_CONFIRM = backup.CLEAN_CONFIRM
+    DELETE_CONFIRM = backup.DELETE_CONFIRM
 
     def __init__(self) -> None:
         super().__init__()
@@ -68,6 +71,9 @@ class MPBackup(_PluginBase):
         self._last_preview: Optional[Dict[str, Any]] = None
         self._last_restore: Optional[Dict[str, Any]] = None
         self._import_guide: Optional[str] = None
+        self._backup_count = 0
+        self._last_backup_at = ""
+        self._delete_plan: Optional[Dict[str, Any]] = None
         # 页面渲染期只读这份缓存，不碰宿主 SDK、文件和网络
         self._cache: Dict[str, Any] = self._empty_state()
 
@@ -93,6 +99,9 @@ class MPBackup(_PluginBase):
             "preview": self._last_preview,
             "restore": self._last_restore,
             "import_guide": self._import_guide,
+            "backup_count": self._backup_count,
+            "last_backup_at": self._last_backup_at,
+            "delete_plan": self._delete_plan,
         }
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -111,6 +120,9 @@ class MPBackup(_PluginBase):
         self._last_preview = None
         self._last_restore = None
         self._import_guide = None
+        self._backup_count = self._read_count()
+        self._last_backup_at = self._read_last_backup()
+        self._delete_plan = self._read_plan()
         self._cache = self._empty_state()
 
     def get_state(self) -> bool:
@@ -158,7 +170,9 @@ class MPBackup(_PluginBase):
             {"component": "VTextField", "props": {
                 "model": "backup_dir", "label": "备份目录",
                 "placeholder": "留空用插件数据目录 /backups", "clearable": True,
-                "hint": "想存到别的挂载目录就填绝对路径，留空即可", "persistentHint": True,
+                "hint": "填 MoviePilot 容器里能看到的路径，比如 NAS 映射到容器的目录；"
+                        "留空用插件数据目录；相对路径按插件数据目录算，路径不存在会自动建",
+                "persistentHint": True,
             }},
             {"component": "VSelect", "props": {
                 "model": "keep", "label": "保留份数",
@@ -176,7 +190,8 @@ class MPBackup(_PluginBase):
             }},
             {"component": "VSelect", "props": {
                 "model": "sections", "label": "备份内容", "multiple": True,
-                "items": section_items, "hint": "默认全开；下载和整理历史各最多 5000 条",
+                "items": section_items,
+                "hint": "默认全选，没勾的不写进快照、在清单里标跳过；下载和整理历史各最多 5000 条",
             }},
             {"component": "VSwitch", "props": {
                 "model": "notify", "label": "结果通知", "color": "primary",
@@ -218,17 +233,25 @@ class MPBackup(_PluginBase):
              "methods": ["POST"], "summary": "导入迁移（默认试运行，确认口令后写回）"},
             {"path": "/import-guide", "auth": "bear", "endpoint": self.api_import_guide,
              "methods": ["POST"], "summary": "查看导入须知与当前冲突策略"},
+            {"path": "/delete", "auth": "bear", "endpoint": self.api_delete,
+             "methods": ["POST"], "summary": "删除某份快照（两段式确认）"},
         ]
 
     def _backup_path(self) -> Path:
-        if self._backup_dir:
-            directory = Path(self._backup_dir)
+        raw = str(self._backup_dir or "").strip()
+        if raw:
+            directory = Path(raw)
+            # 相对路径按插件数据目录算，免得容器里 cwd 一飘就找不到地方
+            if not directory.is_absolute():
+                directory = Path(str(self.get_data_path())) / directory
         else:
             directory = Path(str(self.get_data_path())) / "backups"
         try:
             directory.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+        except Exception as err:
+            raise RuntimeError(
+                f"备份目录建不起来：{directory}（{type(err).__name__}: {err}）。"
+                "检查容器里这个路径有没有挂载、有没有写权限") from err
         return directory
 
     def _send_notice(self, title: str, text: str, force: bool = False) -> None:
@@ -239,13 +262,119 @@ class MPBackup(_PluginBase):
         except Exception:
             pass
 
-    def _do_backup(self) -> Dict[str, Any]:
-        directory = self._backup_path()
+    def _read_count(self) -> int:
         try:
+            return max(0, int(self.get_data(backup.BACKUP_COUNT_KEY, 0) or 0))
+        except Exception:
+            return 0
+
+    def _read_last_backup(self) -> str:
+        try:
+            return str(self.get_data(backup.LAST_BACKUP_KEY, "") or "")
+        except Exception:
+            return ""
+
+    def _plan_if_fresh(self, plan: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(plan, dict):
+            return None
+        if not plan.get("plan_id") or not plan.get("name"):
+            return None
+        try:
+            if float(plan.get("expires_at") or 0) <= time.time():
+                return None
+        except (TypeError, ValueError):
+            return None
+        return plan
+
+    def _read_plan(self) -> Optional[Dict[str, Any]]:
+        try:
+            plan = self.get_data(backup.DELETE_PLAN_KEY, None)
+        except Exception:
+            return None
+        return self._plan_if_fresh(plan)
+
+    def _pending_plan(self) -> Optional[Dict[str, Any]]:
+        # 真正删之前以插件数据里的计划为准，过期顺手清掉
+        try:
+            plan = self.get_data(backup.DELETE_PLAN_KEY, None)
+        except Exception:
+            plan = None
+        fresh = self._plan_if_fresh(plan)
+        if fresh is None and plan is not None:
+            self._clear_plan()
+        return fresh
+
+    def _clear_plan(self) -> None:
+        self._delete_plan = None
+        try:
+            self.del_data(backup.DELETE_PLAN_KEY)
+        except Exception:
+            pass
+
+    def _bump_count(self) -> None:
+        self._backup_count += 1
+        self._last_backup_at = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self.save_data(backup.BACKUP_COUNT_KEY, self._backup_count)
+            self.save_data(backup.LAST_BACKUP_KEY, self._last_backup_at)
+        except Exception:
+            pass
+
+    def _err(self, action: str, err: Exception) -> Response:
+        return Response(success=False,
+                        message=f"{action}失败：{type(err).__name__}: {err}",
+                        data={"html": self._render()})
+
+    def _deletable_snapshot(self, name: str) -> Tuple[Optional[Path], str]:
+        try:
+            return backup.resolve_delete_target(self._backup_path(), name)
+        except Exception as err:
+            return None, f"备份目录读不了：{type(err).__name__}: {err}"
+
+    def _confirm_delete(self, name: str, plan_id: str, confirm: str) -> Response:
+        plan = self._pending_plan()
+        if plan is None:
+            self._delete_plan = None
+            self._collect_state()
+            return Response(success=False,
+                            message="没有待确认的删除计划，或者已经过期了，回去重新点「删除」。",
+                            data={"html": self._render()})
+        if plan_id != str(plan.get("plan_id") or ""):
+            self._collect_state()
+            return Response(success=False, message="删除计划的编号对不上，请重新点「删除」。",
+                            data={"html": self._render()})
+        if name != str(plan.get("name") or ""):
+            self._collect_state()
+            return Response(success=False, message="要删的文件名和计划里对不上，请重新点「删除」。",
+                            data={"html": self._render()})
+        if confirm != self.DELETE_CONFIRM:
+            self._collect_state()
+            return Response(success=False,
+                            message=f"确认口令不对，要填「{self.DELETE_CONFIRM}」才会真删，没动任何文件。",
+                            data={"html": self._render()})
+        target, why = self._deletable_snapshot(str(plan.get("name") or ""))
+        if target is None:
+            self._clear_plan()
+            self._collect_state()
+            return Response(success=False, message=why, data={"html": self._render()})
+        result = backup.delete_snapshot(self._backup_path(), target.name)
+        if not result["ok"]:
+            self._collect_state()
+            return Response(success=False, message=result["message"],
+                            data={"html": self._render()})
+        self._clear_plan()
+        self._collect_state()
+        return Response(success=True, message=result["message"],
+                        data={"removed": result["file"], "html": self._render()})
+
+    def _do_backup(self) -> Dict[str, Any]:
+        try:
+            directory = self._backup_path()
             result = backup.write_snapshot(
                 directory, str(self.get_data_path()), self._sections,
                 self._keep, self._include_secrets)
             rotated = backup.rotate(directory, self._keep)
+            self._bump_count()
             self._send_notice("MP 备份迁移",
                               f"已生成 {result['file']}，顺手清掉 {len(rotated)} 份旧快照。")
             result["rotated"] = rotated
@@ -310,11 +439,17 @@ class MPBackup(_PluginBase):
             "preview": self._last_preview,
             "restore": self._last_restore,
             "import_guide": self._import_guide,
+            "backup_count": self._backup_count,
+            "last_backup_at": self._last_backup_at,
+            "delete_plan": self._delete_plan,
         }
         return self._cache
 
     def _render(self) -> str:
-        return renderer.render(self._cache)
+        try:
+            return renderer.render(self._cache)
+        except Exception:  # noqa: BLE001
+            return '<div class="mpbk">MP 备份迁移 · 页面暂时刷不出来</div>'
 
     def _valid_snapshot(self, name: str) -> Optional[Path]:
         if not name:
@@ -334,111 +469,176 @@ class MPBackup(_PluginBase):
         return list(restore.IMPORT_SECTIONS)
 
     def api_snapshot(self) -> Response:
-        state = self._collect_state()
-        return Response(success=True, data={
-            "status": {
-                "enabled": state["enabled"], "backup_dir": state["backup_dir"],
-                "cron": state["cron"], "keep": state["keep"], "sources": state["sources"],
-            },
-            "snapshots": state["snapshots"],
-            "diff": state["diff"],
-            "html": renderer.render(state),
-        })
+        try:
+            state = self._collect_state()
+            return Response(success=True, data={
+                "status": {
+                    "enabled": state["enabled"], "backup_dir": state["backup_dir"],
+                    "cron": state["cron"], "keep": state["keep"], "sources": state["sources"],
+                },
+                "snapshots": state["snapshots"],
+                "diff": state["diff"],
+                "html": renderer.render(state),
+            })
+        except Exception as err:  # noqa: BLE001
+            return self._err("读取状态", err)
 
     def api_backup(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        result = self._do_backup()
-        self._collect_state()
-        if not result.get("ok"):
-            return Response(success=False, message=result["message"], data={"html": self._render()})
-        return Response(
-            success=True,
-            message=f"已生成 {result['file']}，清理旧快照 {len(result.get('rotated', []))} 份",
-            data={"file": result["file"], "manifest": result["manifest"],
-                  "rotated": result.get("rotated", []), "html": self._render()},
-        )
+        try:
+            result = self._do_backup()
+            self._collect_state()
+            if not result.get("ok"):
+                return Response(success=False, message=result["message"],
+                                data={"html": self._render()})
+            return Response(
+                success=True,
+                message=f"已生成 {result['file']}，清理旧快照 {len(result.get('rotated', []))} 份",
+                data={"file": result["file"], "manifest": result["manifest"],
+                      "rotated": result.get("rotated", []), "html": self._render()},
+            )
+        except Exception as err:  # noqa: BLE001
+            return self._err("备份", err)
 
     def api_compare(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        body = payload if isinstance(payload, dict) else {}
-        result = backup.compare_snapshots(
-            self._backup_path(),
-            str(body.get("a") or "").strip() or None,
-            str(body.get("b") or "").strip() or None,
-        )
-        if not result["ok"]:
+        try:
+            body = payload if isinstance(payload, dict) else {}
+            result = backup.compare_snapshots(
+                self._backup_path(),
+                str(body.get("a") or "").strip() or None,
+                str(body.get("b") or "").strip() or None,
+            )
+            if not result["ok"]:
+                self._collect_state()
+                return Response(success=False, message=result["message"],
+                                data={"html": self._render()})
+            self._last_diff = result
             self._collect_state()
-            return Response(success=False, message=result["message"], data={"html": self._render()})
-        self._last_diff = result
-        self._collect_state()
-        return Response(success=True, message=result["message"],
-                        data={"a": result["a"], "b": result["b"], "diff": result["diff"],
-                              "html": self._render()})
+            return Response(success=True, message=result["message"],
+                            data={"a": result["a"], "b": result["b"], "diff": result["diff"],
+                                  "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("对比", err)
 
     def api_restore_guide(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        name, text = backup.restore_guide(self._backup_path())
-        self._last_guide = text
-        self._collect_state()
-        return Response(success=True, message=f"已生成 {name}",
-                        data={"file": name, "text": text, "html": self._render()})
+        try:
+            name, text = backup.restore_guide(self._backup_path())
+            self._last_guide = text
+            self._collect_state()
+            return Response(success=True, message=f"已生成 {name}",
+                            data={"file": name, "text": text, "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("生成恢复清单", err)
 
     def api_clean(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        body = payload if isinstance(payload, dict) else {}
-        result = backup.clean_snapshots(self._backup_path(), self._keep,
-                                        str(body.get("confirm") or ""))
-        self._collect_state()
-        return Response(success=bool(result["ok"]), message=result["message"],
-                        data={"removed": result.get("removed", []), "html": self._render()})
+        try:
+            body = payload if isinstance(payload, dict) else {}
+            result = backup.clean_snapshots(self._backup_path(), self._keep,
+                                            str(body.get("confirm") or ""))
+            self._collect_state()
+            return Response(success=bool(result["ok"]), message=result["message"],
+                            data={"removed": result.get("removed", []), "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("清理旧快照", err)
 
     def api_refresh(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        self._collect_state()
-        return Response(success=True, message="已刷新",
-                        data={"snapshots": self._cache["snapshots"], "diff": self._cache["diff"],
-                              "html": self._render()})
+        try:
+            self._collect_state()
+            return Response(success=True, message="已刷新",
+                            data={"snapshots": self._cache["snapshots"],
+                                  "diff": self._cache["diff"], "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("刷新", err)
 
     def api_import_preview(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        body = payload if isinstance(payload, dict) else {}
-        name = str(body.get("name") or "").strip()
-        if not name:
-            snaps = backup.list_snapshots(self._backup_path())
-            name = snaps[0]["name"] if snaps else ""
-        path = self._valid_snapshot(name)
-        if path is None:
+        try:
+            body = payload if isinstance(payload, dict) else {}
+            name = str(body.get("name") or "").strip()
+            if not name:
+                snaps = backup.list_snapshots(self._backup_path())
+                name = snaps[0]["name"] if snaps else ""
+            path = self._valid_snapshot(name)
+            if path is None:
+                self._collect_state()
+                return Response(success=False, message="找不到这份快照，先备份或检查文件名",
+                                data={"html": self._render()})
+            result = restore.preview(path, self._payload_sections(body))
+            self._last_preview = result
             self._collect_state()
-            return Response(success=False, message="找不到这份快照，先备份或检查文件名",
-                            data={"html": self._render()})
-        result = restore.preview(path, self._payload_sections(body))
-        self._last_preview = result
-        self._collect_state()
-        return Response(success=bool(result["ok"]), message=result["message"],
-                        data={"preview": result, "html": self._render()})
+            return Response(success=bool(result["ok"]), message=result["message"],
+                            data={"preview": result, "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("导入预览", err)
 
     def api_import(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        body = payload if isinstance(payload, dict) else {}
-        name = str(body.get("name") or "").strip()
-        if not name:
-            snaps = backup.list_snapshots(self._backup_path())
-            name = snaps[0]["name"] if snaps else ""
-        path = self._valid_snapshot(name)
-        if path is None:
+        try:
+            body = payload if isinstance(payload, dict) else {}
+            name = str(body.get("name") or "").strip()
+            if not name:
+                snaps = backup.list_snapshots(self._backup_path())
+                name = snaps[0]["name"] if snaps else ""
+            path = self._valid_snapshot(name)
+            if path is None:
+                self._collect_state()
+                return Response(success=False, message="找不到这份快照，先备份或检查文件名",
+                                data={"html": self._render()})
+            strategy = str(body.get("strategy") or self._strategy)
+            if strategy not in ("skip", "overwrite"):
+                strategy = "skip"
+            dry_run = bool(body.get("dry_run", True))
+            confirm = str(body.get("confirm") or "")
+            result = restore.restore(path, self._payload_sections(body),
+                                     strategy, dry_run, confirm)
+            self._last_restore = result
             self._collect_state()
-            return Response(success=False, message="找不到这份快照，先备份或检查文件名",
-                            data={"html": self._render()})
-        strategy = str(body.get("strategy") or self._strategy)
-        if strategy not in ("skip", "overwrite"):
-            strategy = "skip"
-        dry_run = bool(body.get("dry_run", True))
-        confirm = str(body.get("confirm") or "")
-        result = restore.restore(path, self._payload_sections(body),
-                                 strategy, dry_run, confirm)
-        self._last_restore = result
-        self._collect_state()
-        return Response(success=bool(result["ok"]), message=result["message"],
-                        data={"restore": result, "html": self._render()})
+            return Response(success=bool(result["ok"]), message=result["message"],
+                            data={"restore": result, "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("导入", err)
 
     def api_import_guide(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
-        self._import_guide = restore.import_guide(self._strategy)
-        self._collect_state()
-        return Response(success=True, message="导入说明已更新",
-                        data={"text": self._import_guide, "html": self._render()})
+        try:
+            self._import_guide = restore.import_guide(self._strategy)
+            self._collect_state()
+            return Response(success=True, message="导入说明已更新",
+                            data={"text": self._import_guide, "html": self._render()})
+        except Exception as err:  # noqa: BLE001
+            return self._err("导入说明", err)
+
+    def api_delete(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        try:
+            body = payload if isinstance(payload, dict) else {}
+            name = str(body.get("name") or "")
+            plan_id = str(body.get("plan_id") or "")
+            confirm = str(body.get("confirm") or "")
+            # 带了 plan_id 或 confirm 就当第二步，校验全过才真删
+            if plan_id or confirm:
+                return self._confirm_delete(name, plan_id, confirm)
+            target, why = self._deletable_snapshot(name)
+            if target is None:
+                self._collect_state()
+                return Response(success=False, message=why, data={"html": self._render()})
+            plan = {
+                "plan_id": secrets.token_hex(12),
+                "name": target.name,
+                "expires_at": time.time() + backup.DELETE_PLAN_TTL,
+            }
+            try:
+                self.save_data(backup.DELETE_PLAN_KEY, plan)
+            except Exception as err:
+                return Response(success=False,
+                                message=f"删除计划存不下来：{type(err).__name__}: {err}",
+                                data={"html": self._render()})
+            self._delete_plan = plan
+            self._collect_state()
+            return Response(
+                success=True,
+                message=f"要删 {target.name} 吗？再点一次「确认删除 {target.name}」才会真删，"
+                        f"计划 {backup.DELETE_PLAN_TTL // 60} 分钟内有效。",
+                data={"plan_id": plan["plan_id"], "name": target.name,
+                      "confirm": self.DELETE_CONFIRM, "html": self._render()},
+            )
+        except Exception as err:  # noqa: BLE001
+            return self._err("删除", err)
 
     def get_page(self) -> List[Dict[str, Any]]:
         try:
@@ -517,14 +717,46 @@ class MPBackup(_PluginBase):
                      "props": {"color": "warning", "variant": "tonal", "class": "mb-2"},
                      "events": {"click": {"api": "plugin/MPBackup/import",
                                           "method": "post", "params": run_params}}},
+                    {"component": "VBtn", "text": "删除",
+                     "props": {"color": "error", "variant": "text", "class": "mb-2"},
+                     "events": {"click": {"api": "plugin/MPBackup/delete",
+                                          "method": "post", "params": {"name": name}}}},
                 ],
             })
 
-        return [
+        confirm_cols: List[Dict[str, Any]] = []
+        plan = self._delete_plan
+        if isinstance(plan, dict) and plan.get("plan_id") and plan.get("name"):
+            try:
+                fresh = float(plan.get("expires_at") or 0) > time.time()
+            except (TypeError, ValueError):
+                fresh = False
+            if fresh:
+                target_name = str(plan.get("name") or "")
+                confirm_cols.append({
+                    "component": "VCol", "props": {"cols": 12},
+                    "content": [
+                        {"component": "VAlert", "text": html.escape(
+                            "待确认删除 " + target_name + "，再点右边才会真删，10 分钟内有效"),
+                         "props": {"type": "warning", "variant": "tonal", "density": "compact"}},
+                        {"component": "VBtn", "text": f"确认删除 {target_name}",
+                         "props": {"color": "error", "variant": "tonal", "class": "mt-2"},
+                         "events": {"click": {
+                             "api": "plugin/MPBackup/delete", "method": "post",
+                             "params": {"plan_id": str(plan.get("plan_id") or ""),
+                                        "name": target_name,
+                                        "confirm": self.DELETE_CONFIRM}}}},
+                    ],
+                })
+
+        page = [
             {"component": "VRow", "content": top_cols},
             {"component": "VRow", "content": import_cols},
-            {"component": "div", "html": renderer.render(state)},
+            {"component": "div", "html": self._render()},
         ]
+        if confirm_cols:
+            page.insert(1, {"component": "VRow", "content": confirm_cols})
+        return page
 
     def get_service(self) -> List[Dict[str, Any]]:
         if not self.get_state():

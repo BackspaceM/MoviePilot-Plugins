@@ -51,7 +51,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self):
         self.assertEqual(PLUGIN_ID, "UGreenGuard")
         self.assertEqual(PLUGIN_CLS.plugin_name, "绿联 NAS 守护")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.0.1")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.1.0")
         self.assertEqual(PLUGIN_CLS.plugin_author, "BackspaceM")
         self.assertEqual(PLUGIN_CLS.plugin_config_prefix, "ugreenguard_")
         self.assertEqual(PLUGIN_CLS.plugin_color, "#6366F1")
@@ -59,12 +59,18 @@ class TestContract(unittest.TestCase):
         self.assertEqual(PLUGIN_CLS.plugin_order, 96)
         self.assertTrue(PLUGIN_CLS.plugin_icon.endswith("icons/ugreenguard.png"))
 
-    def test_response_is_pydantic_model(self):
+    def test_six_abstract_methods_kept(self):
+        for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service"):
+            self.assertTrue(callable(getattr(PLUGIN_CLS, name, None)), name)
+
+    def test_response_is_pydantic_model_with_strict_three_keys(self):
         from pydantic import BaseModel
 
         self.assertTrue(issubclass(MODULE.Response, BaseModel))
-        for field in ("success", "message", "data"):
-            self.assertIn(field, MODULE.Response.model_fields)
+        self.assertEqual(set(MODULE.Response.model_fields), {"success", "message", "data"})
+        result = MODULE.Response(success=False, message="具体原因：xxx", data=None)
+        self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
+        self.assertIsInstance(result.message, str)
 
     def test_all_api_routes_can_register_in_fastapi(self):
         from fastapi import FastAPI
@@ -74,6 +80,7 @@ class TestContract(unittest.TestCase):
         for api in self.plugin.get_api():
             self.assertEqual(api.get("auth"), "bear")
             self.assertTrue(str(api["path"]).startswith("/"))
+            self.assertTrue(callable(api["endpoint"]))
             route = dict(api)
             route.pop("auth", None)
             route.pop("allow_anonymous", None)
@@ -97,16 +104,101 @@ class TestContract(unittest.TestCase):
             self.assertIn(action, declared, click["api"])
             self.assertIn(click["method"].upper(), declared[action], click["api"])
 
+    def test_button_text_is_toplevel_and_no_click_confirm(self):
+        for item in self.plugin.get_page():
+            if item.get("component") != "VBtn":
+                continue
+            self.assertIsInstance(item.get("text"), str)
+            self.assertNotIn("text", item.get("props", {}))
+            click = (item.get("events") or {}).get("click") or {}
+            # 详情页忽略 events.click.confirm，二次确认不能靠它
+            self.assertNotIn("confirm", click)
+        # 口令走 params，后端还会校验
+        clear_btn = next(i for i in self.plugin.get_page()
+                         if i.get("component") == "VBtn" and i.get("text") == "清空日志")
+        self.assertEqual(clear_btn["events"]["click"]["params"], {"confirm": "yes"})
+
     def test_api_returns_three_part_envelope(self):
         for name in ("api_snapshot", "api_check", "api_refresh", "api_resume", "api_clear"):
             result = getattr(self.plugin, name)()
+            self.assertIsInstance(result, MODULE.Response)
             self.assertIsInstance(result.success, bool)
             self.assertIsInstance(result.message, str)
-        self.assertFalse(self.plugin.api_clear().success, "没确认时不该清空")
-        self.assertTrue(self.plugin.api_clear(confirm="yes").success)
+            self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
         snap = self.plugin.api_snapshot()
-        for key in ("status", "hits", "log", "source", "mode"):
+        for key in ("status", "hits", "log", "source", "mode", "ssh", "source_mode"):
             self.assertIn(key, snap.data)
+
+
+class TestEndpointErrors(unittest.TestCase):
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+
+    def test_every_endpoint_catches_exception_and_never_raises(self):
+        cases = [
+            ("api_snapshot", "_view", {}),
+            ("api_check", "run_check", {}),
+            ("api_resume", "_call_downloaders", {}),
+            ("api_refresh", "_refresh_view", {}),
+            ("api_clear", "save_data", {"confirm": "yes"}),
+        ]
+        for name, broken, kwargs in cases:
+            with self.subTest(endpoint=name):
+                with patch.object(self.plugin, broken, side_effect=RuntimeError("炸了")):
+                    result = getattr(self.plugin, name)(**kwargs)
+                self.assertIsInstance(result, MODULE.Response)
+                self.assertIs(result.success, False)
+                self.assertIsInstance(result.message, str)
+                self.assertIn("具体原因", result.message)
+                self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
+
+    def test_renderer_failure_is_also_caught(self):
+        with patch.object(RENDERER, "render", side_effect=ValueError("渲染挂了")):
+            result = self.plugin.api_check()
+        self.assertIs(result.success, False)
+        self.assertIn("具体原因", result.message)
+
+    def test_wrong_confirm_token_stays_false(self):
+        for token in ("", "no", "随便", None, 0):
+            self.assertIs(self.plugin.api_clear(confirm=token).success, False)
+
+    def test_corrupted_stored_data_never_raises(self):
+        for value in ("text", 1, True, [{"x": 1}], {"status": 3, "hits": "bad"}):
+            with self.subTest(value=value):
+                self.plugin.save_data("ugn_snapshot", value)
+                for name in ("api_snapshot", "api_refresh"):
+                    result = getattr(self.plugin, name)()
+                    self.assertIsInstance(result, MODULE.Response)
+                    self.assertIsInstance(result.message, str)
+                    self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
+
+    def test_password_scrubbed_from_error_message(self):
+        self.plugin.init_plugin({"ssh_password": "S3cr3tPW"})
+        with patch.object(self.plugin, "_view", side_effect=RuntimeError("连不上 S3cr3tPW")):
+            result = self.plugin.api_snapshot()
+        self.assertIs(result.success, False)
+        self.assertNotIn("S3cr3tPW", result.message)
+        self.assertIn("***", result.message)
+
+
+class TestClearTwoStage(unittest.TestCase):
+    def setUp(self):
+        self.plugin = PLUGIN_CLS()
+
+    def test_first_click_arms_second_click_clears(self):
+        self.assertFalse(self.plugin.api_clear().success, "没口令不该清")
+        self.assertFalse(self.plugin.api_clear(confirm="yes").success, "第一次点只是确认，不清")
+        self.assertTrue(self.plugin.api_clear(confirm="yes").success, "再点一次才真清")
+
+    def test_single_click_never_clears_existing_log(self):
+        self.plugin.save_data("ugn_log", [{"time": "x", "level": "INFO", "message": "留着"}])
+        self.plugin.api_clear(confirm="yes")
+        self.assertEqual(len(self.plugin.get_data("ugn_log")), 1)
+
+    def test_arm_expires(self):
+        self.plugin.api_clear(confirm="yes")
+        self.plugin.save_data("ugn_clear_arm", {"ts": 0})
+        self.assertFalse(self.plugin.api_clear(confirm="yes").success)
 
 
 class TestPageAndForm(unittest.TestCase):
@@ -123,18 +215,12 @@ class TestPageAndForm(unittest.TestCase):
         self.assertIn("绿联 NAS 守护", html_nodes[0]["html"])
         self.assertIn("ugn-grid", html_nodes[0]["html"])
 
-    def test_button_text_is_toplevel_not_in_props(self):
-        for item in self.page:
-            if item.get("component") == "VBtn":
-                self.assertIsInstance(item.get("text"), str)
-                self.assertNotIn("text", item.get("props", {}))
-
     def test_html_has_no_inline_script(self):
         html = RENDERER.render(self.plugin.api_snapshot().data)
         for marker in ("<script", "onclick=", "onchange=", "onload=", "javascript:"):
             self.assertNotIn(marker, html, marker)
 
-    def test_form_has_exactly_six_controls(self):
+    def test_form_has_at_most_ten_controls(self):
         form, defaults = PLUGIN_CLS().get_form()
         controls = []
 
@@ -149,13 +235,39 @@ class TestPageAndForm(unittest.TestCase):
                     walk(value)
 
         walk(form)
-        self.assertEqual(len(controls), 6, f"设置项应精简，实际 {controls}")
+        self.assertLessEqual(len(controls), 10, f"设置项要精简，实际 {controls}")
+        self.assertEqual(len(controls), 10)
         self.assertEqual(controls.count("VSwitch"), 1)
-        self.assertEqual(controls.count("VTextField"), 1)
-        self.assertEqual(controls.count("VSelect"), 4)
-        self.assertEqual(set(defaults), {
-            "enabled", "bridge_url", "water_threshold", "temp_threshold", "mode", "interval_minutes",
-        })
+        self.assertEqual(controls.count("VTextField"), 6)
+        self.assertEqual(controls.count("VSelect"), 3)
+        self.assertTrue({
+            "enabled", "source_mode", "ssh_host", "ssh_port", "ssh_user", "ssh_password",
+            "bridge_url", "status_file", "water_threshold", "temp_threshold", "mode",
+            "interval_minutes", "watch_containers", "cooldown",
+        }.issubset(defaults))
+        self.assertEqual(defaults["water_threshold"], 88)
+
+    def test_form_source_mode_options_and_password_field(self):
+        form, _ = PLUGIN_CLS().get_form()
+        models = {}
+
+        def walk(node):
+            if isinstance(node, dict):
+                props = node.get("props") or {}
+                if isinstance(props, dict) and props.get("model"):
+                    models[props["model"]] = props
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(form)
+        items = {item["value"] for item in models["source_mode"]["items"]}
+        self.assertEqual(items, {"自动", "状态桥", "本地文件", "SSH"})
+        self.assertEqual(models["ssh_password"].get("type"), "password")
+        self.assertIn("不会写进日志或快照", models["ssh_password"]["hint"])
+        self.assertEqual(models["water_threshold"]["label"], "磁盘占用到多少就暂停")
 
     def test_get_service_registers_cron(self):
         services = PLUGIN_CLS().get_service()
@@ -167,6 +279,125 @@ class TestPageAndForm(unittest.TestCase):
         disabled.init_plugin({"enabled": False})
         self.assertFalse(disabled.get_state())
         self.assertEqual(disabled.get_service(), [])
+
+
+class TestWordingAndEscape(unittest.TestCase):
+    def test_no_water_word_on_page(self):
+        html = RENDERER.render(PLUGIN_CLS().api_snapshot().data)
+        self.assertNotIn("水位", html)
+        self.assertIn("磁盘占用空间", html)
+
+    def test_form_has_no_water_word(self):
+        form, _ = PLUGIN_CLS().get_form()
+        self.assertNotIn("水位", repr(form))
+
+    def test_dynamic_volume_name_is_escaped(self):
+        dirty = "<img src=x onerror=alert(1)>"
+        raw = full_raw()
+        raw["volumes"][0]["name"] = dirty
+        raw["volumes"][0]["percent"] = 95.0
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"mode": "试运行", "cooldown": 0})
+        with patch.object(NAS, "collect", return_value=bridge_collected(raw)):
+            view = plugin.run_check("转义")
+        html = RENDERER.render(view)
+        self.assertNotIn(dirty, html)
+        self.assertIn("&lt;img", html)
+
+    def test_ssh_host_is_escaped_and_password_never_in_page(self):
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"source_mode": "SSH", "ssh_host": "<svg onload=alert(1)>",
+                            "ssh_password": "S3cr3tPW"})
+        html = RENDERER.render(plugin.api_snapshot().data)
+        self.assertNotIn("<svg onload=alert(1)>", html)
+        self.assertIn("&lt;svg", html)
+        self.assertNotIn("S3cr3tPW", html)
+        self.assertIn("paramiko", html)
+
+    def test_no_ai_words_or_emoji_in_page(self):
+        html = RENDERER.render(PLUGIN_CLS().api_snapshot().data)
+        for word in ("AI", "智能赋能", "一键搞定", "全方位", "本插件旨在"):
+            self.assertNotIn(word, html, word)
+
+
+class TestSSH(unittest.TestCase):
+    def test_paramiko_missing_is_reported_and_downgrades(self):
+        raw = full_raw()
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"source_mode": "自动", "ssh_host": "10.0.0.2",
+                            "ssh_password": "S3cr3tPW", "bridge_url": "http://x/status"})
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(NAS, "_read_bridge", return_value=raw):
+            result = NAS.collect(plugin._cfg())
+        self.assertEqual(result["source"], "状态桥")
+        self.assertIs(result["ssh"]["available"], False)
+        self.assertEqual(result["ssh"]["reason"],
+                         "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件")
+        self.assertEqual(result["ssh"]["host"], "10.0.0.2")
+        self.assertNotIn("S3cr3tPW", repr(result["ssh"]))
+
+    def test_paramiko_state_shape_when_missing(self):
+        with patch.dict(sys.modules, {"paramiko": None}):
+            state = NAS.paramiko_state()
+        self.assertEqual(state, {
+            "available": False,
+            "reason": "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件",
+        })
+
+    def test_ssh_mode_marks_other_sections_missing(self):
+        raw = {"ts": "x", "volumes": [{"name": "/volume1", "total": 1024, "used": 900, "percent": 90}]}
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"source_mode": "SSH", "ssh_host": "10.0.0.2",
+                            "ssh_password": "S3cr3tPW", "mode": "试运行", "cooldown": 0})
+        with patch.object(NAS, "paramiko_state", return_value={"available": True, "reason": ""}), \
+             patch.object(NAS, "_read_ssh", return_value=raw):
+            view = plugin.run_check("SSH 巡检")
+        self.assertEqual(view["source"], "SSH")
+        self.assertEqual(view["status"]["disks"], [])
+        self.assertEqual(view["status"]["containers"], [])
+        self.assertEqual(view["status"]["ups"]["on_battery"], NAS.MISSING)
+        self.assertIn("volume_high", {h["rule"] for h in view["hits"]})
+        self.assertNotIn("resume_download", {h["action"] for h in view["hits"]})
+
+    def test_password_never_leaks_to_page_snapshot_or_log(self):
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"source_mode": "SSH", "ssh_host": "10.0.0.2", "ssh_user": "admin",
+                            "ssh_password": "S3cr3tPW", "mode": "试运行", "cooldown": 0})
+        raw = {"ts": "x", "volumes": [{"name": "/volume1", "total": 1000, "used": 900, "percent": 90}]}
+        with patch.object(NAS, "paramiko_state", return_value={"available": True, "reason": ""}), \
+             patch.object(NAS, "_read_ssh", return_value=raw):
+            view = plugin.run_check("SSH")
+        html = RENDERER.render(view)
+        blob = (html + repr(plugin.get_data("ugn_snapshot")) + repr(plugin.get_data("ugn_log"))
+                + repr(plugin.get_data("ugn_state")) + repr(view))
+        self.assertNotIn("S3cr3tPW", blob)
+        self.assertEqual(view["source"], "SSH")
+
+    def test_page_shows_source_paramiko_and_host(self):
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"source_mode": "SSH", "ssh_host": "10.0.0.2"})
+        ssh = {"available": False,
+               "reason": "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件",
+               "host": "10.0.0.2", "used": False, "note": ""}
+        view = plugin._view(collected={"source": "SSH", "services": None, "ssh": ssh,
+                                       "source_mode": "SSH"})
+        html = RENDERER.render(view)
+        self.assertIn("当前生效来源：SSH", html)
+        self.assertIn("paramiko 不可用", html)
+        self.assertIn("10.0.0.2", html)
+        self.assertNotIn("S3cr3tPW", html)
+
+    def test_parse_df_filters_proc_and_duplicates(self):
+        text = (
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+            "proc 0 0 0 - /proc\n"
+            "tmpfs 100 1 99 1% /run\n"
+            "/dev/sda1 1000 400 600 40% /volume1\n"
+            "/dev/sda1 1000 400 600 40% /volume1\n"
+        )
+        volumes = NAS.parse_df(text)
+        self.assertEqual([v["name"] for v in volumes], ["/volume1"])
+        self.assertEqual(volumes[0]["total"], 1000 * 1024)
 
 
 class TestCollectAndInspect(unittest.TestCase):
@@ -181,6 +412,7 @@ class TestCollectAndInspect(unittest.TestCase):
         self.assertEqual(result["status"]["disks"], [])
         self.assertEqual(result["status"]["containers"], [])
         self.assertEqual(result["status"]["ups"]["on_battery"], NAS.MISSING)
+        self.assertIsInstance(result["ssh"], dict)
 
     def test_bridge_takes_priority_over_local(self):
         raw = full_raw()
@@ -194,7 +426,7 @@ class TestCollectAndInspect(unittest.TestCase):
         with patch.object(NAS, "_read_bridge", return_value=None), \
              patch.object(NAS, "_read_status_file", return_value=raw):
             result = NAS.collect({"bridge_url": "http://bad", "status_file": "/tmp/ugn.json"})
-        self.assertEqual(result["source"], "状态文件")
+        self.assertEqual(result["source"], "本地文件")
 
     def test_full_check_records_action_and_state(self):
         plugin = PLUGIN_CLS()
@@ -209,6 +441,7 @@ class TestCollectAndInspect(unittest.TestCase):
         self.assertIn("volume_high", {h["rule"] for h in result.data["hits"]})
         self.assertTrue(result.data["log"])
         self.assertTrue(any("暂停" in entry["message"] for entry in result.data["log"]))
+        self.assertTrue(any("磁盘占用空间" in entry["message"] for entry in result.data["log"]))
         self.assertTrue(plugin.get_data("ugn_state")["paused"])
 
     def test_debounce_and_cooldown(self):
@@ -246,24 +479,6 @@ class TestCollectAndInspect(unittest.TestCase):
             view = plugin.run_check("桥返回空")
         self.assertEqual(view["hits"][0]["action"], "none")
         self.assertFalse(plugin.get_data("ugn_state")["paused"])
-
-    def test_dynamic_text_is_escaped(self):
-        dirty = "<img src=x onerror=alert(1)>"
-        raw = full_raw()
-        raw["volumes"][0]["name"] = dirty
-        raw["volumes"][0]["percent"] = 95.0
-        plugin = PLUGIN_CLS()
-        plugin.init_plugin({"mode": "试运行", "cooldown": 0})
-        with patch.object(NAS, "collect", return_value=bridge_collected(raw)):
-            view = plugin.run_check("转义")
-        html = RENDERER.render(view)
-        self.assertNotIn(dirty, html)
-        self.assertIn("&lt;img", html)
-
-    def test_no_ai_words_or_emoji_in_page(self):
-        html = RENDERER.render(PLUGIN_CLS().api_snapshot().data)
-        for word in ("AI", "智能赋能", "一键搞定", "全方位", "本插件旨在"):
-            self.assertNotIn(word, html, word)
 
     def test_schema_shape(self):
         status = NAS.parse_status({})

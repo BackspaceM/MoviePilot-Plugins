@@ -5,11 +5,19 @@ import json
 import os
 import shutil
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 TIMEOUT = 8
 MISSING = "未上报"
 DEFAULT_CONTAINERS = ["moviepilot", "qbittorrent", "transmission", "emby", "plex"]
+
+# df 里这些都不是真磁盘，别混进存储卷
+_PSEUDO_FS = {
+    "tmpfs", "devtmpfs", "proc", "sysfs", "devpts", "cgroup", "cgroup2",
+    "securityfs", "pstore", "mqueue", "hugetlbfs", "debugfs", "tracefs",
+    "configfs", "fusectl", "binfmt_misc", "none", "udev", "ramfs",
+}
+_PARAMIKO_REASON = "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件"
 
 
 def _now_text() -> str:
@@ -119,6 +127,107 @@ def parse_status(raw: Any) -> Dict[str, Any]:
     }
 
 
+def parse_df(text: Any) -> List[Dict[str, Any]]:
+    """解析 df -kP 的 POSIX 输出，只留真实分区，产出和状态桥统一 schema 的 volumes。"""
+    volumes: List[Dict[str, Any]] = []
+    seen = set()
+    for line in str(text or "").splitlines():
+        # 最多切 5 刀，挂载点里带空格也能整段留住
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        fs, blocks, used, available, _capacity, mount = parts
+        name = fs.strip()
+        if name.lower() == "filesystem" or name.lower() in _PSEUDO_FS:
+            continue
+        try:
+            total_kb = int(blocks)
+            used_kb = int(used)
+            avail_kb = int(available)
+        except (TypeError, ValueError):
+            continue
+        if total_kb <= 0 or name in seen:
+            continue
+        seen.add(name)
+        # 单位统一成字节，和容器自检的 shutil.disk_usage 对齐
+        denom = used_kb + avail_kb
+        percent = round(used_kb / denom * 100.0, 1) if denom > 0 else round(used_kb / total_kb * 100.0, 1)
+        volumes.append({
+            "name": mount.strip() or name,
+            "total": total_kb * 1024,
+            "used": used_kb * 1024,
+            "percent": percent,
+        })
+    return volumes
+
+
+def paramiko_state() -> Dict[str, Any]:
+    """只查依赖在不在，延迟导入，缺了也不抛，交给 collect 降级。"""
+    try:
+        import paramiko  # noqa: F401
+        return {"available": True, "reason": ""}
+    except Exception:
+        return {"available": False, "reason": _PARAMIKO_REASON}
+
+
+def ssh_info(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """给页面看的 SSH 状态，只查依赖和主机，不联网、不碰密码。"""
+    state = paramiko_state()
+    return {
+        "available": state["available"],
+        "reason": state["reason"],
+        "host": str(cfg.get("ssh_host") or "").strip(),
+        "used": False,
+        "note": "",
+    }
+
+
+def _ssh_port(cfg: Dict[str, Any]) -> int:
+    try:
+        port = int(str(cfg.get("ssh_port") or 22).strip())
+    except (TypeError, ValueError):
+        return 22
+    return port if 0 < port < 65536 else 22
+
+
+def _read_ssh(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """SSH 跑 df -kP，只上报存储卷；连不上就返回 None 让 collect 换下一路。"""
+    host = str(cfg.get("ssh_host") or "").strip()
+    if not host:
+        return None
+    try:
+        import paramiko  # 延迟导入，别让宿主因为缺依赖回滚插件安装
+    except Exception:
+        return None
+    client = None
+    try:
+        client = paramiko.SSHClient()
+        # 不校验主机指纹方便内网 NAS，代价是中间人风险，自己掂量
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            host,
+            port=_ssh_port(cfg),
+            username=str(cfg.get("ssh_user") or "").strip(),
+            password=str(cfg.get("ssh_password") or ""),
+            timeout=TIMEOUT,
+        )
+        _stdin, stdout, _stderr = client.exec_command("df -kP", timeout=TIMEOUT)
+        volumes = parse_df(stdout.read().decode("utf-8", "replace"))
+        if not volumes:
+            return None
+        # 只给 volumes，盘温、容器、UPS 一律不塞，页面会标未上报
+        return {"ts": _now_text(), "volumes": volumes}
+    except Exception:
+        # 异常全吞，绝不把可能带密码的报错抛出去或写进日志
+        return None
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def _fmt_num(value: Any) -> str:
     return f"{value:.1f}" if isinstance(value, float) else str(value)
 
@@ -201,7 +310,7 @@ def evaluate(status: Dict[str, Any], cfg: Dict[str, Any]) -> List[Dict[str, Any]
         hits.append({
             "rule": "volume_high",
             "level": "danger",
-            "detail": f"卷 {_label(worst.get('name'))} 已用 {_fmt_num(worst.get('percent'))}%，超过 {int(water)}%",
+            "detail": f"磁盘占用空间达到 {_fmt_num(worst.get('percent'))}%（卷 {_label(worst.get('name'))}），超过 {int(water)}%",
             "action": "pause_download",
         })
 
@@ -366,7 +475,7 @@ def _local_system() -> Dict[str, Any]:
 
 
 def local_raw() -> Dict[str, Any]:
-    """桥和状态文件都拿不到时，用容器内看得到的目录算一份水位。"""
+    """桥和状态文件都拿不到时，用容器内看得到的目录算一份磁盘占用空间。"""
     volumes: List[Dict[str, Any]] = []
     seen = set()
     for path in _candidate_paths():
@@ -408,23 +517,66 @@ def service_counts() -> Dict[str, Any]:
 
 
 def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """状态桥 -> 状态文件 -> 容器自检，依次降级，取到哪层算哪层。"""
+    """按 source_mode 选路，自动是 SSH → 状态桥 → 本地文件 → 容器自检，取到哪层算哪层。"""
+    mode = str(cfg.get("source_mode") or "自动").strip()
+    if mode not in ("自动", "状态桥", "本地文件", "SSH", "容器自检"):
+        mode = "自动"
+
+    ssh = ssh_info(cfg)
     bridge = str(cfg.get("bridge_url") or "").strip()
     status_file = str(cfg.get("status_file") or "").strip()
-    raw = None
+
+    order = {
+        "自动": ("ssh", "bridge", "file", "local"),
+        "SSH": ("ssh", "local"),
+        "状态桥": ("bridge", "local"),
+        "本地文件": ("file", "local"),
+        "容器自检": ("local",),
+    }[mode]
+
+    raw: Any = None
     source = MISSING
     services = None
+    for step in order:
+        if step == "ssh":
+            if not ssh["host"]:
+                continue
+            if not ssh["available"]:
+                ssh["note"] = ssh["reason"]
+                continue
+            raw = _read_ssh(cfg)
+            if raw is not None:
+                source = "SSH"
+                ssh["used"] = True
+                break
+            ssh["note"] = "SSH 没读到 df -kP，已降级"
+        elif step == "bridge":
+            if not bridge:
+                continue
+            raw = _read_bridge(bridge)
+            if raw is not None:
+                source = "状态桥"
+                break
+        elif step == "file":
+            if not status_file:
+                continue
+            raw = _read_status_file(status_file)
+            if raw is not None:
+                source = "本地文件"
+                break
+        elif step == "local":
+            raw = local_raw()
+            source = "容器自检"
+            services = service_counts()
+            break
 
-    if bridge:
-        raw = _read_bridge(bridge)
-        if raw is not None:
-            source = "状态桥"
-    if raw is None and status_file:
-        raw = _read_status_file(status_file)
-        if raw is not None:
-            source = "状态文件"
     if raw is None:
-        raw = local_raw()
-        source = "容器自检"
-        services = service_counts()
-    return {"status": parse_status(raw), "source": source, "services": services}
+        raw = {}
+        source = MISSING
+    return {
+        "status": parse_status(raw),
+        "source": source,
+        "services": services,
+        "ssh": ssh,
+        "source_mode": mode,
+    }

@@ -35,6 +35,7 @@ _COOLDOWN = 1800
 _STATE_KEY = "ugn_state"
 _LOG_KEY = "ugn_log"
 _SNAPSHOT_KEY = "ugn_snapshot"
+_CLEAR_ARM_KEY = "ugn_clear_arm"
 _MAX_LOG = 60
 _PAUSE_METHODS = ("pause_torrents", "stop_torrents", "pause_all")
 _RESUME_METHODS = ("start_torrents", "resume_torrents", "resume_all")
@@ -76,13 +77,13 @@ class UGreenGuard(_PluginBase):
     plugin_name = "绿联 NAS 守护"
     plugin_desc = (
         "绿联 NAS 的开放接口是 HTTPS + protobuf，还要按权限节点发令牌，目前令牌只放开了 docker ps，"
-        "storage、taskmgr、ctl 都返回 403，MP 容器里不方便直连。这个插件走只读状态桥："
-        "放在 NAS 外面的一个只读小服务把状态整理成一段简单 JSON，插件只消费 JSON，"
-        "没配桥时用容器内自检兜底。按水位、盘温、容器和 UPS 设几条规则，默认试运行只记录不改动，"
+        "storage、taskmgr、ctl 都返回 403，MP 容器里不方便直连。这个插件只读："
+        "状态桥给一段简单 JSON，或者用 SSH 账号直接跑 df -kP 读磁盘占用空间，也能读本地状态文件，"
+        "最后用容器内自检兜底。按磁盘占用空间、盘温、容器和 UPS 设几条规则，默认试运行只记录不改动，"
         "可切到自动处置去暂停或恢复下载。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/ugreenguard.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.1.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "ugreenguard_"
@@ -95,6 +96,11 @@ class UGreenGuard(_PluginBase):
         self._enabled = True
         self._bridge_url = ""
         self._status_file = ""
+        self._source_mode = "自动"
+        self._ssh_host = ""
+        self._ssh_port = 22
+        self._ssh_user = ""
+        self._ssh_password = ""
         self._water = 88
         self._temp = 52
         self._mode = "试运行"
@@ -107,6 +113,13 @@ class UGreenGuard(_PluginBase):
         self._enabled = _to_bool(cfg.get("enabled", True))
         self._bridge_url = str(cfg.get("bridge_url") or "").strip()
         self._status_file = str(cfg.get("status_file") or "").strip()
+        source_mode = str(cfg.get("source_mode") or "自动").strip()
+        self._source_mode = source_mode if source_mode in (
+            "自动", "状态桥", "本地文件", "SSH", "容器自检") else "自动"
+        self._ssh_host = str(cfg.get("ssh_host") or "").strip()
+        self._ssh_port = _to_int(cfg.get("ssh_port"), 22)
+        self._ssh_user = str(cfg.get("ssh_user") or "").strip()
+        self._ssh_password = str(cfg.get("ssh_password") or "")
         self._water = _to_int(cfg.get("water_threshold"), 88)
         self._temp = _to_int(cfg.get("temp_threshold"), 52)
         mode = str(cfg.get("mode") or "试运行")
@@ -132,6 +145,11 @@ class UGreenGuard(_PluginBase):
             "enabled": self._enabled,
             "bridge_url": self._bridge_url,
             "status_file": self._status_file,
+            "source_mode": self._source_mode,
+            "ssh_host": self._ssh_host,
+            "ssh_port": self._ssh_port,
+            "ssh_user": self._ssh_user,
+            "ssh_password": self._ssh_password,
             "water_threshold": self._water,
             "temp_threshold": self._temp,
             "mode": self._mode,
@@ -176,22 +194,48 @@ class UGreenGuard(_PluginBase):
                 col(12, 6, {"component": "VSwitch", "props": {
                     "model": "enabled", "label": "启用守护", "color": "primary",
                     "hint": "关掉之后定时巡检也会停", "persistentHint": True}}),
+                col(12, 6, {"component": "VSelect", "props": {
+                    "model": "source_mode", "label": "状态从哪儿来",
+                    "items": [
+                        {"title": "自动（SSH→状态桥→本地文件→容器自检 降级）", "value": "自动"},
+                        {"title": "状态桥", "value": "状态桥"},
+                        {"title": "本地文件", "value": "本地文件"},
+                        {"title": "SSH", "value": "SSH"},
+                    ],
+                    "hint": "自动一路降级，取到哪层算哪层", "persistentHint": True}}),
+            ]},
+            {"component": "VRow", "content": [
+                col(12, 6, {"component": "VTextField", "props": {
+                    "model": "ssh_host", "label": "SSH 地址",
+                    "placeholder": "192.168.1.10",
+                    "hint": "NAS 地址，容器里填宿主网关 IP 也行", "persistentHint": True, "clearable": True}}),
+                col(12, 6, {"component": "VTextField", "props": {
+                    "model": "ssh_port", "label": "SSH 端口",
+                    "placeholder": "22", "hint": "默认 22", "persistentHint": True, "clearable": True}}),
+            ]},
+            {"component": "VRow", "content": [
+                col(12, 6, {"component": "VTextField", "props": {
+                    "model": "ssh_user", "label": "SSH 账号",
+                    "hint": "能跑 df -kP 的账号就够", "persistentHint": True, "clearable": True}}),
+                col(12, 6, {"component": "VTextField", "props": {
+                    "model": "ssh_password", "label": "SSH 密码", "type": "password",
+                    "hint": "密码只存插件配置，不会写进日志或快照", "persistentHint": True, "clearable": True}}),
+            ]},
+            {"component": "VRow", "content": [
                 col(12, 6, {"component": "VTextField", "props": {
                     "model": "bridge_url", "label": "状态桥地址",
                     "placeholder": "http://127.0.0.1:8787/status",
-                    "hint": "留空则用容器自检", "persistentHint": True, "clearable": True}}),
+                    "hint": "留空就跳过状态桥", "persistentHint": True, "clearable": True}}),
+                col(12, 6, {"component": "VTextField", "props": {
+                    "model": "status_file", "label": "本地状态文件",
+                    "placeholder": "/config/ugn_status.json",
+                    "hint": "选本地文件时读这个 JSON", "persistentHint": True, "clearable": True}}),
             ]},
             {"component": "VRow", "content": [
                 col(12, 6, {"component": "VSelect", "props": {
-                    "model": "water_threshold", "label": "空间到多少就暂停",
+                    "model": "water_threshold", "label": "磁盘占用到多少就暂停",
                     "items": [{"title": f"{v}%", "value": v} for v in (80, 85, 88, 90, 95)],
-                    "hint": "存储卷使用率到了这条线就先停下载", "persistentHint": True}}),
-                col(12, 6, {"component": "VSelect", "props": {
-                    "model": "temp_threshold", "label": "硬盘到多少度就暂停",
-                    "items": [{"title": f"{v}℃", "value": v} for v in (45, 50, 52, 55, 60)],
-                    "hint": "温度或 SMART 告警命中时停下载", "persistentHint": True}}),
-            ]},
-            {"component": "VRow", "content": [
+                    "hint": "磁盘占用空间到了这条线就先停下载", "persistentHint": True}}),
                 col(12, 6, {"component": "VSelect", "props": {
                     "model": "mode", "label": "怎么处理",
                     "items": [
@@ -200,27 +244,33 @@ class UGreenGuard(_PluginBase):
                         {"title": "自动处置", "value": "自动处置"},
                     ],
                     "hint": "默认试运行，只记动作和日志，不动下载器", "persistentHint": True}}),
-                col(12, 6, {"component": "VSelect", "props": {
-                    "model": "interval_minutes", "label": "多久巡检一次",
-                    "items": [{"title": f"{v} 分钟", "value": v} for v in (1, 5, 15, 30)],
-                    "hint": "同一条规则 30 分钟内不重复提醒", "persistentHint": True}}),
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12}, "content": [
                     {"component": "VAlert", "props": {"type": "info", "variant": "tonal"}, "text": (
-                        "插件不直连 NAS，只读外部小服务给的一段 JSON。没配地址时，用容器内看到的目录水位兜底，"
-                        "磁盘、容器、UPS 这些没数据就显示未上报。"
+                        "状态桥、本地文件、SSH、容器内自检四路都在，自动按 SSH → 状态桥 → 本地文件 → 容器自检 降级。"
+                        "SSH 要在 MoviePilot 容器里装 paramiko，连不上或缺依赖就自动换下一路；"
+                        "SSH 只用 df -kP 读磁盘占用空间，磁盘、容器、UPS 一律标未上报，不会装作正常。"
+                        "盘温阈值和巡检间隔沿用已保存的配置，不会丢。"
                     )},
                 ]},
             ]},
         ]
         defaults = {
             "enabled": self._enabled,
+            "source_mode": self._source_mode,
+            "ssh_host": self._ssh_host,
+            "ssh_port": str(self._ssh_port),
+            "ssh_user": self._ssh_user,
+            "ssh_password": self._ssh_password,
             "bridge_url": self._bridge_url,
+            "status_file": self._status_file,
             "water_threshold": self._water,
             "temp_threshold": self._temp,
             "mode": self._mode,
             "interval_minutes": self._interval,
+            "watch_containers": list(self._watch),
+            "cooldown": self._cooldown,
         }
         return form, defaults
 
@@ -238,31 +288,69 @@ class UGreenGuard(_PluginBase):
              "methods": ["POST"], "summary": "重新读状态并刷新页面"},
         ]
 
+    def _fail(self, exc: Exception) -> Response:
+        """endpoint 里的异常一律收成具体原因，绝不抛到宿主变成「未知错误」。"""
+        text = f"具体原因：{type(exc).__name__} {exc}"
+        secret = str(getattr(self, "_ssh_password", "") or "")
+        if secret:
+            text = text.replace(secret, "***")
+        return Response(success=False, message=text, data=None)
+
     def api_snapshot(self) -> Response:
-        return Response(success=True, message="ok", data=self._view())
+        try:
+            return Response(success=True, message="ok", data=self._view())
+        except Exception as exc:
+            return self._fail(exc)
 
     def api_check(self) -> Response:
-        view = self.run_check(trigger="手动巡检")
-        return self._payload_from(view, "巡检完成")
+        try:
+            view = self.run_check(trigger="手动巡检")
+            return self._payload_from(view, "巡检完成")
+        except Exception as exc:
+            return self._fail(exc)
 
     def api_resume(self) -> Response:
-        lines = self._call_downloaders(_RESUME_METHODS, "恢复", "该下载器不支持恢复，仅告警")
-        text = "；".join(lines)
-        self._append_log("INFO", f"[手动] 恢复下载：{text}")
-        self._notify("绿联 NAS 守护 · 手动恢复", text)
-        self.save_data(_STATE_KEY, {"paused": False, "last_alert": {}, "active_rules": []})
-        return self._payload_from(self._refresh_view(), "已执行恢复", result=text)
+        try:
+            lines = self._call_downloaders(_RESUME_METHODS, "恢复", "该下载器不支持恢复，仅告警")
+            text = "；".join(lines)
+            self._append_log("INFO", f"[手动] 恢复下载：{text}")
+            self._notify("绿联 NAS 守护 · 手动恢复", text)
+            self.save_data(_STATE_KEY, {"paused": False, "last_alert": {}, "active_rules": []})
+            return self._payload_from(self._refresh_view(), "已执行恢复", result=text)
+        except Exception as exc:
+            return self._fail(exc)
 
     def api_clear(self, confirm: str = "") -> Response:
-        if str(confirm).strip().lower() not in ("yes", "1", "true", "确认"):
-            return Response(success=False, message="需要确认才会清空")
-        self.save_data(_LOG_KEY, [])
-        return self._payload_from(self._view(), "动作日志已清空")
+        try:
+            # 详情页 events.click.confirm 不弹框，别指望它；用 params 口令加两段式后端校验
+            token = str(confirm).strip().lower()
+            if token not in ("yes", "1", "true", "确认"):
+                return Response(success=False, message="需要确认才会清空")
+            arm = self.get_data(_CLEAR_ARM_KEY)
+            armed = isinstance(arm, dict) and time.time() - float(arm.get("ts") or 0) < 60
+            if not armed:
+                self.save_data(_CLEAR_ARM_KEY, {"ts": time.time()})
+                return Response(success=False, message="再点一次「清空日志」才会真的清空")
+            self.save_data(_CLEAR_ARM_KEY, None)
+            self.save_data(_LOG_KEY, [])
+            return self._payload_from(self._view(), "动作日志已清空")
+        except Exception as exc:
+            return self._fail(exc)
 
     def api_refresh(self) -> Response:
-        return self._payload_from(self._refresh_view(), "页面已刷新")
+        try:
+            return self._payload_from(self._refresh_view(), "页面已刷新")
+        except Exception as exc:
+            return self._fail(exc)
 
     def get_page(self) -> List[Dict[str, Any]]:
+        try:
+            return self._page()
+        except Exception:
+            return [{"component": "div", "props": {"class": "ugn-root"},
+                     "html": "<div class='ugn'>页面暂时渲染不出来，重开一次详情页再试。</div>"}]
+
+    def _page(self) -> List[Dict[str, Any]]:
         prefix = f"plugin/{self.__class__.__name__}/"
 
         def button(text: str, icon: str, action: str, method: str,
@@ -285,12 +373,8 @@ class UGreenGuard(_PluginBase):
             button("恢复下载", "mdi-play-outline", "resume", "post", "success"),
             button("清空日志", "mdi-delete-outline", "clear", "post", "warning", {"confirm": "yes"}),
         ]
-        try:
-            body: Dict[str, Any] = {"component": "div", "props": {"class": "ugn-root"},
-                                    "html": renderer.render(self._view())}
-        except Exception:
-            body = {"component": "div", "props": {"class": "ugn-root"},
-                    "html": "<div class='ugn'>已装好，点「立即巡检」读一次 NAS 状态。</div>"}
+        body: Dict[str, Any] = {"component": "div", "props": {"class": "ugn-root"},
+                                "html": renderer.render(self._view())}
         return buttons + [body]
 
     # 巡检与处置
@@ -432,12 +516,16 @@ class UGreenGuard(_PluginBase):
 
     def _save_snapshot(self, status: Dict[str, Any], hits: List[Dict[str, Any]],
                        collected: Dict[str, Any]) -> None:
+        ssh = collected.get("ssh") if isinstance(collected.get("ssh"), dict) \
+            else nas.ssh_info({"ssh_host": self._ssh_host})
         self.save_data(_SNAPSHOT_KEY, {
             "generated_at": _now_text(),
             "status": status,
             "hits": hits,
             "source": collected["source"],
             "services": collected.get("services"),
+            "ssh": ssh,
+            "source_mode": collected.get("source_mode") or self._source_mode,
         })
 
     def _refresh_view(self) -> Dict[str, Any]:
@@ -461,17 +549,26 @@ class UGreenGuard(_PluginBase):
         if hits is None:
             hits = stored.get("hits") if isinstance(stored.get("hits"), list) else []
         if collected is None:
-            collected = {"source": stored.get("source") or nas.MISSING,
-                         "services": stored.get("services")}
+            collected = {
+                "source": stored.get("source") or nas.MISSING,
+                "services": stored.get("services"),
+                "ssh": stored.get("ssh") if isinstance(stored.get("ssh"), dict)
+                       else nas.ssh_info({"ssh_host": self._ssh_host}),
+                "source_mode": stored.get("source_mode") or self._source_mode,
+            }
         state = self._load_state()
         logs = self.get_data(_LOG_KEY)
         logs = list(logs) if isinstance(logs, list) else []
+        ssh = collected.get("ssh") if isinstance(collected.get("ssh"), dict) \
+            else nas.ssh_info({"ssh_host": self._ssh_host})
         return {
             "generated_at": stored.get("generated_at") or _now_text(),
             "status": status,
             "hits": hits,
             "source": collected["source"],
             "services": collected.get("services"),
+            "ssh": ssh,
+            "source_mode": collected.get("source_mode") or self._source_mode,
             "log": logs,
             "paused": bool(state.get("paused")),
             "mode": self._mode,

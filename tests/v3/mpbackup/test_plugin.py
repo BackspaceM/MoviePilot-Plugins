@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 _spec = importlib.util.spec_from_file_location(
@@ -210,6 +211,151 @@ class TestReadSnapshot(unittest.TestCase):
             site = got["sections"]["sites"][0]
             self.assertEqual(site["cookie"], "C")
             self.assertEqual(site["token"], "T")
+
+
+class TestSections(unittest.TestCase):
+    """备份项自选：十二类全覆盖，没勾的不写进 zip 且在清单里标 skipped。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.data = self.dir / "data"
+        self.data.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, sections):
+        with mock.patch.object(mod, "host_ready", return_value=False):
+            return mod.write_snapshot(self.dir, str(self.data), list(sections), 7)
+
+    def test_options_cover_every_manifest_section(self):
+        keys = [key for key, _ in mod.SECTION_OPTIONS]
+        self.assertEqual(set(keys), set(mod.ALL_SOURCES))
+        self.assertEqual(len(keys), len(mod.ALL_SOURCES))
+        for key, label in mod.SECTION_OPTIONS:
+            self.assertTrue(any("\u4e00" <= ch <= "\u9fff" for ch in label), key)
+        self.assertEqual(tuple(mod.DEFAULT_SECTIONS), tuple(keys))
+
+    def test_clean_sections_defaults_to_full(self):
+        self.assertEqual(mod.clean_sections(None), list(mod.SECTION_KEYS))
+        self.assertEqual(mod.clean_sections("坏数据"), list(mod.SECTION_KEYS))
+        self.assertEqual(mod.clean_sections([]), [])
+
+    def test_clean_sections_keeps_known_order(self):
+        self.assertEqual(mod.clean_sections(["sites", "users", "不存在"]),
+                         [k for k in mod.SECTION_KEYS if k in ("sites", "users")])
+
+    def test_unselected_are_skipped_and_not_written(self):
+        picked = ["users", "sites"]
+        result = self._write(picked)
+        manifest = result["manifest"]
+        self.assertEqual(manifest["sections"], picked)
+        for name in mod.ALL_SOURCES:
+            info = manifest["sources"][name]
+            if name in picked:
+                self.assertNotEqual(info["status"], "skipped", name)
+            else:
+                self.assertEqual(info["status"], "skipped", name)
+                self.assertTrue(info["reason"])
+                self.assertEqual(info["count"], 0)
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            names = set(zf.namelist())
+        self.assertIn("users.json", names)
+        self.assertIn("sites.json", names)
+        self.assertIn("manifest.json", names)
+        for name in mod.ALL_SOURCES:
+            if name in picked or name == "plugin_data":
+                continue
+            self.assertNotIn(name + ".json", names, name)
+        self.assertNotIn("plugin_data/", names)
+
+    def test_all_selected_writes_every_json(self):
+        result = self._write(mod.SECTION_KEYS)
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            names = set(zf.namelist())
+        for name in mod.ALL_SOURCES:
+            if name == "plugin_data":
+                self.assertIn("plugin_data/", names)
+            else:
+                self.assertIn(name + ".json", names)
+        for name in mod.ALL_SOURCES:
+            self.assertNotEqual(result["manifest"]["sources"][name]["status"], "skipped")
+
+    def test_none_selected_only_manifest(self):
+        result = self._write([])
+        with zipfile.ZipFile(self.dir / result["file"]) as zf:
+            names = set(zf.namelist())
+        self.assertEqual(names, {"manifest.json"})
+        for name in mod.ALL_SOURCES:
+            self.assertEqual(result["manifest"]["sources"][name]["status"], "skipped")
+
+
+class TestDeleteTarget(unittest.TestCase):
+    """删除只认本插件的 mpbackup_*.zip，且必须落在备份目录里。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = pathlib.Path(self.tmp.name)
+        self.dir = self.base / "bak"
+        self.dir.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _own(self, name="mpbackup_20260101_000000_000001.zip"):
+        path = self.dir / name
+        path.write_bytes(b"x")
+        return path
+
+    def test_rejects_other_files(self):
+        for name in ("", None, "other.zip", "mpbackup_notes.txt",
+                     "mpbackup_x.rar", "notes.json"):
+            target, why = mod.resolve_delete_target(self.dir, name)
+            self.assertIsNone(target, name)
+            self.assertTrue(why)
+
+    def test_rejects_path_traversal(self):
+        for name in ("..", ".", "../evil.zip", "sub/mpbackup_x.zip",
+                     "/etc/mpbackup_x.zip", "mpbackup_x.zip/../y"):
+            target, why = mod.resolve_delete_target(self.dir, name)
+            self.assertIsNone(target, name)
+            self.assertTrue(why)
+
+    def test_deletes_own_snapshot(self):
+        path = self._own()
+        target, why = mod.resolve_delete_target(self.dir, path.name)
+        self.assertEqual(target, path)
+        self.assertEqual(why, "")
+        got = mod.delete_snapshot(self.dir, path.name)
+        self.assertTrue(got["ok"])
+        self.assertFalse(path.exists())
+        self.assertFalse(mod.delete_snapshot(self.dir, path.name)["ok"])
+
+    def test_only_own_zip_is_touched(self):
+        own = self._own()
+        other = self.dir / "other.zip"
+        other.write_bytes(b"keep")
+        notes = self.dir / "mpbackup_notes.txt"
+        notes.write_bytes(b"keep")
+        self.assertFalse(mod.delete_snapshot(self.dir, "other.zip")["ok"])
+        self.assertTrue(other.is_file())
+        self.assertTrue(mod.delete_snapshot(self.dir, own.name)["ok"])
+        self.assertTrue(notes.is_file())
+        self.assertTrue(other.is_file())
+
+    def test_symlink_outside_is_rejected(self):
+        outside = self.base / "mpbackup_outside.zip"
+        outside.write_bytes(b"secret")
+        link = self.dir / "mpbackup_link.zip"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("这个环境建不了符号链接")
+        target, why = mod.resolve_delete_target(self.dir, link.name)
+        self.assertIsNone(target)
+        self.assertTrue(why)
+        self.assertTrue(outside.is_file())
 
 
 def main() -> int:

@@ -1,4 +1,4 @@
-"""离线把插件装起来，检查生命周期、路由、按钮和页面。"""
+"""离线把插件装起来，检查生命周期、路由、按钮和接口兜底。"""
 
 import json
 import sys
@@ -19,16 +19,17 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.routing import APIRoute  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-RULES_TEXT = "海贼王 => A站 => HDR;;DDP5.1 => re:(?i)x264\n火影忍者 => B站 => 杜比视界;;H.265 => CAM"
+CONFIG = {
+    "enabled": True, "apply_to_mp": True, "quick_sub": 0, "quick_site": 0,
+    "quick_tags": [], "quick_include": "", "quick_exclude": "", "rules_text": "",
+    "action_mode": "notice", "interval": 30,
+}
 
 
 class StubTests(unittest.TestCase):
     def setUp(self):
         self.plugin = PLUGIN_CLS()
-        self.plugin.init_plugin({
-            "enabled": True, "rules_text": RULES_TEXT, "lock_sites": True,
-            "action_mode": "notice", "interval": 30, "notify": False,
-        })
+        self.plugin.init_plugin(dict(CONFIG))
 
     def test_plugin_id_and_abstract_methods(self):
         self.assertEqual(PLUGIN_ID, "SingleSourceTracker")
@@ -48,8 +49,8 @@ class StubTests(unittest.TestCase):
             route.setdefault("route_class_override", APIRoute)
             app.router.add_api_route(**route, tags=["plugin"])
         paths = {item.path for item in app.routes}
-        self.assertIn(f"/api/v1/plugin/{PLUGIN_ID}/snapshot", paths)
-        json.dumps(apis and self.plugin.get_page(), ensure_ascii=False)
+        self.assertIn(f"/api/v1/plugin/{PLUGIN_ID}/apply", paths)
+        json.dumps(self.plugin.get_page(), ensure_ascii=False)
 
     def test_buttons_match_api(self):
         declared = {}
@@ -65,7 +66,7 @@ class StubTests(unittest.TestCase):
             self.assertIn(action, declared, action)
             self.assertIn(click["method"].upper(), declared[action])
 
-    def test_form_is_compact(self):
+    def test_form_is_ten_items(self):
         form, defaults = self.plugin.get_form()
         models = []
 
@@ -80,14 +81,9 @@ class StubTests(unittest.TestCase):
                     walk(value)
 
         walk(form)
-        self.assertEqual(len(models), 6)
+        self.assertEqual(len(models), 10)
         self.assertEqual(set(defaults), set(models))
-        self.assertEqual(defaults["rules_text"], RULES_TEXT)
-
-    def test_rules_are_parsed_from_config(self):
-        self.assertEqual(len(self.plugin._rules), 2)
-        self.assertEqual(self.plugin._rule_errors, [])
-        self.assertEqual(self.plugin._rules[0]["include"][1]["display"], "DDP5.1")
+        self.assertIsInstance(defaults["quick_tags"], list)
 
     def test_page_never_raises(self):
         for value in (None, {}, {"x": 1}, [{"x": 1}], "text", 1, True):
@@ -97,14 +93,14 @@ class StubTests(unittest.TestCase):
             self.assertTrue(all(item.get("text") for item in page[:-1]))
         self.plugin._data = {}
 
-    def test_page_shows_current_subscriptions(self):
-        page = self.plugin.get_page()
-        self.assertIn("MP 当前订阅", page[-1]["html"])
-        self.assertIn("规则怎么写", page[-1]["html"])
+    def test_page_shows_usage_steps(self):
+        html = self.plugin.get_page()[-1]["html"]
+        self.assertIn("MP 当前订阅", html)
+        self.assertIn("怎么用", html)
 
     def test_page_escapes_names(self):
         self.plugin.save_data("sst_snapshot", {
-            "checked_at": "2026-11-12 16:00:00",
+            "checked_at": "2026-11-12 18:00:00",
             "subscriptions": [{"name": "<img src=x onerror=alert(1)>", "sites": "A"}],
             "stats": {"problems": 0},
         })
@@ -112,19 +108,41 @@ class StubTests(unittest.TestCase):
         self.assertNotIn("<img src=x", html)
         self.assertIn("&lt;img", html)
 
-    def test_api_endpoints(self):
-        self.assertIsInstance(self.plugin.api_snapshot(), MODULE.Response)
-        self.assertIsInstance(self.plugin.api_check({}), MODULE.Response)
-        self.assertIsInstance(self.plugin.api_refresh({}), MODULE.Response)
-        self.assertIsInstance(self.plugin.api_template({}), MODULE.Response)
-        self.assertFalse(self.plugin.api_clean({}).success)
-        self.assertIsInstance(self.plugin.api_unlock({}), MODULE.Response)
+    def test_every_endpoint_never_raises(self):
+        methods = [
+            "api_snapshot", "api_scan", "api_apply", "api_restore", "api_check",
+            "api_refresh", "api_template", "api_clean_preview", "api_clean",
+        ]
+        for name in methods:
+            fn = getattr(self.plugin, name)
+            for payload in ({}, None, "bad", [1, 2], {"confirm": "清理"}):
+                try:
+                    result = fn() if name == "api_snapshot" else fn(payload)
+                except Exception as exc:
+                    self.fail(f"{name} 抛异常了：{type(exc).__name__}: {exc}")
+                self.assertIsInstance(result, MODULE.Response)
+                self.assertIsInstance(result.message, str)
 
-    def test_bad_regex_does_not_break_page(self):
-        self.plugin.init_plugin({"rules_text": "剧名 => A站 => re:[( => 排除"})
-        self.assertTrue(self.plugin._rule_errors)
-        self.assertIsInstance(self.plugin.get_page(), list)
-        self.assertIsInstance(self.plugin.get_form()[0], list)
+    def test_clean_requires_two_steps(self):
+        denied = self.plugin.api_clean({"confirm": "清理"})
+        self.assertFalse(denied.success)
+        preview = self.plugin.api_clean_preview({})
+        self.assertIsInstance(preview, MODULE.Response)
+        plan = self.plugin.get_data("sst_clean_plan", {})
+        if isinstance(plan, dict) and plan.get("id"):
+            ok = self.plugin.api_clean({"plan_id": plan["id"], "confirm": "清理"})
+            self.assertIsInstance(ok, MODULE.Response)
+
+    def test_scan_then_form_items(self):
+        self.plugin.save_data("sst_catalog", {
+            "subscriptions": [{"id": 11, "name": "海贼王", "season": 1}],
+            "sites": [{"id": 1, "name": "A站"}],
+            "scanned_at": "2026-11-12 18:00:00",
+        })
+        form, _ = self.plugin.get_form()
+        text = json.dumps(form, ensure_ascii=False)
+        self.assertIn("海贼王", text)
+        self.assertIn("A站", text)
 
     def test_service_and_command(self):
         self.assertIsInstance(self.plugin.get_service(), list)

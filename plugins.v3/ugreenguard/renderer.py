@@ -183,23 +183,42 @@ def _table(headers: List[str], rows: List[str], empty: str) -> str:
 
 def _note_block(data: Dict[str, Any]) -> str:
     source = _esc(data.get("source") or MISSING)
+    mode = _esc(data.get("source_mode") or "自动")
     services = data.get("services")
+    ssh = data.get("ssh") if isinstance(data.get("ssh"), dict) else {}
     service_line = ""
     if isinstance(services, dict):
         service_line = (
             f'容器自检里看到已配置媒体服务器 {_esc(_fmt(services.get("media")))} 个、'
             f'下载器 {_esc(_fmt(services.get("download")))} 个。'
         )
+    host = _esc(str(ssh.get("host") or "未配置"))
+    if ssh.get("available"):
+        pstate = "paramiko 可用"
+        reason_line = ""
+    else:
+        pstate = "paramiko 不可用"
+        reason_line = f'，{_esc(ssh.get("reason") or "")}' if ssh.get("reason") else ""
+    ssh_line = (
+        f'<p>采集设置：{mode}；当前生效来源：{source}。{pstate}{reason_line}。'
+        f'SSH 主机：{host}（密码只存插件配置，不写日志、不进快照、不显示在页面上）。{service_line}</p>'
+    )
+    ssh_note = ""
+    if source == "SSH":
+        ssh_note = (
+            '<p>SSH 模式只跑 df -kP 读磁盘占用空间，磁盘温度、容器、UPS 一律未上报，'
+            '不会当成正常，也不会乱恢复下载。</p>'
+        )
     return (
         '<div class="ugn-note">'
         '<p>绿联 NAS 的开放接口是 HTTPS + protobuf，还要按权限节点发令牌，目前令牌只放开了 docker ps，'
         'storage、taskmgr、ctl 都返回 403，MP 容器里不方便直连。</p>'
-        '<p>所以这里走只读状态桥：放在 NAS 外面的一个只读小服务，把状态整理成一段简单 JSON，'
-        '插件只负责读它，不碰 NAS 本身。没配状态桥时，就用容器内看得见的目录水位兜底，'
-        '没上报的部分一律标「未上报」，不会当成正常，也不会乱恢复下载。</p>'
+        '<p>所以这里只读：状态桥给一段简单 JSON，或者用 SSH 账号直接跑 df -kP 读磁盘占用空间，'
+        '也可以读本地状态文件，最后用容器内看得见的目录磁盘占用空间兜底。'
+        '缺哪段就标「未上报」，不会当成正常，也不会乱恢复下载。</p>'
         '<p>状态桥大概给成这样就行，缺哪段就空着：'
         f'<code class="ugn-code">{_esc(_JSON_EXAMPLE)}</code></p>'
-        f'<p>当前数据来源：{source}。{service_line}</p>'
+        f'{ssh_line}{ssh_note}'
         "</div>"
     )
 
@@ -230,7 +249,7 @@ def _volumes_block(volumes: List[Dict[str, Any]]) -> str:
             f'<td><span class="ugn-pct">{_esc(_fmt(vol.get("percent"), "%"))}</span>{_bar(vol.get("percent"))}</td>'
             "</tr>"
         )
-    return _table(["名称", "已用", "总量", "水位"], rows, "没有上报存储卷")
+    return _table(["名称", "已用", "总量", "磁盘占用空间"], rows, "没有上报存储卷")
 
 
 def _disks_block(disks: List[Dict[str, Any]]) -> str:
@@ -313,7 +332,7 @@ def render(data: Dict[str, Any]) -> str:
     alert_count = len([h for h in hits if isinstance(h, dict) and h.get("action") in ("pause_download", "notify")])
 
     kpis = [
-        _kpi("卷最高水位", _fmt(max_percent, "%"), f'阈值 {_fmt(cfg.get("water_threshold"), "%", 0)}', "volume"),
+        _kpi("磁盘占用空间", _fmt(max_percent, "%"), f'阈值 {_fmt(cfg.get("water_threshold"), "%", 0)}', "volume"),
         _kpi("盘最高温度", _fmt(max_temp, "℃"), f'阈值 {_fmt(cfg.get("temp_threshold"), "℃", 0)}', "temp"),
         _kpi("UPS 供电", ups_text, ups_hint, "ups"),
         _kpi("命中提醒", str(alert_count), f'当前处置 {data.get("mode") or "试运行"}', "alert"),
@@ -334,10 +353,10 @@ def render(data: Dict[str, Any]) -> str:
         'stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/>'
         '<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01M12 3v2M12 19v2"/></svg></div>',
         f'<div><div class="ugn-title">绿联 NAS 守护{badge}</div>'
-        '<div class="ugn-sub">读一段状态 JSON，盯住水位、盘温、容器和 UPS</div></div>',
+        '<div class="ugn-sub">盯住磁盘占用空间、盘温、容器和 UPS</div></div>',
         '</div><div class="ugn-actions">',
         f'<span class="ugn-time">更新于 {_esc(data.get("generated_at") or "")}</span>',
-        '<span class="ugn-pill">只读状态桥</span>',
+        '<span class="ugn-pill">只读采集</span>',
         '</div></div>',
         _note_block(data),
         '<div class="ugn-grid">' + "".join(kpis) + "</div>",

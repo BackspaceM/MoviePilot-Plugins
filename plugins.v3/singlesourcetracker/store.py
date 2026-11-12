@@ -1,17 +1,21 @@
-"""订阅、下载记录和站点范围的读写，外加一轮巡检。"""
+"""订阅、站点、下载记录的读写，以及把规则写进 MP 订阅。"""
 
 from __future__ import annotations
 
 import datetime
 import re
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import rules
 
 SNAPSHOT_KEY = "sst_snapshot"
-BINDINGS_KEY = "sst_site_backup"
+CATALOG_KEY = "sst_catalog"
+ORIGINAL_KEY = "sst_original"
 LOG_KEY = "sst_log"
 TEMPLATE_KEY = "sst_template"
+PLAN_KEY = "sst_clean_plan"
+PLAN_TTL = 600
 
 
 def _getter(row: Any):
@@ -44,13 +48,25 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def bindings(plugin: Any) -> Dict[str, Any]:
-    raw = plugin.get_data(BINDINGS_KEY, {})
+def catalog(plugin: Any) -> Dict[str, Any]:
+    raw = plugin.get_data(CATALOG_KEY, {})
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def save_bindings(plugin: Any, items: Dict[str, Any]) -> None:
-    plugin.save_data(BINDINGS_KEY, _jsonable(items))
+def save_catalog(plugin: Any, subs: List[Dict[str, Any]], sites: List[Dict[str, Any]]) -> None:
+    plugin.save_data(CATALOG_KEY, _jsonable({
+        "subscriptions": subs, "sites": sites,
+        "scanned_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }))
+
+
+def original_settings(plugin: Any) -> Dict[str, Any]:
+    raw = plugin.get_data(ORIGINAL_KEY, {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def save_original(plugin: Any, items: Dict[str, Any]) -> None:
+    plugin.save_data(ORIGINAL_KEY, _jsonable(items))
 
 
 def last_snapshot(plugin: Any) -> Dict[str, Any]:
@@ -81,6 +97,34 @@ def append_log(plugin: Any, text: str, limit: int = 40) -> None:
     plugin.save_data(LOG_KEY, [f"{stamp} {text}"] + log_lines(plugin, limit)[: max(0, limit - 1)])
 
 
+def make_plan(plugin: Any, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+    targets = [{"hash": str(item.get("hash") or ""), "name": str(item.get("name") or ""),
+                "downloader": str(item.get("downloader") or "")}
+               for item in issues if item.get("hash")][:20]
+    plan = {"id": uuid.uuid4().hex[:12], "created": datetime.datetime.now().timestamp(),
+            "targets": targets}
+    plugin.save_data(PLAN_KEY, _jsonable(plan))
+    return plan
+
+
+def take_plan(plugin: Any, plan_id: Any) -> Optional[Dict[str, Any]]:
+    raw = plugin.get_data(PLAN_KEY, {})
+    if not isinstance(raw, dict) or str(raw.get("id") or "") != str(plan_id or ""):
+        return None
+    try:
+        age = datetime.datetime.now().timestamp() - float(raw.get("created") or 0)
+    except (TypeError, ValueError):
+        return None
+    if age > PLAN_TTL:
+        plugin.save_data(PLAN_KEY, {})
+        return None
+    return raw
+
+
+def clear_plan(plugin: Any) -> None:
+    plugin.save_data(PLAN_KEY, {})
+
+
 def site_options() -> List[Dict[str, Any]]:
     try:
         from app.db.oper.site import SiteOper
@@ -95,23 +139,9 @@ def site_options() -> List[Dict[str, Any]]:
         sid = get("id")
         if not name or sid is None:
             continue
-        out.append({"id": sid, "name": name,
+        out.append({"id": _jsonable(sid), "name": name,
                     "domain": str(get("domain") or "").strip()})
     return out
-
-
-def find_site(sites: List[Dict[str, Any]], value: Any) -> Optional[Dict[str, Any]]:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    for site in sites:
-        if text in (str(site.get("id")), str(site.get("name") or "").lower(),
-                    str(site.get("domain") or "").lower()):
-            return site
-    for site in sites:
-        if str(site.get("name") or "").lower().find(text) >= 0:
-            return site
-    return None
 
 
 def subscriptions(max_pages: int = 10) -> List[Dict[str, Any]]:
@@ -141,6 +171,8 @@ def subscriptions(max_pages: int = 10) -> List[Dict[str, Any]]:
                 "type": str(get("type") or "").strip(),
                 "state": str(get("state") or "").strip(),
                 "sites": _jsonable(_as_list(get("sites"))),
+                "include": str(get("include") or "").strip(),
+                "exclude": str(get("exclude") or "").strip(),
                 "lack_episode": _jsonable(get("lack_episode")),
             })
         total = int(getattr(page, "total", 0) or 0)
@@ -184,16 +216,75 @@ def downloads(max_items: int = 3000) -> List[Dict[str, Any]]:
     return out[:max_items]
 
 
-def set_sites(sid: Any, sites: Any) -> Tuple[bool, str]:
+def write_subscription(sid: Any, payload: Dict[str, Any]) -> Tuple[bool, str]:
     try:
         from app.db.oper.subscribe import SubscribeOper
 
-        result = SubscribeOper().update(int(sid), {"sites": sites})
+        result = SubscribeOper().update(int(sid), payload)
         if result is None:
             return False, "订阅不存在"
         return True, ""
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"[:160]
+
+
+def rule_payload(rule: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    site_id = rule.get("site_id")
+    if site_id not in (None, "", 0, "0"):
+        payload["sites"] = [site_id]
+    if rule.get("include_regex"):
+        payload["include"] = str(rule["include_regex"])
+    if rule.get("exclude_regex"):
+        payload["exclude"] = str(rule["exclude_regex"])
+    return payload
+
+
+def apply_rules(plugin: Any, rule_list: List[Dict[str, Any]],
+                subs: List[Dict[str, Any]]) -> Tuple[int, List[str], List[str]]:
+    saved = original_settings(plugin)
+    done, applied, messages = 0, [], []
+    for rule in rule_list:
+        matched = [sub for sub in subs if rules.rule_matches(rule, sub)]
+        if not matched:
+            messages.append(f"{rule.get('target')} 没匹配到订阅")
+            continue
+        payload = rule_payload(rule)
+        if not payload:
+            messages.append(f"{rule.get('target')} 没填站点也没有条件，跳过")
+            continue
+        sub = matched[0]
+        sid = sub.get("id")
+        key = str(sid)
+        if key not in saved:
+            saved[key] = {field: _jsonable(sub.get(field))
+                          for field in ("sites", "include", "exclude")}
+        ok, reason = write_subscription(sid, payload)
+        if ok:
+            done += 1
+            applied.append(key)
+            append_log(plugin, f"把「{sub.get('name')}」的站点与过滤规则写进订阅")
+        else:
+            messages.append(f"《{sub.get('name')}》写入失败：{reason}")
+    save_original(plugin, saved)
+    return done, applied, messages
+
+
+def restore_rules(plugin: Any) -> Tuple[int, List[str]]:
+    saved = original_settings(plugin)
+    done, messages = 0, []
+    for key, fields in saved.items():
+        if not isinstance(fields, dict):
+            continue
+        payload = {field: fields.get(field) for field in ("sites", "include", "exclude")}
+        ok, reason = write_subscription(key, payload)
+        if ok:
+            done += 1
+        else:
+            messages.append(f"订阅 {key} 还原失败：{reason}")
+    save_original(plugin, {})
+    append_log(plugin, f"还原了 {done} 条订阅原来的设置")
+    return done, messages
 
 
 def record_matches(record: Dict[str, Any], sub: Dict[str, Any]) -> bool:
@@ -232,45 +323,44 @@ def sites_text(sub: Dict[str, Any], sites: List[Dict[str, Any]]) -> str:
 
 def inspect(rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
             records: List[Dict[str, Any]], sites: List[Dict[str, Any]],
+            applied: Optional[List[str]] = None,
             rule_errors: Optional[List[str]] = None) -> Dict[str, Any]:
-    sub_rows: List[Dict[str, Any]] = []
-    issues: List[Dict[str, Any]] = []
-    rule_rows: List[Dict[str, Any]] = []
-    ruled = 0
+    applied = list(applied or [])
+    sub_rows, issues, rule_rows = [], [], []
 
     for rule in rule_list:
         matched = [sub for sub in subs if rules.rule_matches(rule, sub)]
         rule_rows.append({
-            "line": rule.get("line"),
+            "source": rule.get("source"),
             "target": rule.get("target"),
-            "site": rule.get("site") or "不限",
-            "summary": rules.brief(rule),
+            "site_name": rule.get("site_name") or "不限",
+            "include_display": rule.get("include_display") or "无",
+            "exclude_display": rule.get("exclude_display") or "无",
+            "include_regex": rule.get("include_regex") or "",
+            "exclude_regex": rule.get("exclude_regex") or "",
             "matched": len(matched),
-            "errors": list(rule.get("errors") or []),
+            "written": bool(matched and str(matched[0].get("id")) in applied),
         })
 
     for sub in subs:
         picked = next((rule for rule in rule_list if rules.rule_matches(rule, sub)), None)
-        if picked:
-            ruled += 1
         matched_records = [item for item in records if record_matches(item, sub)]
         problems = 0
         for record in matched_records:
             if not picked:
                 continue
-            reasons: List[str] = []
+            reasons = []
             site_state = rules.check_site(picked, record.get("torrent_site"), sites)
             if site_state is False:
                 reasons.append(f"站点不符：来自 {record.get('torrent_site') or '其他站点'}，"
-                               f"规则要 {picked.get('site')}")
+                               f"规则要 {picked.get('site_name')}")
             title = record.get("torrent_name") or record.get("title") or ""
             reasons.extend(rules.check_title(picked, title))
             if not reasons:
                 continue
             problems += 1
             issues.append({
-                "sid": sub.get("id"),
-                "name": sub.get("name"),
+                "sid": sub.get("id"), "name": sub.get("name"),
                 "season": sub.get("season"),
                 "episode": record.get("episodes") or record.get("seasons") or "-",
                 "site": record.get("torrent_site") or "未记录",
@@ -280,15 +370,14 @@ def inspect(rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
                 "reasons": reasons[:6],
             })
         sub_rows.append({
-            "id": sub.get("id"),
-            "name": sub.get("name"),
-            "season": sub.get("season"),
-            "state": sub.get("state") or "-",
+            "id": sub.get("id"), "name": sub.get("name"),
+            "season": sub.get("season"), "state": sub.get("state") or "-",
             "sites": sites_text(sub, sites),
-            "rule": rules.brief(picked) if picked else "",
-            "rule_target": picked.get("target") if picked else "",
-            "records": len(matched_records),
-            "problems": problems,
+            "include": str(sub.get("include") or "")[:60],
+            "exclude": str(sub.get("exclude") or "")[:60],
+            "rule": picked.get("include_display") if picked else "",
+            "written": str(sub.get("id")) in applied,
+            "records": len(matched_records), "problems": problems,
         })
 
     return {
@@ -298,52 +387,13 @@ def inspect(rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
         "errors": list(rule_errors or []),
         "stats": {
             "subscriptions": len(subs),
-            "ruled": ruled,
-            "rules": len(rule_list),
+            "ruled": sum(1 for row in sub_rows if row["rule"]),
+            "written": len(applied),
             "records": len(records),
             "problems": len(issues),
         },
         "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-
-
-def lock_sites(plugin: Any, rule_list: List[Dict[str, Any]], subs: List[Dict[str, Any]],
-               sites: List[Dict[str, Any]]) -> Tuple[int, List[str]]:
-    saved = bindings(plugin)
-    done, messages = 0, []
-    for sub in subs:
-        rule = next((item for item in rule_list if rules.rule_matches(item, sub)), None)
-        if not rule or not str(rule.get("site") or "").strip():
-            continue
-        site = find_site(sites, rule.get("site"))
-        if not site:
-            messages.append(f"《{sub.get('name')}》的站点「{rule.get('site')}」没在站点列表里找到")
-            continue
-        key = str(sub.get("id"))
-        if key not in saved:
-            saved[key] = _jsonable(sub.get("sites") or [])
-        ok, reason = set_sites(sub.get("id"), [site.get("id")])
-        if ok:
-            done += 1
-            append_log(plugin, f"《{sub.get('name')}》站点范围锁定为 {site.get('name')}")
-        else:
-            messages.append(f"《{sub.get('name')}》写入失败：{reason}")
-    save_bindings(plugin, saved)
-    return done, messages
-
-
-def unlock_sites(plugin: Any) -> Tuple[int, List[str]]:
-    saved = bindings(plugin)
-    done, messages = 0, []
-    for key, original in saved.items():
-        ok, reason = set_sites(key, original)
-        if ok:
-            done += 1
-        else:
-            messages.append(f"订阅 {key} 还原失败：{reason}")
-    save_bindings(plugin, {})
-    append_log(plugin, f"还原了 {done} 条订阅的站点范围")
-    return done, messages
 
 
 def remove_torrent(issue: Dict[str, Any]) -> Tuple[bool, str]:

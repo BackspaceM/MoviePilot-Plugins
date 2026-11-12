@@ -81,6 +81,7 @@ class TestContract(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.plugin = PLUGIN_CLS()
         self.plugin.init_plugin({"backup_dir": self.tmp.name})
+        self.plugin.get_data_path = lambda *a, **k: self.tmp.name
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -88,7 +89,7 @@ class TestContract(unittest.TestCase):
     def test_plugin_id_and_metadata(self) -> None:
         self.assertEqual(PLUGIN_ID, "MPBackup")
         expected = {
-            "plugin_name": "MP 备份迁移", "plugin_version": "1.1.0",
+            "plugin_name": "MP 备份迁移", "plugin_version": "1.2.0",
             "plugin_author": "BackspaceM", "plugin_config_prefix": "mpbackup_",
             "plugin_color": "#6366F1", "system_version": ">=3.0.0", "plugin_order": 95,
         }
@@ -123,6 +124,7 @@ class TestContract(unittest.TestCase):
             str(a["path"]).lstrip("/"): {str(m).upper() for m in (a.get("methods") or ["GET"])}
             for a in self.plugin.get_api()
         }
+        self.plugin.api_backup()  # 有快照才会渲染出每行的删除按钮
         clicks = cc.collect_click_events(self.plugin.get_page())
         self.assertTrue(clicks, "详情页至少应有一个可点击按钮")
         prefix = f"plugin/{PLUGIN_ID}/"
@@ -134,14 +136,14 @@ class TestContract(unittest.TestCase):
             self.assertIn(click["method"].upper(), declared[action], click["api"])
             actions.add(action)
         for action in ("backup", "compare", "restore-guide", "clean", "refresh",
-                       "import-preview", "import", "import-guide"):
+                       "import-preview", "import", "import-guide", "delete"):
             self.assertIn(action, actions)
         for api in self.plugin.get_api():
             self.assertEqual(api.get("auth"), "bear")
 
     def test_new_endpoints_are_relative_and_bear(self) -> None:
         paths = {str(a["path"]) for a in self.plugin.get_api()}
-        for path in ("/import-preview", "/import", "/import-guide"):
+        for path in ("/import-preview", "/import", "/import-guide", "/delete"):
             self.assertIn(path, paths)
             self.assertTrue(path.startswith("/"))
         for api in self.plugin.get_api():
@@ -203,10 +205,13 @@ class TestContract(unittest.TestCase):
     def test_api_returns_three_part_envelope(self) -> None:
         for name in ("api_snapshot", "api_backup", "api_compare", "api_restore_guide",
                      "api_clean", "api_refresh", "api_import_preview", "api_import",
-                     "api_import_guide"):
+                     "api_import_guide", "api_delete"):
             result = getattr(self.plugin, name)()
-            self.assertTrue(hasattr(result, "success"))
+            self.assertIsInstance(result, MODULE.Response)
+            self.assertEqual(set(result.model_dump()), {"success", "message", "data"})
+            self.assertIsInstance(result.success, bool)
             self.assertIsInstance(result.message, str)
+            self.assertIsInstance(result.data, dict)
 
     def test_state_and_service(self) -> None:
         self.assertIsInstance(self.plugin.get_state(), bool)
@@ -236,6 +241,23 @@ class TestContract(unittest.TestCase):
                          {"enabled", "backup_dir", "keep", "schedule", "sections",
                           "notify", "include_secrets", "import_strategy"})
 
+    def test_backup_dir_hint_and_full_sections(self) -> None:
+        form, defaults = self.plugin.get_form()
+        text_field = next(item for item in form
+                          if item.get("component") == "VTextField"
+                          and item["props"].get("model") == "backup_dir")
+        self.assertIn("填 MoviePilot 容器里能看到的路径，比如 NAS 映射到容器的目录；"
+                      "留空用插件数据目录", text_field["props"]["hint"])
+        section_select = next(item for item in form
+                              if item.get("component") == "VSelect"
+                              and item["props"].get("model") == "sections")
+        values = {i["value"] for i in section_select["props"]["items"]}
+        self.assertEqual(values, set(BACKUP.ALL_SOURCES))
+        self.assertEqual(set(defaults["sections"]), set(BACKUP.ALL_SOURCES))
+        for item in section_select["props"]["items"]:
+            self.assertIsInstance(item["title"], str)
+            self.assertTrue(item["title"])
+
 
 class TestBackupFiles(unittest.TestCase):
     def setUp(self) -> None:
@@ -252,7 +274,7 @@ class TestBackupFiles(unittest.TestCase):
 
     def test_offline_snapshot_is_structurally_complete(self) -> None:
         result = BACKUP.write_snapshot(self.dir, str(self.data),
-                                       list(BACKUP.TOGGLEABLE), 3)
+                                       list(BACKUP.DEFAULT_SECTIONS), 3)
         path = self.dir / result["file"]
         self.assertTrue(path.is_file())
         with zipfile.ZipFile(path) as zf:
@@ -464,6 +486,7 @@ class TestApiFlow(unittest.TestCase):
         self.dir = pathlib.Path(self.tmp.name)
         self.plugin = PLUGIN_CLS()
         self.plugin.init_plugin({"backup_dir": str(self.dir), "keep": 3, "notify": False})
+        self.plugin.get_data_path = lambda *a, **k: str(self.dir)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -637,6 +660,325 @@ class TestRestore(unittest.TestCase):
         text = RESTORE.import_guide("overwrite")
         self.assertIn("覆盖已存在", text)
         self.assertIn(RESTORE.CONFIRM, text)
+
+
+class TestSectionsThroughPlugin(unittest.TestCase):
+    """init_plugin 里选中的分类真的只写选中项。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.plugin = PLUGIN_CLS()
+        self.plugin.init_plugin({"backup_dir": str(self.dir), "notify": False,
+                                 "sections": ["users", "sites"]})
+        self.plugin.get_data_path = lambda *a, **k: str(self.dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_only_selected_are_written(self):
+        result = self.plugin.api_backup()
+        self.assertTrue(result.success)
+        manifest = result.data["manifest"]
+        self.assertEqual(manifest["sections"], ["users", "sites"])
+        for name in BACKUP.ALL_SOURCES:
+            if name in ("users", "sites"):
+                self.assertNotEqual(manifest["sources"][name]["status"], "skipped", name)
+            else:
+                self.assertEqual(manifest["sources"][name]["status"], "skipped", name)
+        with zipfile.ZipFile(self.dir / result.data["file"]) as zf:
+            names = set(zf.namelist())
+        self.assertIn("users.json", names)
+        self.assertIn("sites.json", names)
+        self.assertNotIn("subscriptions.json", names)
+        self.assertNotIn("settings.json", names)
+
+
+class TestCustomPath(unittest.TestCase):
+    """备份目录能自己填，缺的目录自动建，建不起来给可读提示。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_absolute_path_is_created_automatically(self):
+        target = self.base / "nas" / "mount" / "backups"
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"backup_dir": str(target), "notify": False})
+        plugin.get_data_path = lambda *a, **k: str(self.base)
+        self.assertFalse(target.exists())
+        result = plugin.api_backup()
+        self.assertTrue(result.success)
+        self.assertTrue(target.is_dir())
+        self.assertTrue((target / result.data["file"]).is_file())
+        self.assertEqual(plugin._backup_path(), target)
+
+    def test_relative_path_is_anchored_to_data_dir(self):
+        plugin = PLUGIN_CLS()
+        plugin.get_data_path = lambda *a, **k: str(self.base)
+        plugin.init_plugin({"backup_dir": "my_backups", "notify": False})
+        result = plugin.api_backup()
+        self.assertTrue(result.success)
+        target = self.base / "my_backups"
+        self.assertTrue(target.is_dir())
+        self.assertTrue((target / result.data["file"]).is_file())
+
+    def test_mkdir_failure_gives_readable_message(self):
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"backup_dir": str(self.base / "nope"), "notify": False})
+        plugin.get_data_path = lambda *a, **k: str(self.base)
+        with mock.patch.object(pathlib.Path, "mkdir",
+                               side_effect=OSError("Permission denied")):
+            result = plugin.api_backup()
+        self.assertFalse(result.success)
+        self.assertIn("备份目录建不起来", result.message)
+        self.assertIsInstance(result.message, str)
+
+
+class TestBackupCount(unittest.TestCase):
+    """成功才计数，失败不计数，页面看得到次数和最近时间。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.plugin = PLUGIN_CLS()
+        self.plugin.init_plugin({"backup_dir": str(self.dir), "keep": 30, "notify": False})
+        self.plugin.get_data_path = lambda *a, **k: str(self.dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_success_increments_and_persists(self):
+        self.assertEqual(self.plugin.get_data(BACKUP.BACKUP_COUNT_KEY, 0), 0)
+        for i in range(3):
+            self.assertTrue(self.plugin.api_backup().success)
+            self.assertEqual(self.plugin.get_data(BACKUP.BACKUP_COUNT_KEY), i + 1)
+        self.assertEqual(self.plugin._backup_count, 3)
+        last = self.plugin.get_data(BACKUP.LAST_BACKUP_KEY, "")
+        self.assertTrue(last)
+        self.assertEqual(self.plugin._last_backup_at, last)
+
+    def test_failure_does_not_increment(self):
+        self.assertTrue(self.plugin.api_backup().success)
+        before = self.plugin.get_data(BACKUP.BACKUP_COUNT_KEY)
+        with mock.patch.object(BACKUP, "write_snapshot",
+                               side_effect=RuntimeError("磁盘炸了")):
+            result = self.plugin.api_backup()
+        self.assertFalse(result.success)
+        self.assertEqual(self.plugin.get_data(BACKUP.BACKUP_COUNT_KEY), before)
+        self.assertEqual(self.plugin._backup_count, before)
+
+    def test_count_survives_reinit(self):
+        self.plugin.api_backup()
+        self.plugin.api_backup()
+        again = PLUGIN_CLS()
+        again._data = dict(self.plugin._data)
+        again.init_plugin({"backup_dir": str(self.dir), "notify": False})
+        self.assertEqual(again._backup_count, 2)
+        self.assertTrue(again._last_backup_at)
+
+    def test_kpi_shows_count_and_last_time(self):
+        self.plugin.api_backup()
+        html = RENDERER.render(self.plugin._cache)
+        self.assertIn("已备份", html)
+        self.assertIn("1 次", html)
+        self.assertIn(self.plugin._last_backup_at[5:10], html)
+        self.assertIn("累计已备份 1 次", html)
+        self.assertIn("最近一次备份", html)
+
+
+class TestDeleteFlow(unittest.TestCase):
+    """两段式删除：第一步出计划，第二步全校验过才真删。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.plugin = PLUGIN_CLS()
+        self.plugin.init_plugin({"backup_dir": str(self.dir), "keep": 30, "notify": False})
+        self.plugin.get_data_path = lambda *a, **k: str(self.dir)
+        self.name = self.plugin.api_backup().data["file"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _plan(self):
+        return self.plugin.api_delete({"name": self.name})
+
+    def test_two_step_delete_works(self):
+        first = self._plan()
+        self.assertTrue(first.success)
+        plan_id = first.data["plan_id"]
+        self.assertEqual(first.data["name"], self.name)
+        self.assertEqual(first.data["confirm"], "删除")
+        self.assertIsNotNone(self.plugin.get_data(BACKUP.DELETE_PLAN_KEY))
+        self.assertTrue((self.dir / self.name).is_file())
+        second = self.plugin.api_delete({"plan_id": plan_id, "name": self.name,
+                                         "confirm": "删除"})
+        self.assertTrue(second.success, second.message)
+        self.assertFalse((self.dir / self.name).is_file())
+        self.assertIsNone(self.plugin.get_data(BACKUP.DELETE_PLAN_KEY))
+        self.assertIsNone(self.plugin._delete_plan)
+
+    def test_no_plan_id_never_deletes(self):
+        self._plan()
+        got = self.plugin.api_delete({"name": self.name, "confirm": "删除"})
+        self.assertFalse(got.success)
+        self.assertTrue((self.dir / self.name).is_file())
+
+    def test_wrong_confirm_never_deletes(self):
+        plan_id = self._plan().data["plan_id"]
+        for confirm in ("", "随便", "DELETE", " 删除 "):
+            got = self.plugin.api_delete({"plan_id": plan_id, "name": self.name,
+                                          "confirm": confirm})
+            self.assertFalse(got.success, confirm)
+            self.assertTrue((self.dir / self.name).is_file())
+
+    def test_wrong_plan_id_never_deletes(self):
+        self._plan()
+        got = self.plugin.api_delete({"plan_id": "乱编的", "name": self.name,
+                                      "confirm": "删除"})
+        self.assertFalse(got.success)
+        self.assertTrue((self.dir / self.name).is_file())
+
+    def test_name_mismatch_never_deletes(self):
+        plan_id = self._plan().data["plan_id"]
+        got = self.plugin.api_delete({"plan_id": plan_id, "name": "别的.zip",
+                                      "confirm": "删除"})
+        self.assertFalse(got.success)
+        self.assertTrue((self.dir / self.name).is_file())
+
+    def test_expired_plan_never_deletes(self):
+        first = self._plan()
+        plan = self.plugin.get_data(BACKUP.DELETE_PLAN_KEY)
+        plan["expires_at"] = 0
+        self.plugin.save_data(BACKUP.DELETE_PLAN_KEY, plan)
+        got = self.plugin.api_delete({"plan_id": first.data["plan_id"],
+                                      "name": self.name, "confirm": "删除"})
+        self.assertFalse(got.success)
+        self.assertTrue((self.dir / self.name).is_file())
+        self.assertIsNone(self.plugin.get_data(BACKUP.DELETE_PLAN_KEY))
+
+    def test_out_of_path_name_is_rejected(self):
+        for bad in ("../evil.zip", "/etc/mpbackup_x.zip", "other.zip",
+                    "mpbackup_notes.txt", "sub/mpbackup_x.zip"):
+            got = self.plugin.api_delete({"name": bad})
+            self.assertFalse(got.success, bad)
+        self.assertTrue((self.dir / self.name).is_file())
+
+    def test_only_own_zip_is_deleted(self):
+        other = self.dir / "other.zip"
+        other.write_bytes(b"keep")
+        self.assertFalse(self.plugin.api_delete({"name": "other.zip"}).success)
+        self.assertTrue(other.is_file())
+        plan_id = self._plan().data["plan_id"]
+        self.assertTrue(self.plugin.api_delete({
+            "plan_id": plan_id, "name": self.name, "confirm": "删除"}).success)
+        self.assertTrue(other.is_file())
+
+    def test_delete_failure_is_readable(self):
+        plan_id = self._plan().data["plan_id"]
+        with mock.patch.object(pathlib.Path, "unlink",
+                               side_effect=OSError("readonly")):
+            got = self.plugin.api_delete({"plan_id": plan_id, "name": self.name,
+                                          "confirm": "删除"})
+        self.assertFalse(got.success)
+        self.assertIn("删不掉", got.message)
+        self.assertTrue((self.dir / self.name).is_file())
+
+    def test_confirm_button_appears_after_first_step(self):
+        first = self._plan()
+        found = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("component") == "VBtn" and "确认删除" in str(node.get("text") or ""):
+                    found.append(node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(self.plugin.get_page())
+        self.assertEqual(len(found), 1)
+        click = found[0]["events"]["click"]
+        self.assertEqual(click["api"], "plugin/MPBackup/delete")
+        self.assertEqual(click["method"], "post")
+        self.assertEqual(click["params"], {"plan_id": first.data["plan_id"],
+                                           "name": self.name, "confirm": "删除"})
+
+    def test_delete_button_on_each_snapshot_row(self):
+        self.plugin.api_backup()
+        clicks = cc.collect_click_events(self.plugin.get_page())
+        deletes = [c for c in clicks if c["api"].endswith("/delete")]
+        self.assertGreaterEqual(len(deletes), 2)
+
+
+class TestEndpointGuards(unittest.TestCase):
+    """任何 endpoint 炸了都只能拿到中文失败响应，绝不冒泡到宿主。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.plugin = PLUGIN_CLS()
+        self.plugin.init_plugin({"backup_dir": self.tmp.name, "notify": False})
+        self.plugin.get_data_path = lambda *a, **k: self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_all_endpoints_swallow_internal_errors(self):
+        names = ("api_snapshot", "api_backup", "api_compare", "api_restore_guide",
+                 "api_clean", "api_refresh", "api_import_preview", "api_import",
+                 "api_import_guide", "api_delete")
+        for name in names:
+            with mock.patch.object(self.plugin, "_collect_state",
+                                   side_effect=RuntimeError("boom")):
+                result = getattr(self.plugin, name)()
+            self.assertIsInstance(result, MODULE.Response, name)
+            self.assertFalse(result.success, name)
+            self.assertIsInstance(result.message, str, name)
+            self.assertTrue(result.message, name)
+
+    def test_odd_payloads_never_raise(self):
+        names = ("api_backup", "api_compare", "api_restore_guide", "api_clean",
+                 "api_refresh", "api_import_preview", "api_import",
+                 "api_import_guide", "api_delete")
+        odd = (None, "不是字典", 123, [], {"name": object()},
+               {"confirm": ["x"]}, {"sections": {"a": 1}})
+        for name in names:
+            for payload in odd:
+                result = getattr(self.plugin, name)(payload)
+                self.assertIsInstance(result, MODULE.Response, name)
+                self.assertIsInstance(result.message, str, name)
+
+
+class TestRenderEscape(unittest.TestCase):
+    """新加的计数字段和删除计划也要过 html.escape。"""
+
+    def test_new_fields_are_escaped(self):
+        state = {
+            "offline": True, "enabled": True, "generated_at": "2026-01-01 00:00:00",
+            "backup_dir": "<img src=x>", "cron_label": "每天凌晨 4 点", "keep": 7,
+            "sections": [], "sources": {}, "diff": None, "diff_a": "", "diff_b": "",
+            "guide": None, "total_size_text": "1.0 KB", "contains_secrets": False,
+            "snapshots": [], "backup_count": 3,
+            "last_backup_at": "<script>alert(1)</script>",
+            "delete_plan": {"plan_id": "p", "name": "<b>坏名字</b>.zip",
+                            "expires_at": 9999999999},
+        }
+        html = RENDERER.render(state)
+        for bad in ("<img src=x>", "<script>alert(1)", "<b>坏名字</b>"):
+            self.assertNotIn(bad, html)
+        self.assertIn("&lt;img", html)
+        self.assertIn("&lt;script", html)
+        self.assertIn("&lt;b&gt;", html)
+        self.assertIn("已备份", html)
+        self.assertIn("3 次", html)
+        self.assertIn("累计已备份 3 次", html)
+        self.assertIn("待确认删除", html)
 
 
 def main() -> int:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""直接测绿联 NAS 守护的规则引擎和状态解析，不需要宿主或桩。"""
+"""直接测绿联 NAS 守护的规则引擎、df 解析和术语文案，不需要宿主或桩。"""
 
 from __future__ import annotations
 
@@ -8,14 +8,36 @@ import os
 import pathlib
 import sys
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 NAS_PATH = ROOT / "plugins.v3" / "ugreenguard" / "nas.py"
-_spec = importlib.util.spec_from_file_location("ugreenguard_nas", NAS_PATH)
-nas = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(nas)
+RENDER_PATH = ROOT / "plugins.v3" / "ugreenguard" / "renderer.py"
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+nas = _load("ugreenguard_nas", NAS_PATH)
+renderer = _load("ugreenguard_renderer", RENDER_PATH)
 
 MISSING = nas.MISSING
+
+# 一行表头 + 真分区 + 一堆伪文件系统 + 一行重复设备 + 一个带空格的挂载点
+DF_SAMPLE = """Filesystem 1024-blocks      Used Available Capacity Mounted on
+/dev/md0       19275980   1234567  18041413       7% /
+tmpfs           8192000         0   8192000       0% /dev/shm
+devtmpfs        8184000         0   8184000       0% /dev
+proc                   0         0         0        - /proc
+/dev/sdb1     3907003264 2000000000 1907003264      52% /volume1
+/dev/sdc1      976762584  100000000  876762584      11% /volume2
+/dev/sdb1     3907003264 2000000000 1907003264      52% /mnt/bind1
+/dev/mapper/cache  999999  500000  499999  51% /mnt/my data
+"""
 
 
 def cfg(**overrides):
@@ -112,6 +134,138 @@ class TestParseStatus(unittest.TestCase):
         self.assertEqual(nas._as_num("abc"), MISSING)
 
 
+class TestParseDf(unittest.TestCase):
+    def test_empty_and_odd_input(self):
+        for text in ("", None, "   \n\n", "hello world", "Filesystem 1024-blocks Used Available Capacity Mounted on"):
+            self.assertEqual(nas.parse_df(text), [], text)
+
+    def test_header_and_pseudo_fs_are_filtered(self):
+        volumes = nas.parse_df(DF_SAMPLE)
+        names = [v["name"] for v in volumes]
+        for bad in ("/dev/shm", "/dev", "/proc", "/mnt/bind1"):
+            self.assertNotIn(bad, names, bad)
+        for word in ("tmpfs", "devtmpfs", "proc"):
+            self.assertNotIn(word, [v["name"] for v in volumes])
+
+    def test_real_partitions_and_duplicate_removal(self):
+        volumes = nas.parse_df(DF_SAMPLE)
+        self.assertEqual(len(volumes), 4)
+        self.assertEqual([v["name"] for v in volumes], ["/", "/volume1", "/volume2", "/mnt/my data"])
+        # 重复设备只留第一条
+        self.assertEqual(len([v for v in volumes if v["name"] == "/volume1"]), 1)
+
+    def test_schema_and_units(self):
+        vol = next(v for v in nas.parse_df(DF_SAMPLE) if v["name"] == "/volume1")
+        self.assertEqual(set(vol), {"name", "total", "used", "percent"})
+        self.assertEqual(vol["total"], 3907003264 * 1024)
+        self.assertEqual(vol["used"], 2000000000 * 1024)
+        self.assertIsInstance(vol["percent"], float)
+
+    def test_percent_from_used_over_available_not_capacity(self):
+        vol = next(v for v in nas.parse_df(DF_SAMPLE) if v["name"] == "/")
+        # df 自己写 7%，按 Used/(Used+Available) 算应该是 6.4%
+        self.assertAlmostEqual(vol["percent"], 6.4, places=1)
+        self.assertNotEqual(vol["percent"], 7.0)
+
+    def test_mount_point_with_spaces_kept_whole(self):
+        vol = next(v for v in nas.parse_df(DF_SAMPLE) if v["name"] == "/mnt/my data")
+        self.assertEqual(vol["total"], 999999 * 1024)
+
+    def test_malformed_lines_are_skipped(self):
+        text = (
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+            "/dev/sda1 abc 100 100 50% /a\n"
+            "short line\n"
+            "/dev/sda2 1000 400 600 40% /b\n"
+            "0 0 0 0 0 /zero\n"
+        )
+        volumes = nas.parse_df(text)
+        self.assertEqual([v["name"] for v in volumes], ["/b"])
+
+    def test_output_fits_unified_status_schema(self):
+        status = nas.parse_status({"volumes": nas.parse_df(DF_SAMPLE)})
+        self.assertEqual(len(status["volumes"]), 4)
+        self.assertEqual(status["disks"], [])
+        self.assertEqual(status["ups"], {"on_battery": MISSING, "battery": MISSING})
+
+
+class TestParamikoAndCollect(unittest.TestCase):
+    def test_paramiko_missing_returns_explicit_state(self):
+        with patch.dict(sys.modules, {"paramiko": None}):
+            state = nas.paramiko_state()
+        self.assertEqual(state, {
+            "available": False,
+            "reason": "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件",
+        })
+
+    def test_paramiko_state_never_raises(self):
+        with patch.dict(sys.modules, {"paramiko": None}):
+            self.assertIsInstance(nas.ssh_info({"ssh_host": "10.0.0.2"}), dict)
+            self.assertEqual(nas._read_ssh({"ssh_host": "10.0.0.2"}), None)
+
+    def test_auto_downgrades_when_paramiko_missing(self):
+        raw = {"volumes": [{"name": "v", "percent": 10}]}
+        with patch.dict(sys.modules, {"paramiko": None}), \
+             patch.object(nas, "_read_bridge", return_value=raw), \
+             patch.object(nas, "_read_status_file", return_value=None), \
+             patch.object(nas, "local_raw", return_value={"volumes": []}):
+            result = nas.collect({
+                "source_mode": "自动", "ssh_host": "10.0.0.2",
+                "bridge_url": "http://x/status", "status_file": "/tmp/x.json",
+            })
+        self.assertEqual(result["source"], "状态桥")
+        self.assertIs(result["ssh"]["available"], False)
+        self.assertIn("paramiko", result["ssh"]["reason"])
+
+    def test_auto_order_ssh_then_bridge_then_file_then_local(self):
+        raw = {"volumes": [{"name": "v", "percent": 10}]}
+        with patch.object(nas, "paramiko_state", return_value={"available": True, "reason": ""}), \
+             patch.object(nas, "_read_ssh", return_value=raw), \
+             patch.object(nas, "_read_bridge", return_value={"volumes": [{"name": "b", "percent": 1}]}), \
+             patch.object(nas, "_read_status_file", return_value={"volumes": [{"name": "f", "percent": 1}]}), \
+             patch.object(nas, "local_raw", return_value={"volumes": [{"name": "l", "percent": 1}]}):
+            result = nas.collect({
+                "source_mode": "自动", "ssh_host": "10.0.0.2",
+                "bridge_url": "http://x", "status_file": "/tmp/x.json",
+            })
+        self.assertEqual(result["source"], "SSH")
+        self.assertIs(result["ssh"]["used"], True)
+
+    def test_ssh_mode_only_reports_volumes(self):
+        raw = {"ts": "x", "volumes": [{"name": "/volume1", "total": 1024, "used": 900, "percent": 87.9}]}
+        with patch.object(nas, "paramiko_state", return_value={"available": True, "reason": ""}), \
+             patch.object(nas, "_read_ssh", return_value=raw):
+            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2"})
+        self.assertEqual(result["source"], "SSH")
+        self.assertEqual(result["status"]["disks"], [])
+        self.assertEqual(result["status"]["containers"], [])
+        self.assertEqual(result["status"]["ups"]["on_battery"], MISSING)
+        self.assertIn("no_data", rules(nas.evaluate(result["status"], cfg())))
+
+    def test_ssh_failure_falls_back_to_local(self):
+        with patch.object(nas, "paramiko_state", return_value={"available": True, "reason": ""}), \
+             patch.object(nas, "_read_ssh", return_value=None), \
+             patch.object(nas, "local_raw", return_value={"volumes": [{"name": "/", "percent": 5}]}):
+            result = nas.collect({"source_mode": "SSH", "ssh_host": "10.0.0.2"})
+        self.assertEqual(result["source"], "容器自检")
+
+    def test_explicit_modes_still_keep_three_original_paths(self):
+        with patch.object(nas, "_read_bridge", return_value={"volumes": []}):
+            self.assertEqual(nas.collect({"source_mode": "状态桥", "bridge_url": "http://x"})["source"], "状态桥")
+        with patch.object(nas, "_read_status_file", return_value={"volumes": []}):
+            self.assertEqual(nas.collect({"source_mode": "本地文件", "status_file": "/tmp/x"})["source"], "本地文件")
+        self.assertEqual(nas.collect({"source_mode": "容器自检"})["source"], "容器自检")
+
+    def test_invalid_mode_defaults_to_auto(self):
+        self.assertEqual(nas.collect({"source_mode": "瞎写的"})["source_mode"], "自动")
+
+    def test_ssh_port_parsing(self):
+        self.assertEqual(nas._ssh_port({"ssh_port": "2222"}), 2222)
+        self.assertEqual(nas._ssh_port({"ssh_port": "abc"}), 22)
+        self.assertEqual(nas._ssh_port({"ssh_port": 99999}), 22)
+        self.assertEqual(nas._ssh_port({}), 22)
+
+
 class TestEvaluate(unittest.TestCase):
     def test_hit_fields_are_stable(self):
         hits = nas.evaluate(full(), cfg())
@@ -155,6 +309,15 @@ class TestEvaluate(unittest.TestCase):
         ])
         hit = next(h for h in nas.evaluate(status, cfg()) if h["rule"] == "volume_high")
         self.assertIn("big", hit["detail"])
+
+    def test_volume_hit_uses_disk_usage_wording(self):
+        hit = next(h for h in nas.evaluate(full(volumes=[{"name": "v", "percent": 95}]), cfg())
+                   if h["rule"] == "volume_high")
+        self.assertIn("磁盘占用空间达到", hit["detail"])
+        self.assertNotIn("水位", hit["detail"])
+
+    def test_internal_rule_id_stays_put(self):
+        self.assertIn("volume_high", rules(nas.evaluate(full(volumes=[{"name": "v", "percent": 95}]), cfg())))
 
     def test_disk_temp_and_smart(self):
         self.assertIn("disk_risk", rules(nas.evaluate(full(disks=[{"name": "d", "temp": 52,
@@ -223,6 +386,53 @@ class TestEvaluate(unittest.TestCase):
         snapshot = dict(config)
         nas.evaluate(full(volumes=[{"name": "v", "percent": 95}]), config)
         self.assertEqual(config, snapshot)
+
+
+class TestRendererText(unittest.TestCase):
+    def _view(self, **overrides):
+        data = {
+            "generated_at": "2026-11-12 10:00:00",
+            "status": full(),
+            "hits": [],
+            "source": "容器自检",
+            "services": None,
+            "ssh": {"available": False, "reason": "容器里没有 paramiko", "host": "", "used": False, "note": ""},
+            "source_mode": "自动",
+            "log": [],
+            "paused": False,
+            "mode": "试运行",
+            "cfg": {"water_threshold": 88, "temp_threshold": 52, "watch_containers": []},
+            "cooldown": 1800,
+        }
+        data.update(overrides)
+        return data
+
+    def test_no_water_word_and_new_term_on_page(self):
+        html = renderer.render(self._view())
+        self.assertNotIn("水位", html)
+        self.assertIn("磁盘占用空间", html)
+
+    def test_dynamic_volume_name_is_escaped(self):
+        status = full(volumes=[{"name": "<img src=x onerror=alert(1)>", "percent": 95}])
+        html = renderer.render(self._view(status=status))
+        self.assertNotIn("<img src=x onerror=alert(1)>", html)
+        self.assertIn("&lt;img", html)
+
+    def test_ssh_host_is_escaped_and_password_not_shown(self):
+        dirty = "<svg onload=alert(1)>"
+        ssh = {"available": False, "reason": "容器里没有 paramiko，在 MoviePilot 容器执行 pip install paramiko 后重启插件",
+               "host": dirty, "used": True, "note": ""}
+        html = renderer.render(self._view(source="SSH", ssh=ssh))
+        self.assertNotIn(dirty, html)
+        self.assertIn("&lt;svg", html)
+        self.assertIn("paramiko", html)
+        self.assertIn("未上报", html)
+        self.assertNotIn("ssh_password", html)
+
+    def test_source_and_paramiko_state_shown(self):
+        html = renderer.render(self._view(source="SSH", source_mode="SSH"))
+        self.assertIn("当前生效来源：SSH", html)
+        self.assertIn("paramiko 不可用", html)
 
 
 def main():

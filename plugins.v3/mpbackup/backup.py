@@ -12,11 +12,16 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 SCHEMA = 2
 SNAPSHOT_PREFIX = "mpbackup_"
 RESTORE_PREFIX = "restore_"
 CLEAN_CONFIRM = "CLEAN_MPBACKUP"
+DELETE_CONFIRM = "删除"
+DELETE_PLAN_TTL = 600
+DELETE_PLAN_KEY = "delete_plan"
+BACKUP_COUNT_KEY = "backup_count"
+LAST_BACKUP_KEY = "last_backup_at"
 
 SETTINGS_KEYS = (
     "CONFIG_DIR", "PLUGIN_DATA_PATH", "DOWNLOAD_PATH", "DOWNLOAD_SAVE_PATH",
@@ -61,13 +66,17 @@ SECTION_LABELS = {
     "subscriptions": "订阅", "sites": "站点", "services": "服务", "plugins": "插件",
 }
 
+# 以 manifest 的分项为准，十二类全都能勾，默认全开
 SECTION_OPTIONS = (
-    ("subscriptions", "订阅"), ("download_history", "下载历史"),
-    ("transfer_history", "整理历史"), ("sites", "站点"),
-    ("services", "服务"), ("plugin_data", "插件数据"),
+    ("settings", "关键目录设置"), ("users", "用户"),
+    ("subscriptions", "订阅"), ("subscription_history", "订阅历史"),
+    ("sites", "站点"), ("services", "服务"),
+    ("system_config", "系统配置"), ("plugin_configs", "插件配置"),
+    ("plugin_data", "插件数据"), ("download_history", "下载历史"),
+    ("transfer_history", "整理历史"), ("plugins", "插件清单"),
 )
-# 历史两类以前默认不导，现在默认全开，配合「所有的都备份」
-DEFAULT_SECTIONS = tuple(TOGGLEABLE)
+SECTION_KEYS = tuple(key for key, _ in SECTION_OPTIONS)
+DEFAULT_SECTIONS = SECTION_KEYS
 
 CRON_CHOICES = (
     ("0 2 * * *", "每天凌晨 2 点"),
@@ -241,7 +250,7 @@ def clean_keep(raw: Any) -> int:
 def clean_sections(raw: Any) -> List[str]:
     if not isinstance(raw, (list, tuple)):
         return list(DEFAULT_SECTIONS)
-    return [name for name in TOGGLEABLE if name in raw]
+    return [name for name in SECTION_KEYS if name in raw]
 
 
 def host_ready() -> bool:
@@ -557,7 +566,7 @@ def _site_secret_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _collect_source(name: str, sections: List[str], data_path: str,
                     exclude_dir: Path) -> Tuple[Any, Dict[str, Any]]:
-    if name not in ALWAYS_ON and name not in sections:
+    if name not in sections:
         return [], {"status": "skipped", "reason": "设置里没勾选", "count": 0}
     if name in HOST_SOURCES and not host_ready():
         return [], {"status": "unavailable", "reason": "离线环境，宿主 SDK 不可用", "count": 0}
@@ -624,18 +633,20 @@ def write_snapshot(backup_dir: Path, data_path: str, sections: List[str],
 
     with zipfile.ZipFile(snapshot_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in ALL_SOURCES:
-            if name == "plugin_data":
+            # 没勾的一个字节都不写，manifest 里留 skipped 记着
+            if sources[name]["status"] == "skipped" or name == "plugin_data":
                 continue
             data = collected[name] if isinstance(collected[name], (list, dict)) else []
             if name == "sites":
                 zf.writestr("sites.json", _dump(mask(_site_public_rows(data))))
             else:
                 zf.writestr(name + ".json", _dump(mask(data)))
-        if include_secrets:
+        if include_secrets and secret_rows:
             zf.writestr("site_secrets.json", _dump(secret_rows))
-        zf.writestr("plugin_data/", "")
-        for arc, obj in (collected["plugin_data"] or []):
-            zf.writestr(arc, _dump(obj))
+        if sources["plugin_data"]["status"] != "skipped":
+            zf.writestr("plugin_data/", "")
+            for arc, obj in (collected["plugin_data"] or []):
+                zf.writestr(arc, _dump(obj))
         zf.writestr("manifest.json", _dump(manifest))
 
     return {
@@ -786,3 +797,34 @@ def clean_snapshots(backup_dir: Path, keep: int, confirm: str) -> Dict[str, Any]
     removed = rotate(backup_dir, keep)
     return {"ok": True, "removed": removed,
             "message": f"清理了 {len(removed)} 份旧快照，保留最近 {max(1, int(keep))} 份"}
+
+
+def resolve_delete_target(backup_dir: Path, name: Any) -> Tuple[Optional[Path], str]:
+    """只认本插件产出的 mpbackup_*.zip，且必须落在配置的备份目录里。"""
+    raw = str(name if name is not None else "").strip()
+    clean = Path(raw).name
+    if not raw or raw in (".", "..") or clean != raw:
+        return None, "文件名不对，只能删备份目录里的 mpbackup_*.zip"
+    if not (clean.startswith(SNAPSHOT_PREFIX) and clean.endswith(".zip")):
+        return None, "只能删本插件生成的 mpbackup_*.zip，别的文件不动"
+    directory = Path(backup_dir)
+    target = directory / clean
+    try:
+        target.resolve().relative_to(directory.resolve())
+    except Exception:
+        return None, "这个路径不在配置的备份目录里，拒绝删除"
+    if clean not in {p.name for p in snapshot_files(directory)}:
+        return None, "备份目录里找不到这份快照，可能已经删过了"
+    return target, ""
+
+
+def delete_snapshot(backup_dir: Path, name: Any) -> Dict[str, Any]:
+    target, why = resolve_delete_target(backup_dir, name)
+    if target is None:
+        return {"ok": False, "file": "", "message": why}
+    try:
+        target.unlink()
+    except Exception as err:
+        return {"ok": False, "file": target.name,
+                "message": f"删不掉 {target.name}：{type(err).__name__}: {err}"}
+    return {"ok": True, "file": target.name, "message": f"已删除 {target.name}"}
