@@ -18,6 +18,9 @@ SCAN_KEY = "scan"
 MAX_LINES = 400
 MAX_ROWS = 2000
 POLL_MS = 3000
+SUMMARY_LIMIT = 5  # 成功 / 失败两栏各显示最近几条
+_OK_STATES = frozenset({"added", "exists"})
+_BAD_STATES = frozenset({"failed", "error"})
 
 try:
     from app.sdk.logging import logger as _host_logger  # type: ignore
@@ -95,6 +98,39 @@ def log_text(plugin: Any, limit: int = 300) -> str:
     return "\n".join(log_lines(plugin)[-max(1, int(limit)):])
 
 
+def summarize(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """把本轮名录压成「成功 / 失败」两栏，各留最近几条，其余只报总数。"""
+    ok: List[str] = []
+    bad: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = str(row.get("state") or "")
+        if state not in _OK_STATES and state not in _BAD_STATES:
+            continue
+        name = str(row.get("name") or "").strip() or "（未命名）"
+        detail = " ".join(str(row.get("message") or "").split())
+        line = f"{name} · {_STATE_LABEL.get(state, state)}"
+        if detail:
+            line += f" · {detail[:80]}"
+        (ok if state in _OK_STATES else bad).append(line[:180])
+    return {
+        "ok": ok[-SUMMARY_LIMIT:][::-1],
+        "bad": bad[-SUMMARY_LIMIT:][::-1],
+        "ok_total": len(ok),
+        "bad_total": len(bad),
+    }
+
+
+def summary_text(items: Sequence[str], total: int) -> str:
+    """两栏里的纯文本，轮询用 textContent 写入，不拼 HTML。"""
+    if not items:
+        return "暂无记录"
+    rest = max(0, int(total) - len(items))
+    text = "\n".join(str(x) for x in items)
+    return text + (f"\n… 另有 {rest} 条，展开下方「本轮扫描名录」查看" if rest else "")
+
+
 def scan_rows(plugin: Any) -> List[Dict[str, Any]]:
     try:
         rows = plugin.get_data(SCAN_KEY) or []
@@ -133,14 +169,18 @@ _COPY_JS = (
 _POLL_JS = (
     "if(!window.__csPoll){window.__csPoll=setInterval(function(){"
     "var A=window.MoviePilotAPI;if(!A){return;}if(!A.get){return;}"
-    f"A.get('plugin/{PLUGIN_ID}/log').then(function(r){{"
+    "A.get('plugin/" + PLUGIN_ID + "/log').then(function(r){"
     "var d=r;if(d){if(d.data){d=d.data;}}"
     "if(d){if(d.success!==undefined){if(d.data){d=d.data;}}}"
-    "var t='';if(d){if(d.text){t=d.text;}}"
-    "var p=document.getElementById('cs-log');"
-    "if(p){if(p.textContent!==t){p.textContent=t;p.scrollTop=p.scrollHeight;}}"
-    "var s=document.getElementById('cs-state');"
-    "if(s){if(d){if(d.progress){s.textContent=d.progress;}}}"
+    "function put(id,t){var p=document.getElementById(id);"
+    "if(p){if(p.textContent!==t){p.textContent=t;}}}"
+    "if(d){"
+    "put('cs-ok',d.ok_text||'');put('cs-bad',d.bad_text||'');"
+    "put('cs-ok-count','共 '+(d.ok_total||0)+' 条');"
+    "put('cs-bad-count','共 '+(d.bad_total||0)+' 条');"
+    "put('cs-log',d.text||'');put('cs-state',d.progress||'');"
+    "put('cs-run',d.running?'运行中':'空闲');"
+    "}"
     "}).catch(function(){});},3000);}"
 )
 
@@ -171,6 +211,25 @@ _STYLE = """
   background:rgba(127,127,127,.16);white-space:nowrap}
 .cs-foot{font-size:11px;opacity:.52;margin-top:12px;line-height:1.8}
 .cs-empty{font-size:12px;opacity:.55;padding:10px 0}
+.cs-cols{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cs-col{border:1px solid rgba(127,127,127,.16);border-radius:10px;overflow:hidden}
+.cs-col-head{display:flex;align-items:center;gap:7px;padding:8px 10px;font-size:12px;
+  font-weight:700;background:rgba(127,127,127,.08)}
+.cs-col-head small{margin-left:auto;font-weight:400;opacity:.6;font-size:11px}
+.cs-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.cs-dot-ok{background:#16A34A}
+.cs-dot-bad{background:#DC2626}
+.cs-col-body{margin:0;padding:9px 10px;min-height:96px;max-height:190px;overflow:auto;
+  white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.7;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:rgba(127,127,127,.05)}
+.cs-fold{border:1px solid rgba(127,127,127,.16);border-radius:10px;margin-top:12px;padding:0 12px}
+.cs-fold>summary{cursor:pointer;padding:9px 0;font-size:12px;font-weight:600;list-style:none}
+.cs-fold>summary::-webkit-details-marker{display:none}
+.cs-fold>summary:before{content:'▸';display:inline-block;margin-right:7px;opacity:.6}
+.cs-fold[open]>summary:before{content:'▾'}
+.cs-fold .cs-log{margin-bottom:12px;max-height:260px}
+.cs-fold .cs-wrap{margin-bottom:12px;max-height:360px}
+@media (max-width:620px){.cs-cols{grid-template-columns:1fr}}
 </style>
 """
 
@@ -208,26 +267,43 @@ def render(
     running: bool = False,
     truncated: bool = False,
 ) -> str:
-    """详情页 HTML：进度 + 实时日志 + 本轮全量名录。"""
+    """详情页 HTML：默认只给成功 / 失败两栏摘要，完整日志与全量名录折叠。"""
+    summary = summarize(rows)
     head = (
         '<div class="cs-head"><div class="cs-title">名称辅种</div>'
-        f'<span class="cs-pill">{"运行中" if running else "空闲"}</span></div>'
+        f'<span class="cs-pill" id="cs-run">{"运行中" if running else "空闲"}</span></div>'
     )
     state = f'<div class="cs-state" id="cs-state">{progress(stats, running)}</div>'
+    cols_block = (
+        f'<div class="cs-sec">本轮结果<small>成功与失败分栏，各显示最近 {SUMMARY_LIMIT} 条</small></div>'
+        '<div class="cs-cols">'
+        '<div class="cs-col"><div class="cs-col-head">'
+        '<span class="cs-dot cs-dot-ok"></span>成功'
+        f'<small id="cs-ok-count">共 {summary["ok_total"]} 条</small></div>'
+        f'<pre class="cs-col-body" id="cs-ok">{_e(summary_text(summary["ok"], summary["ok_total"]))}</pre>'
+        '</div>'
+        '<div class="cs-col"><div class="cs-col-head">'
+        '<span class="cs-dot cs-dot-bad"></span>失败'
+        f'<small id="cs-bad-count">共 {summary["bad_total"]} 条</small></div>'
+        f'<pre class="cs-col-body" id="cs-bad">{_e(summary_text(summary["bad"], summary["bad_total"]))}</pre>'
+        '</div></div>'
+    )
     log_block = (
-        '<div class="cs-sec">运行日志<small>每 3 秒自动刷新，运行中也能看</small></div>'
-        f'<div style="display:flex;justify-content:flex-end;margin-bottom:6px">'
+        '<details class="cs-fold"><summary>完整运行日志（'
+        f'{len(str(log or "").splitlines())} 行）</summary>'
+        '<div style="display:flex;justify-content:flex-end;margin:2px 0 6px">'
         f'<button class="cs-copy" onclick="{_COPY_JS}">复制日志</button></div>'
-        f'<pre class="cs-log" id="cs-log">{_e(log)}</pre>'
+        f'<pre class="cs-log" id="cs-log">{_e(log)}</pre></details>'
     )
     table_block = (
-        f'<div class="cs-sec">本轮扫描名录<small>共 {len(rows)} 条 · 全量列出</small></div>'
-        + _table(rows, truncated)
+        f'<details class="cs-fold"><summary>本轮扫描名录（共 {len(rows)} 条）</summary>'
+        + _table(rows, truncated) + '</details>'
     )
     foot = (
-        '<div class="cs-foot">先把下载器里的种子按内容归并，同内容的多个辅种只搜一次站点、只添加一次；'
+        '<div class="cs-foot">两栏只列最近几条，完整日志和全量名录点上面的标题展开，页面每 3 秒刷新一次。'
+        '先把下载器里的种子按内容归并，同内容的多个辅种只搜一次站点、只添加一次；'
         '名称只用来找候选，最终要下载种子解析 info_hash 和文件清单，完全一致才会添加。'
-        '组里已经有目标站点的种子、近期核对过、带跳过标签的都会略过，但仍列在上面的名录里。'
+        '未匹配、跳过、已核对等记录不进两栏，展开「本轮扫描名录」可看全部。'
         '想强制重扫一遍，点「清空缓存」后再运行。</div>'
     )
     # v-html 不会执行 <script>，用静态 data URI 图片的 onload 启动轮询
@@ -236,4 +312,5 @@ def render(
         'src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" '
         f'onload="{_POLL_JS}">'
     )
-    return f'<div class="cs">{_STYLE}{head}{state}{log_block}{table_block}{foot}{poll}</div>'
+    return (f'<div class="cs">{_STYLE}{head}{state}{cols_block}'
+            f'{log_block}{table_block}{foot}{poll}</div>')

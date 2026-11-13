@@ -3,7 +3,7 @@
     "name": "名称辅种",
     "description": "先把下载器里同一份文件的多个辅种归并成一组，每组只去站点搜一次、只添加一次，不会拿着同一个内容反复搜、反复插；站点种子已经在下载器里就直接跳过。名称只用来找候选，找到后下载种子解析 info_hash 和文件清单，完全一致才添加。发布名可以用正则规则清洗，解决站点标题用空格、本地用点/连字符或中文名前缀的问题；中英混合的发布名还会自动多给一条纯英文搜索词。页面有实时日志、每组的实际搜索词和全量名录，默认只填 Cookie 就能用。",
     "labels": "做种,辅种,名称匹配,实时日志",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "release": false,
     "author": "BackspaceM",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png",
@@ -11,6 +11,7 @@
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v2.0.1": "详情页默认只按「成功 / 失败」两栏各显示最近 5 条，完整运行日志和本轮扫描名录改为折叠；3 秒轮询同步更新两栏与计数，完整日志仍可复制。",
       "v2.0.0": "中英文一起改名：显示名「名称辅种」，插件 ID / 目录 / 命令 / 图标 / 配置前缀统一为 NameCrossSeed、namecrossseed、/name_seed；因为改的是插件 ID，市场里算新插件，需要先卸载旧版再安装，并重新填一次 Cookie。\n① 修复运行到第 14 个种子就整轮中断：上一版把站点客户端的 download 误写成 self._download，抛出 object has no attribute '_download'；改为调用真实方法并计入请求预算，同时给每组加异常隔离，单条失败不再终止整轮。\n② 改成两阶段：先只读盘点所有下载器、建立全局 hash 集合，按「规范化标题 + 体积」把同内容的多个辅种归并成一组；每组只派一个代表搜站、只添加一次，组内成员复用结果但各留一行名录。组内已有目标站点种子时整组跳过；站点候选 hash 命中全局名录直接判定已存在，不再重复插入。\n③ 去掉体积差 10% 的硬拒绝：整季合集与单集本来就差几十倍，之前会把真正同源的候选全砍掉，还算出 23697% 这种误导数字。体积现在只参与候选排序，分母改为两者较大值（最大 100%），是否同源始终由 info_hash / 文件清单决定。\n④ 新增「名称清洗规则」设置框，每行一条「正则 => 替换」，<space> 表示空格、留空表示删除、支持反向引用；留空用内置规则（点/下划线转空格、去方括号标签与发布组后缀），可自己写规则去掉中文名前缀或把连字符转空格。无效正则跳过不崩，每组实际搜索词写进运行日志；中英混合发布名额外补一条纯英文搜索词，避免「中文名.英文名」这种种子开箱即用时搜不到。\n⑤ 缓存改为按内容组存，旧版按种子存的记录仍兼容；统计改成「下载器种子 / 归并组数 / 实际搜站组数」。补 12 个离线用例共 36 个，覆盖去重分组、异常隔离、全局 hash、正则规则与改名后的按钮契约。",
       "v1.2.0": "改名为「当时的站内辅种名」（插件 ID、目录、命令与图标路径保持不变，配置不会丢）。① 扫全下载器：每轮处理上限默认改成 0（不限），站点请求预算从 40 提到 300；统计拆成「扫到 / 需要核对 / 实际核对」三个数，不再把实际处理的几个当成扫描总数。② 新增本轮扫描名录：所有种子全量列出，近期已核对、被排除、预算用尽未处理的都标明原因，不再静默跳过。③ 实时日志：运行中每处理一个就写一条（本地种子名 → 站点种子名 → 结果），新增 /log 接口，页面每 3 秒自动刷新、可一键复制，同时写入宿主插件日志；通知里也列出实际辅种的种子。④ 设置从 20 项精简到 8 项，限流、相似度、匹配模式、标签、跳过路径等改用内置安全默认值，旧配置仍兼容。⑤ 站点没有 pieces-hash，名称只负责召回：新增第三种搜索词（标题+年份），并在下载 .torrent 前先按列表页体积筛掉差异超过 10% 的候选，省下请求给后面的种子；最终仍靠 info_hash / 文件清单定案。⑥ 补 9 个离线回归用例，共 24 个，全仓 138 条动态路由校验通过。",
       "v1.1.4": "关闭 Release 安装（本仓库无发布包，避免每次安装先失败再回退），改走 plugins.v3 文件列表安装；补充多状态页面按钮契约校验",
@@ -25,7 +26,7 @@
     "name": "媒体库体检",
     "description": "整理前先看看文件会存到哪、会不会覆盖已有入库文件，跨盘会不会从硬链接悄悄变成复制；再用 inode 和设备号逐条核对入库记录，找出退化成副本的硬链接、源文件已删但库里还留着的孤儿、以及手工入库没登记的；最后把 Emby、Jellyfin、Plex 三家的条目对齐，列出缺集、重复和只存在某一家的片子。媒体服务器、下载目录、媒体库目录都自动识别，设置页只有一个可选的预演目录，装好即用。三页都给完整明细和可复制日志，全程只读，不动任何文件、整理历史和媒体服务器。",
     "labels": "媒体库,入库,整理预演,硬链接,inode,拓扑,Emby,Jellyfin,Plex,一致性对账,只读",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/librarycheckup.png",
     "author": "BackspaceM",
     "level": 1,
@@ -34,6 +35,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.2": "设置页新增「启用插件」开关：关掉后插件状态如实显示为未运行，不再采集数据、不注册首页组件与远程命令，详情页和所有接口都提示已停用；默认保持启用，装好即用。",
       "v1.0.1": "修复切页没反应：宿主 get_data 的第二个参数是插件 ID 而不是默认值，之前误传导致每次都读不到记录、页面一直停在整理预演；改为只传 key，并加一层实例状态兜底。三个按钮换成人话短名（整理预演 / 入库账本 / 媒体库对比），插件说明、页面标题、日志和设置提示里去掉字母编号与阶段式表述。新增按宿主真实签名验证切页的回归用例。",
       "v1.0.0": "首个版本。整理前可以先预演一批文件会落到哪个目录、有没有同名覆盖、跨盘会不会让硬链接退化成复制、是不是已经入库过，全程只看不动。入库账本会读全量整理历史，用 inode 和设备号核实硬链接是真是假，把源文件与库文件的关系按剧集理出来，顺带找出库里有、历史里没有的手工入库文件。Emby、Jellyfin、Plex 三家的条目按 TMDB/IMDB/TVDB 编号对齐，缺集、多版本、只存在某一家的都列成对照表；连不上或路径看不到的都标未核验，不会当成没有。三个页面共用一次只读采集，目录和媒体服务器自动识别，设置页只有一个可选预演目录；明细不截断，日志可复制并同步写入宿主插件日志，首页也能加组件。附 58 个离线回归用例（含真实硬链接端到端），全仓 137 条动态路由契约校验通过。"
     }
@@ -59,7 +61,7 @@
     "name": "MP 总览",
     "description": "给 MoviePilot V3 补一个零配置只读总览看板：一页聚合系统负载、磁盘水位、订阅状态、近期入库、下载记录、已连接服务与插件状态。可添加为首页仪表盘组件并按间隔自动刷新，详情页也提供完整看板与一键重新采集。全部数据取自 V3 稳定只读接口，不修改任何配置或媒体文件，无需填写地址与密钥。",
     "labels": "总览,仪表盘,看板,系统监控,磁盘,订阅,入库,零配置",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/mpoverview.png",
     "author": "BackspaceM",
     "level": 1,
@@ -68,6 +70,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.1": "设置页新增「启用插件」开关：关掉后插件状态如实显示为未运行，不再采集数据、不注册首页组件与远程命令，详情页和所有接口都提示已停用；默认保持启用，装好即用。",
       "v1.0.0": "首个版本。零配置只读总览看板：系统负载与内存、磁盘水位、订阅分布、近 7 天入库、下载记录、媒体服务器/下载器与插件状态；同时提供首页仪表盘组件（get_dashboard + 自动刷新）、详情页看板与 JSON 快照 API。统一蓝紫渐变图标与美观自适应深浅主题界面；设置页仅保留一项自动刷新间隔。响应模型使用 Pydantic BaseModel，按钮路径/方法已纳入全仓 API 契约校验。"
     }
   },
@@ -133,7 +136,7 @@
     "name": "外网访问向导",
     "description": "从 MoviePilot 已连接的媒体服务器、下载器 WebUI 和 MP 本体里挑服务，一次生成 dst-nat 映射 + forward 放行（可选 Hairpin NAT）。预览表里直接看「外网端口 → 内网服务」的中文含义、风险与等价命令，确认后批量写入 RouterOS；备注带域名，方便以后在路由器上认出每条规则。部署前自动留系统备份，中途失败逆序回滚，同标签已存在则跳过。还带内网/外网连通性测试、一键回滚、试运行、MP 通知与远程命令。只新增带 MP-B1 标签的条目，不动用户手工规则；公网映射需显式勾选放行。",
     "labels": "RouterOS,端口映射,外网访问,dst-nat,防火墙,连通性测试,自动回滚,MikroTik,远程观影",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png",
     "author": "BackspaceM",
     "level": 1,
@@ -142,6 +145,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.4": "设置页新增「启用插件」开关：关掉后插件状态如实显示为未运行，不再采集数据、不注册首页组件与远程命令，详情页和所有接口都提示已停用；默认保持启用，装好即用。",
       "v1.0.3": "关闭 Release 安装（本仓库无发布包，避免每次安装先失败再回退），改走 plugins.v3 文件列表安装；补充多状态页面按钮契约校验",
       "v1.0.2": "统一插件图标（同一渐变底板与线性符号）与显示名「外网访问向导」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
       "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
@@ -152,7 +156,7 @@
     "name": "场景模板",
     "description": "把 PT 友好 QoS、远程观影放行、访客网络隔离、IPv6 基础开通、WireGuard 回家做成场景模板：勾选 → 预览每条写入的分区、中文含义、风险与等价命令 → 确认 → 批量下发到 RouterOS 10 个配置分区。部署前自动创建 RouterOS 系统备份并把现状快照存到 MP，中途失败按逆序删除本次新建条目自动回滚，同标签已存在则跳过（幂等）；只新增带 MP-A2 标签的条目，绝不改动用户手工规则。连接参数可直接从 RouterOS 连接中心下拉带入，并支持试运行、一键回滚、MP 通知与远程命令。",
     "labels": "RouterOS,场景模板,一键部署,自动回滚,配置备份,MikroTik,QoS,IPv6,WireGuard,降门槛",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png",
     "author": "BackspaceM",
     "level": 1,
@@ -161,6 +165,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.4": "设置页新增「启用插件」开关：关掉后插件状态如实显示为未运行，不再采集数据、不注册首页组件与远程命令，详情页和所有接口都提示已停用；默认保持启用，装好即用。",
       "v1.0.3": "关闭 Release 安装（本仓库无发布包，避免每次安装先失败再回退），改走 plugins.v3 文件列表安装；补充多状态页面按钮契约校验",
       "v1.0.2": "统一插件图标（同一渐变底板与线性符号）与显示名「场景模板」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
       "v1.0.1": "「部署前需处理以下问题」提示现在会显示具体错误说明，不再只显示图标与标题。修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
@@ -171,7 +176,7 @@
     "name": "连接中心",
     "description": "一处保存多台 RouterOS 连接，自动广播给同库的 RouterOS 插件（设置页下拉即可选择，不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查配置、端口连通、REST 可用性、认证权限、RouterOS 版本与业务分区读权限，失败时给出可直接复制到 RouterOS 终端执行的修复命令。不选下拉时其他插件行为完全不变。",
     "labels": "RouterOS,连接管理,一键体检,配置同步,降门槛,MikroTik",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png",
     "author": "BackspaceM",
     "level": 1,
@@ -180,6 +185,7 @@
     "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
     "history": {
+      "v1.0.5": "设置页新增「启用插件」开关：关掉后插件状态如实显示为未运行，不再采集数据、不注册首页组件与远程命令，详情页和所有接口都提示已停用；默认保持启用，装好即用。",
       "v1.0.4": "关闭 Release 安装（本仓库无发布包，避免每次安装先失败再回退），改走 plugins.v3 文件列表安装；补充多状态页面按钮契约校验",
       "v1.0.3": "统一插件图标（同一渐变底板与线性符号）与显示名「连接中心」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
       "v1.0.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",

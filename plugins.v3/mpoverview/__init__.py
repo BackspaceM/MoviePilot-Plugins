@@ -32,6 +32,14 @@ except Exception:  # noqa: BLE001 - 离线 stub / 文档检查时也能导入
 from . import collector, renderer
 
 
+def _enabled_from(cfg: Dict[str, Any]) -> bool:
+    """设置页「启用插件」的值；没配过就默认开，保持装好即用。"""
+    value = cfg.get("enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(value)
+
+
 class Response(BaseModel):
     """插件 API 统一响应：success / message / data 三段式。
 
@@ -53,13 +61,14 @@ class MPOverview(_PluginBase):
         "同时提供首页仪表盘组件与自动刷新，不修改任何配置或媒体文件。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/mpoverview.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "mpoverview_"
     plugin_color = "#6366F1"
     system_version = ">=3.0.0"
     plugin_order = 90
+    _enabled: bool = True
 
     _MIN_REFRESH = 30
     _MAX_REFRESH = 300
@@ -77,13 +86,15 @@ class MPOverview(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = dict(config or {})
         # 默认启用，保证「装好即用」；宿主显式传 False 时停用。
-        self._enabled = bool(cfg.get("enabled", True))
+        self._enabled = _enabled_from(cfg)
         try:
             value = int(cfg.get("refresh_seconds") or self._DEFAULT_REFRESH)
         except (TypeError, ValueError):
             value = self._DEFAULT_REFRESH
         self._refresh = max(self._MIN_REFRESH, min(self._MAX_REFRESH, value))
         collector.invalidate()
+        if not self._enabled:
+            return
 
     def get_state(self) -> bool:
         return self._enabled
@@ -97,6 +108,15 @@ class MPOverview(_PluginBase):
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """设置页只有一项：自动刷新间隔。其余全部自动识别。"""
         form: List[Dict[str, Any]] = [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VSwitch", "props": {
+                        "model": "enabled", "label": "启用插件", "color": "primary",
+                        "hint": "关掉后不再采集数据、不显示首页组件，页面按钮也会停用",
+                        "persistentHint": True,
+                    }},
+                ]},
+            ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 7}, "content": [
                     {"component": "VSelect", "props": {
@@ -125,7 +145,7 @@ class MPOverview(_PluginBase):
                 ]},
             ]},
         ]
-        return form, {"refresh_seconds": self._refresh}
+        return form, {"enabled": self._enabled, "refresh_seconds": self._refresh}
 
     # ------------------------------------------------------------------
     # API
@@ -141,9 +161,13 @@ class MPOverview(_PluginBase):
         ]
 
     def api_snapshot(self) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data=collector.collect())
 
     def api_refresh(self) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         collector.invalidate()
         data = collector.collect(force=True)
         return Response(
@@ -160,6 +184,10 @@ class MPOverview(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[Dict[str, Any]]:
+        if not self._enabled:
+            return [{"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal", "title": "插件已停用"},
+                "text": "到「设置」里打开「启用插件」后，本页的按钮和数据才会恢复。"}]
         data = collector.collect()
         return [
             {
@@ -188,11 +216,18 @@ class MPOverview(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_dashboard_meta(self) -> List[Dict[str, str]]:
+        if not self._enabled:
+            return []
         return [{"key": "overview", "name": "MP 总览"}]
 
     def get_dashboard(
         self, key: str = "overview", **kwargs: Any
     ) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+        if not self._enabled:
+            return ({"cols": 12, "md": 8},
+                    {"border": False, "title": "MP 总览", "subtitle": "插件已停用"},
+                    [{"component": "div", "html":
+                      "<div style='padding:12px;opacity:.7'>插件已停用，到设置里打开「启用插件」后恢复。</div>"}])
         data = collector.collect()
         cols = {"cols": 12, "md": 8}
         attrs = {

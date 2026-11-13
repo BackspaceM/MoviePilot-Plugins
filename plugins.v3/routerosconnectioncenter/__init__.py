@@ -56,6 +56,14 @@ _LEVEL_ICON = {
 }
 
 
+def _enabled_from(cfg: Dict[str, Any]) -> bool:
+    """设置页「启用插件」的值；没配过就默认开，保持装好即用。"""
+    value = cfg.get("enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(value)
+
+
 def _esc(value: Any) -> str:
     """动态文本转义：防 XSS，并避免 [xxx] 被前端当 Markdown 参考式链接渲染。"""
     return (_html.escape(str(value if value is not None else ""), quote=False)
@@ -69,13 +77,14 @@ class RouterOSConnectionCenter(_PluginBase):
                    "不用再逐插件重复填地址/账号/密码）；内置一键体检，逐项检查端口、REST、权限与版本，"
                    "失败时给出可直接复制到 RouterOS 终端执行的修复命令。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosconnectioncenter.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosconnectioncenter_"
     plugin_color = "#1976D2"
     system_version = ">=3.0.0"
     plugin_order = 50
+    _enabled: bool = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -95,6 +104,7 @@ class RouterOSConnectionCenter(_PluginBase):
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = dict(config or {})
+        self._enabled = _enabled_from(cfg)
         self._verify = bool(cfg.get("verify", False))
         self._broadcast = bool(cfg.get("broadcast_enabled", True))
         self._deep = bool(cfg.get("deep_check", True))
@@ -109,6 +119,11 @@ class RouterOSConnectionCenter(_PluginBase):
             row["verify"] = self._verify
         self._routers = routers
         self._errors = errors
+        if not self._enabled:
+            self._broadcast_ok = False
+            self._broadcast_error = "插件已停用，未广播连接配置"
+            self._shared_path = ""
+            return
         self._sync_shared()
         if errors:
             logger.warning(f"{_LOG_PREFIX}：配置有 {len(errors)} 处问题：{'；'.join(errors[:3])}")
@@ -135,7 +150,7 @@ class RouterOSConnectionCenter(_PluginBase):
         return ok, result
 
     def get_state(self) -> bool:
-        return True  # 纯配置/工具型插件，常驻可用，不注册定时任务
+        return self._enabled
 
     def stop_service(self) -> None:
         return None
@@ -154,6 +169,15 @@ class RouterOSConnectionCenter(_PluginBase):
                   if self._broadcast_ok else
                   f"广播未生效：{_esc(self._broadcast_error or '尚未保存配置')}")
         content: List[dict] = [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VSwitch", "props": {
+                        "model": "enabled", "label": "启用插件", "color": "primary",
+                        "hint": "关掉后不再采集数据、不显示首页组件，页面按钮也会停用",
+                        "persistentHint": True,
+                    }},
+                ]},
+            ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
              "text": "路由器的地址、账号、密码在这里填一次，其他 RouterOS 插件就能直接选。"
@@ -197,6 +221,7 @@ class RouterOSConnectionCenter(_PluginBase):
              "text": "保存后去详情页点「一键体检」，再在其他插件里选中这台就行。"},
         ]
         defaults: Dict[str, Any] = {
+            "enabled": self._enabled,
             "routers_text": "",
             "timeout": 8,
             "verify": False,
@@ -238,6 +263,10 @@ class RouterOSConnectionCenter(_PluginBase):
         return data if isinstance(data, dict) else {}
 
     def get_page(self) -> List[dict]:
+        if not self._enabled:
+            return [{"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal", "title": "插件已停用"},
+                "text": "到「设置」里打开「启用插件」后，本页的按钮和数据才会恢复。"}]
         probe = self._probe_data()
         results: List[Dict[str, Any]] = list(probe.get("results") or [])
         failed = len([r for r in results if r.get("level") == LEVEL_FAIL])
@@ -353,6 +382,8 @@ class RouterOSConnectionCenter(_PluginBase):
         }
 
     def api_check(self) -> Any:
+        if not self._enabled:
+            return _Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         if not self._routers:
             return _Response(success=False, message="请先在设置里填写路由器清单")
         try:
@@ -368,6 +399,8 @@ class RouterOSConnectionCenter(_PluginBase):
             return _Response(success=False, message=f"体检异常：{err}")
 
     def api_sync(self) -> Any:
+        if not self._enabled:
+            return _Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         ok, result = self._sync_shared()
         return _Response(success=ok,
                          message=(f"已广播 {len(self._routers)} 台路由器到 {result}" if ok
@@ -375,10 +408,14 @@ class RouterOSConnectionCenter(_PluginBase):
                          data={"count": len(self._routers), "path": result})
 
     def api_clear(self) -> Any:
+        if not self._enabled:
+            return _Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         self.save_data(_KEY_PROBE, {})
         return _Response(success=True, message="体检结果已清空")
 
     def api_status(self) -> Any:
+        if not self._enabled:
+            return _Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         probe = self._probe_data()
         return _Response(success=True, data={
             "routers": [roslink.public_router(r) for r in self._routers],

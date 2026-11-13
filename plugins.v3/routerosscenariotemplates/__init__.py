@@ -76,6 +76,14 @@ _KEY_SNAPSHOTS = "a2_snapshots"
 _NOTIFY_LABELS = {"issue": "仅异常/失败", "all": "每次部署", "none": "关闭"}
 
 
+def _enabled_from(cfg: Dict[str, Any]) -> bool:
+    """设置页「启用插件」的值；没配过就默认开，保持装好即用。"""
+    value = cfg.get("enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(value)
+
+
 def _esc(value: Any) -> str:
     """动态文本转义：防 XSS，并避免 [xxx] 被前端当 Markdown 参考式链接渲染。"""
     return (_html.escape(str(value if value is not None else ""), quote=False)
@@ -95,13 +103,14 @@ class RouterOSScenarioTemplates(_PluginBase):
                    "频场景做成模板：勾选→预览规则与中文含义→确认→批量下发，写入前自动"
                    "备份，失败按逆序自动回滚；只新增带 MP-A2 标签的条目，不改用户已有配置。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosscenariotemplates.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosscenariotemplates_"
     plugin_color = "#1976D2"
     system_version = ">=3.0.0"
     plugin_order = 51
+    _enabled: bool = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -131,6 +140,7 @@ class RouterOSScenarioTemplates(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = dict(config or {})
         self._cfg = cfg
+        self._enabled = _enabled_from(cfg)
 
         # 连接中心：选中已保存路由器时带入连接参数；未选中/找不到则保持手填配置不变
         overrides, note = roslink.connection_overrides(cfg.get("ros_connection"), "std")
@@ -167,6 +177,9 @@ class RouterOSScenarioTemplates(_PluginBase):
         except (TypeError, ValueError):
             self._display_limit = 60
 
+        if not self._enabled:
+            return
+
         # 保存配置后重建静态计划：用户必须重新点「生成/刷新预览」才能部署
         plan = self._make_plan()
         self.save_data(_KEY_PLAN, plan)
@@ -188,7 +201,7 @@ class RouterOSScenarioTemplates(_PluginBase):
         return out
 
     def get_state(self) -> bool:
-        return True  # 纯配置/工具型插件，常驻可用，不注册定时任务
+        return self._enabled
 
     def stop_service(self) -> None:
         return None
@@ -361,6 +374,15 @@ class RouterOSScenarioTemplates(_PluginBase):
         items = roslink.connection_items()
         conn_hint = "选中后自动带入连接参数，下面留空就行；不选就用手填的。"
         content: List[dict] = [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VSwitch", "props": {
+                        "model": "enabled", "label": "启用插件", "color": "primary",
+                        "hint": "关掉后不再采集数据、不显示首页组件，页面按钮也会停用",
+                        "persistentHint": True,
+                    }},
+                ]},
+            ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
              "text": "勾选场景、核对每条的中文含义和风险，确认后一次性写入。"
@@ -470,6 +492,7 @@ class RouterOSScenarioTemplates(_PluginBase):
         ])
 
         defaults: Dict[str, Any] = {
+            "enabled": self._enabled,
             "ros_connection": "", "router_address": "", "router_port": 443,
             "router_ssl": True, "router_username": "", "router_password": "",
             "timeout": 10, "verify": False,
@@ -513,6 +536,10 @@ class RouterOSScenarioTemplates(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
+        if not self._enabled:
+            return [{"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal", "title": "插件已停用"},
+                "text": "到「设置」里打开「启用插件」后，本页的按钮和数据才会恢复。"}]
         plan = self._plan()
         actions = actions_from_plan(plan)
         rollback_entries = list(self.get_data(_KEY_ROLLBACK) or [])
@@ -642,6 +669,8 @@ class RouterOSScenarioTemplates(_PluginBase):
         ]
 
     def api_preview(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         plan = self._make_plan()
         client, http = self._make_client()
         if client is None:
@@ -668,14 +697,20 @@ class RouterOSScenarioTemplates(_PluginBase):
         return Response(success=not plan.get("blocked"), message=msg, data=plan)
 
     def api_plan(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data=self._plan())
 
     def api_clear(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         self.save_data(_KEY_PLAN, {})
         self._log("INFO", "待确认部署计划已清空")
         return Response(success=True, message="待确认部署计划已清空")
 
     def api_apply(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         plan = self._plan()
         if not plan:
             return Response(success=False, message="没有待部署计划：请先点「生成 / 刷新预览」")
@@ -710,6 +745,8 @@ class RouterOSScenarioTemplates(_PluginBase):
                         message=str(report.get("message") or ""), data=report)
 
     def api_rollback(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         created = list(self.get_data(_KEY_ROLLBACK) or [])
         if not created:
             return Response(success=False, message="没有可回滚的条目（上次部署可能已自动回滚或尚未部署）")
@@ -728,6 +765,8 @@ class RouterOSScenarioTemplates(_PluginBase):
                         message=str(rb.get("message") or ""), data=rb)
 
     def api_backup(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         client, http = self._make_client()
         if client is None:
             return Response(success=False, message="未配置 RouterOS 地址或网络模块不可用")
@@ -745,6 +784,8 @@ class RouterOSScenarioTemplates(_PluginBase):
                               "snapshot": path, "count": snap.get("count")})
 
     def api_test(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         client, http = self._make_client()
         if client is None:
             return Response(success=False, message="未配置 RouterOS 地址或网络模块不可用")
@@ -754,9 +795,13 @@ class RouterOSScenarioTemplates(_PluginBase):
         return Response(success=ok, message=msg)
 
     def api_logs(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data={"logs": list(self.get_data(_KEY_LOGS) or [])[:100]})
 
     def api_status(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         plan = self._plan()
         report = dict(self.get_data(_KEY_LAST_DEPLOY) or {})
         return Response(success=True, data={
@@ -778,6 +823,8 @@ class RouterOSScenarioTemplates(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_command(self) -> List[Dict[str, Any]]:
+        if not self._enabled:
+            return []
         return [
             {"cmd": "/a2_preview", "event": EventType.PluginAction,
              "desc": "生成 RouterOS 场景模板部署预览", "category": "MoviePilot"},

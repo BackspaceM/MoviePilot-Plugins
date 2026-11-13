@@ -167,7 +167,7 @@ class TestContract(unittest.TestCase):
                 for value in node:
                     walk(value)
         walk(form)
-        self.assertEqual(models, ["preview_dir"])
+        self.assertEqual(models, ["enabled", "preview_dir"])
         self.assertEqual(defaults["preview_dir"], "")
         self.assertTrue(defaults["enabled"])
 

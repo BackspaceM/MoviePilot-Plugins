@@ -194,7 +194,7 @@ class NameCrossSeed(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png"
     )
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     plugin_label = "做种,辅种,名称匹配,实时日志"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -543,9 +543,15 @@ class NameCrossSeed(_PluginBase):
         return schemas.Response(success=True, message="缓存已清空，下轮全量重扫")
 
     def api_log(self) -> schemas.Response:
-        """页面每 3 秒轮询一次：日志纯文本 + 当前进度。"""
-        stats = self.get_data(_STATS_KEY) or {}
+        """页面每 3 秒轮询一次：成功/失败双栏摘要 + 完整日志纯文本 + 进度。"""
+        stats = self.get_data(_STATS_KEY)
+        stats = stats if isinstance(stats, dict) else {}
+        summary = logview.summarize(logview.scan_rows(self))
         return schemas.Response(success=True, data={
+            "ok_text": logview.summary_text(summary["ok"], summary["ok_total"]),
+            "bad_text": logview.summary_text(summary["bad"], summary["bad_total"]),
+            "ok_total": summary["ok_total"],
+            "bad_total": summary["bad_total"],
             "text": logview.log_text(self),
             "progress": logview.progress(stats, bool(self._running), as_html=False),
             "running": bool(self._running),

@@ -78,6 +78,14 @@ _KIND_LABELS = {"media": "媒体服务器", "downloader": "下载器",
                 "mp": "MoviePilot", "manual": "手填"}
 
 
+def _enabled_from(cfg: Dict[str, Any]) -> bool:
+    """设置页「启用插件」的值；没配过就默认开，保持装好即用。"""
+    value = cfg.get("enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(value)
+
+
 def _esc(value: Any) -> str:
     """动态文本转义：防 XSS，并避免 [xxx] 被前端当 Markdown 参考式链接渲染。"""
     return (_html.escape(str(value if value is not None else ""), quote=False)
@@ -96,13 +104,14 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                    "dst-nat 映射 + 防火墙放行，预览「外网端口 → 内网服务」后批量写入；"
                    "带域名备注、连通性测试、自动备份与失败回滚，只新增带 MP-B1 标签的条目。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/routerosremoteaccesswizard.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "routerosremoteaccesswizard_"
     plugin_color = "#1976D2"
     system_version = ">=3.0.0"
     plugin_order = 52
+    _enabled: bool = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -146,6 +155,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         cfg = dict(config or {})
         self._cfg = cfg
+        self._enabled = _enabled_from(cfg)
 
         overrides, note = roslink.connection_overrides(cfg.get("ros_connection"), "std")
         conn = dict(cfg)
@@ -201,6 +211,13 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         except (TypeError, ValueError):
             self._display_limit = 60
 
+        if not self._enabled:
+            self._media_configs = {}
+            self._downloader_configs = {}
+            self._services = []
+            self._service_errors = []
+            return
+
         self._media_configs, self._downloader_configs = discovery.load_connected_configs()
         self._rediscover()
 
@@ -239,7 +256,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         return plan
 
     def get_state(self) -> bool:
-        return True
+        return self._enabled
 
     def stop_service(self) -> None:
         return None
@@ -406,6 +423,15 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         service_items = self._service_items()
         conn_items = roslink.connection_items()
         content: List[dict] = [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VSwitch", "props": {
+                        "model": "enabled", "label": "启用插件", "color": "primary",
+                        "hint": "关掉后不再采集数据、不显示首页组件，页面按钮也会停用",
+                        "persistentHint": True,
+                    }},
+                ]},
+            ]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
                                               "class": "mb-4"},
              "text": "从 MoviePilot 已连接的服务里挑几个，一次生成 NAT 映射和防火墙放行。"
@@ -490,6 +516,7 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                                  "同一个端口别在「场景模板一键部署」里再配一次。"},
         ]
         defaults: Dict[str, Any] = {
+            "enabled": self._enabled,
             "ros_connection": "", "router_address": "", "router_port": 443,
             "router_ssl": True, "router_username": "", "router_password": "",
             "timeout": 10, "verify": False,
@@ -535,6 +562,10 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
+        if not self._enabled:
+            return [{"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal", "title": "插件已停用"},
+                "text": "到「设置」里打开「启用插件」后，本页的按钮和数据才会恢复。"}]
         plan = self._plan()
         actions = actions_from_plan(plan)
         rollback_entries = list(self.get_data(_KEY_ROLLBACK) or [])
@@ -667,6 +698,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         ]
 
     def api_services(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data={
             "items": self._service_items(),
             "services": [s.to_dict() for s in self._services],
@@ -674,6 +707,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         })
 
     def api_preview(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         self._rediscover()
         client, http = self._make_client()
         occupied: List[int] = []
@@ -712,14 +747,20 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         return Response(success=True, message=msg, data=plan)
 
     def api_plan(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data=self._plan())
 
     def api_clear(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         self.save_data(_KEY_PLAN, {})
         self._log("INFO", "待确认计划已清空")
         return Response(success=True, message="待确认计划已清空")
 
     def api_apply(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         plan = self._plan()
         if not plan:
             return Response(success=False, message="没有计划：先点「生成 / 刷新预览」")
@@ -752,6 +793,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                         message=str(report.get("message") or ""), data=report)
 
     def api_rollback(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         created = list(self.get_data(_KEY_ROLLBACK) or [])
         if not created:
             return Response(success=False, message="没有可回滚的条目（上次部署可能已自动回滚）")
@@ -770,6 +813,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                         message=str(rb.get("message") or ""), data=rb)
 
     def api_probe(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         plan = self._plan() or self._make_plan()
         targets = probe.build_probe_targets(plan)
         if not targets:
@@ -791,6 +836,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                         message=str(summary.get("message") or ""), data=summary)
 
     def api_backup(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         client, http = self._make_client()
         if client is None:
             return Response(success=False, message="没配 RouterOS 地址或网络模块不可用")
@@ -808,6 +855,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
                               "snapshot": path, "count": snap.get("count")})
 
     def api_test(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         client, http = self._make_client()
         if client is None:
             return Response(success=False, message="没配 RouterOS 地址或网络模块不可用")
@@ -817,9 +866,13 @@ class RouterOSRemoteAccessWizard(_PluginBase):
         return Response(success=ok, message=msg)
 
     def api_logs(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data={"logs": list(self.get_data(_KEY_LOGS) or [])[:100]})
 
     def api_status(self, _=None) -> Any:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data={
             "plugin": PLUGIN_ID,
             "router": self._address, "port": self._port, "ssl": self._use_ssl,
@@ -842,6 +895,8 @@ class RouterOSRemoteAccessWizard(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_command(self) -> List[Dict[str, Any]]:
+        if not self._enabled:
+            return []
         return [
             {"cmd": "/b1_preview", "event": EventType.PluginAction,
              "desc": "生成 RouterOS 端口映射预览", "category": "MoviePilot"},

@@ -39,6 +39,14 @@ except Exception:  # noqa: BLE001 - 离线 stub / 文档检查时也能导入
 from . import collector, common, renderer
 
 
+def _enabled_from(cfg: Dict[str, Any]) -> bool:
+    """设置页「启用插件」的值；没配过就默认开，保持装好即用。"""
+    value = cfg.get("enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "off", "no", "")
+    return bool(value)
+
+
 class Response(BaseModel):
     """插件 API 统一响应：success / message / data 三段式。
 
@@ -67,13 +75,14 @@ class LibraryCheckup(_PluginBase):
         "媒体服务器与目录自动识别，装好即用，明细不截断、日志可复制，全程只读。"
     )
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/librarycheckup.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_config_prefix = "librarycheckup_"
     plugin_color = "#6366F1"
     system_version = ">=3.0.0"
     plugin_order = 92
+    _enabled: bool = True
 
     _DASHBOARD_REFRESH = 120
 
@@ -124,8 +133,10 @@ class LibraryCheckup(_PluginBase):
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         self._cfg = dict(config or {})
-        self._enabled = bool(self._cfg.get("enabled", True))
+        self._enabled = _enabled_from(self._cfg)
         collector.invalidate()
+        if not self._enabled:
+            return
         cfg = collector.parse_config(self._effective_config())
         common.emit(
             "配置已生效：预演目录="
@@ -144,6 +155,15 @@ class LibraryCheckup(_PluginBase):
 
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         form: List[Dict[str, Any]] = [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VSwitch", "props": {
+                        "model": "enabled", "label": "启用插件", "color": "primary",
+                        "hint": "关掉后不再采集数据、不显示首页组件，页面按钮也会停用",
+                        "persistentHint": True,
+                    }},
+                ]},
+            ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
                     {"component": "VTextField", "props": {
@@ -168,7 +188,9 @@ class LibraryCheckup(_PluginBase):
                 ]},
             ]},
         ]
-        return form, collector.parse_config(self._effective_config())
+        defaults = collector.parse_config(self._effective_config())
+        defaults["enabled"] = self._enabled
+        return form, defaults
 
     # ------------------------------------------------------------------
     # API
@@ -190,10 +212,14 @@ class LibraryCheckup(_PluginBase):
         ]
 
     def api_snapshot(self) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data=collector.collect(
             config=self._effective_config(), view=self._view()))
 
     def api_refresh(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         collector.invalidate()
         data = collector.collect(force=True, config=self._effective_config(), view=self._view())
         common.emit("用户点了「重新体检」，已强制重新采集（只读）。")
@@ -207,6 +233,8 @@ class LibraryCheckup(_PluginBase):
                               }})
 
     def api_view(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         body = payload if isinstance(payload, dict) else {}
         view = str(body.get("view") or "")
         if view not in collector.VIEWS:
@@ -221,6 +249,8 @@ class LibraryCheckup(_PluginBase):
         return Response(success=True, message=f"已切换到 {label}", data={"view": view})
 
     def api_preview(self, payload: Optional[dict] = _BODY_DEFAULT) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         self._view_state = "preview"
         try:
             self.save_data("view", "preview")
@@ -235,6 +265,8 @@ class LibraryCheckup(_PluginBase):
                               "html": renderer.render(data)})
 
     def api_log(self) -> Response:
+        if not self._enabled:
+            return Response(success=False, message="插件已停用，请到设置页打开「启用插件」")
         return Response(success=True, data={"text": common.log_text(300),
                                            "lines": common.log_lines(300)})
 
@@ -243,6 +275,10 @@ class LibraryCheckup(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[Dict[str, Any]]:
+        if not self._enabled:
+            return [{"component": "VAlert", "props": {
+                "type": "info", "variant": "tonal", "title": "插件已停用"},
+                "text": "到「设置」里打开「启用插件」后，本页的按钮和数据才会恢复。"}]
         current = self._view()
         data = collector.collect(config=self._effective_config(), view=current)
         elements: List[Dict[str, Any]] = []
@@ -292,10 +328,17 @@ class LibraryCheckup(_PluginBase):
         return elements
 
     def get_dashboard_meta(self) -> List[Dict[str, str]]:
+        if not self._enabled:
+            return []
         return [{"key": "checkup", "name": "媒体库体检"}]
 
     def get_dashboard(self, key: str = "checkup", **kwargs: Any
                       ) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+        if not self._enabled:
+            return ({"cols": 12, "md": 8},
+                    {"border": False, "title": "媒体库体检", "subtitle": "插件已停用"},
+                    [{"component": "div", "html":
+                      "<div style='padding:12px;opacity:.7'>插件已停用，到设置里打开「启用插件」后恢复。</div>"}])
         data = collector.collect(config=self._effective_config(), view=self._view())
         cols = {"cols": 12, "md": 8}
         attrs = {

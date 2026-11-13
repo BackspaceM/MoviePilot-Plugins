@@ -181,8 +181,10 @@ class TestSimplicity(unittest.TestCase):
                     walk(value)
 
         walk(form)
-        self.assertEqual(controls, ["VSelect"], f"设置项应保持极简，实际为 {controls}")
-        self.assertEqual(set(defaults), {"refresh_seconds"})
+        self.assertEqual(controls, ["VSwitch", "VSelect"],
+                         f"设置项应保持极简（启用开关 + 刷新间隔），实际为 {controls}")
+        self.assertEqual(set(defaults), {"enabled", "refresh_seconds"})
+        self.assertTrue(defaults["enabled"])
 
     def test_refresh_seconds_are_clamped(self) -> None:
         plugin = PLUGIN_CLS()

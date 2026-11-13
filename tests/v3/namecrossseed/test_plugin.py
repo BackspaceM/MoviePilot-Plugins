@@ -432,8 +432,11 @@ def test_api_has_log_and_page_shows_log_and_rows() -> None:
                       "last_eligible": 3, "last_processed": 3}
     page = plugin.get_page()
     html = "".join(str(x.get("html") or "") for x in page)
-    assert "运行日志" in html and "cs-log" in html
-    assert "本轮扫描名录" in html and "自动刷新" in html
+    # 默认只给成功 / 失败两栏，完整日志与全量名录都折叠
+    assert 'id="cs-ok"' in html and 'id="cs-bad"' in html and "cs-cols" in html
+    assert "完整运行日志" in html and "cs-log" in html
+    assert "本轮扫描名录" in html and '<details class="cs-fold">' in html
+    assert "<details open" not in html
     assert "__csPoll" in html and "NameCrossSeed/log" in html
 
 
@@ -757,7 +760,7 @@ def test_renamed_english_identifiers_are_consistent() -> None:
     assert NameCrossSeed.__name__ == "NameCrossSeed"
     assert NameCrossSeed.plugin_name == "名称辅种"
     assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
-    assert NameCrossSeed.plugin_version == "2.0.0"
+    assert NameCrossSeed.plugin_version == "2.0.1"
     assert "namecrossseed.png" in NameCrossSeed.plugin_icon
     cmd = NameCrossSeed.get_command()[0]
     assert cmd["cmd"] == "/name_seed"
