@@ -417,10 +417,10 @@ def test_display_name_and_simple_form() -> None:
     form, default = _plugin().get_form()
     models: List[str] = []
     _walk_models(form, models)
-    assert set(models) == {"enabled", "notify", "cron", "max_tasks",
-                           "downloaders", "site_url", "user_agent", "cookie",
-                           "name_rules"}
-    assert len(models) <= 9, "设置项又变多了"
+    assert set(models) == {"enabled", "notify", "cron", "max_tasks", "interval",
+                           "max_requests", "downloaders", "site_url", "user_agent",
+                           "cookie", "name_rules"}
+    assert len(models) <= 11, "设置项又变多了"
     assert default["name_rules"] == "", "名称清洗规则默认留空即用内置规则"
     assert default["max_tasks"] == 0, "默认必须不限数量，扫全下载器"
 
@@ -505,6 +505,55 @@ def test_cached_items_are_still_listed() -> None:
     assert sum(1 for r in rows if r["state"] == "cached") == 1
     assert store["stats"]["last_scanned"] == 5
     assert store["stats"]["last_eligible"] == 4
+
+
+def test_budget_message_tells_how_to_raise_it() -> None:
+    """预算用尽不再是干巴巴四个字，要带上限数值和去哪调大。"""
+    plugin, store = _scan_plugin(6)
+    plugin._max_requests = 2
+    plugin._handle = lambda d, s, v, c: (  # type: ignore[method-assign]
+        setattr(plugin, "_budget", plugin._budget - 1) or ("nomatch", "无结果", "")
+    )
+    plugin._run_once("手动")
+    message = store["stats"]["last_message"]
+    assert "每轮请求上限" in message
+    assert "下轮" in message
+
+
+def test_summarize_ok_column_lists_added_only() -> None:
+    """成功栏只放真正添加了的；站内已有单独计数，不冒充成功。"""
+    from app.plugins.namecrossseed import logview
+
+    rows = [
+        {"name": "种A", "state": "added", "message": "添加成功"},
+        {"name": "种B", "state": "exists", "message": "组内已有该站点的种子"},
+        {"name": "种C", "state": "exists", "message": ""},
+        {"name": "种D", "state": "failed", "message": "下载失败"},
+        {"name": "种E", "state": "nomatch", "message": ""},
+    ]
+    summary = logview.summarize(rows)
+    assert summary["ok_total"] == 1
+    assert "种A" in summary["ok"][0]
+    assert summary["exists_total"] == 2
+    assert summary["bad_total"] == 1
+    joined = "\n".join(summary["ok"])
+    assert "种B" not in joined and "种C" not in joined
+
+
+def test_interval_and_request_budget_settings_parse() -> None:
+    """新增的搜索间隔与每轮请求上限要从配置读进来，间隔最小 5 秒。"""
+    plugin = NameCrossSeed()
+    plugin.init_plugin({
+        "enabled": True, "interval": "3", "max_requests": "80",
+    })
+    assert plugin._interval == 5.0, "低于 5 秒要顶到 5"
+    assert plugin._max_requests == 80
+    form, default = plugin.get_form()
+    assert default["interval"] == 6
+    assert default["max_requests"] == 300
+    models = []
+    _walk_models(form, models)
+    assert {"interval", "max_requests"} <= set(models)
 
 
 def test_budget_exhaustion_is_visible_in_list() -> None:
@@ -760,7 +809,7 @@ def test_renamed_english_identifiers_are_consistent() -> None:
     assert NameCrossSeed.__name__ == "NameCrossSeed"
     assert NameCrossSeed.plugin_name == "名称辅种"
     assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
-    assert NameCrossSeed.plugin_version == "2.0.1"
+    assert NameCrossSeed.plugin_version == "2.1.0"
     assert "namecrossseed.png" in NameCrossSeed.plugin_icon
     cmd = NameCrossSeed.get_command()[0]
     assert cmd["cmd"] == "/name_seed"

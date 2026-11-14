@@ -189,12 +189,14 @@ class NameCrossSeed(_PluginBase):
     plugin_desc = (
         "先把下载器里同一份文件的多个辅种归并成一组，每组只搜一次站点、只添加一次；"
         "名称只用来找候选，info_hash 和文件清单完全一致才添加。"
-        "发布名可用正则规则清洗，页面有实时日志与全量名录，设置只要填 Cookie。"
+        "发布名可用正则规则清洗，页面有实时日志与全量名录，详情页「本轮辅种成功」"
+        "只列真正添加了的记录。设置只要填 Cookie；搜索间隔与每轮请求上限可调，"
+        "预算用完的组下轮自动继续。"
     )
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png"
     )
-    plugin_version = "2.0.1"
+    plugin_version = "2.1.0"
     plugin_label = "做种,辅种,名称匹配,实时日志"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -399,6 +401,18 @@ class NameCrossSeed(_PluginBase):
                     "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
+                self._col(12, 3, [{"component": "VTextField", "props": {
+                    "model": "interval", "label": "搜索间隔（秒）", "placeholder": "6",
+                    "type": "number", "hint": "两次站点请求之间的等待，默认 6 秒；"
+                    "调小更快但容易被站点限流，最小 5 秒",
+                    "persistentHint": True}}]),
+                self._col(12, 3, [{"component": "VTextField", "props": {
+                    "model": "max_requests", "label": "每轮请求上限", "placeholder": "300",
+                    "type": "number", "hint": "一轮最多向站点发多少次请求（含搜索和下载种子核对），"
+                    "用完后剩下的组留到下轮自动继续，不会丢；预算不够就把这里调大",
+                    "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VSelect", "props": {
                     "model": "downloaders", "label": "下载器", "multiple": True,
                     "chips": True, "clearable": True, "items": downloader_items,
@@ -448,6 +462,8 @@ class NameCrossSeed(_PluginBase):
             "notify": True,
             "cron": "0 4 * * *",
             "max_tasks": 0,
+            "interval": 6,
+            "max_requests": 300,
             "downloaders": [],
             "site_url": DEFAULT_SITE_URL,
             "user_agent": _DEFAULT_UA,
@@ -552,6 +568,7 @@ class NameCrossSeed(_PluginBase):
             "bad_text": logview.summary_text(summary["bad"], summary["bad_total"]),
             "ok_total": summary["ok_total"],
             "bad_total": summary["bad_total"],
+            "exists_total": summary["exists_total"],
             "text": logview.log_text(self),
             "progress": logview.progress(stats, bool(self._running), as_html=False),
             "running": bool(self._running),
@@ -661,7 +678,7 @@ class NameCrossSeed(_PluginBase):
         result: Dict[str, Any] = {
             "trigger": trigger,
             "scanned": 0, "groups": 0, "eligible": 0, "processed": 0,
-            "matched": 0, "added": 0, "failed": 0, "skipped": 0,
+            "matched": 0, "added": 0, "exists": 0, "failed": 0, "skipped": 0,
             "message": "", "records": [],
         }
         if not self._cookie:
@@ -800,8 +817,9 @@ class NameCrossSeed(_PluginBase):
                 mark("pending", stopped + "，下轮继续")
                 continue
             if self._budget <= 0:
-                stopped = "站点请求预算用尽"
-                mark("pending", stopped + "，下轮继续")
+                stopped = (f"站点请求预算用尽（本轮 {self._max_requests} 次已用完，"
+                           "在设置「每轮请求上限」调大；已处理的组都有结果，剩下的下轮自动继续）")
+                mark("pending", "本轮请求预算用尽，下轮继续")
                 continue
 
             downloader, service, view, _ = representative
@@ -843,6 +861,8 @@ class NameCrossSeed(_PluginBase):
                 result["matched"] += 1
             if state == "added":
                 result["added"] += 1
+            elif state == "exists":
+                result["exists"] += 1
             elif state == "failed":
                 result["failed"] += 1
             elif state == "skipped":
@@ -868,7 +888,8 @@ class NameCrossSeed(_PluginBase):
         logview.emit(
             self,
             f"本轮结束：下载器 {len(entries)} 个种子 → {len(groups)} 组内容，"
-            f"实际搜站 {processed} 组、新增 {result['added']} 个、失败 {result['failed']} 组"
+            f"实际搜站 {processed} 组、辅种成功 {result['added']} 个、"
+            f"站内已有 {result['exists']} 组、失败 {result['failed']} 组"
             + (f"；{stopped}" if stopped else "")
             + "。全量名录与搜索词见上方日志。",
         )
@@ -1173,6 +1194,7 @@ class NameCrossSeed(_PluginBase):
             "last_processed": result.get("processed", 0),
             "last_matched": result.get("matched", 0),
             "last_added": result.get("added", 0),
+            "last_exists": result.get("exists", 0),
             "last_failed": result.get("failed", 0),
             "last_duration": duration,
             "last_message": result.get("message", ""),
@@ -1209,7 +1231,7 @@ class NameCrossSeed(_PluginBase):
         lines = [
             f"下载器 {result.get('scanned', 0)} 个种子归并成 {result.get('groups', 0)} 组内容，"
             f"实际搜站 {result.get('processed', 0)} 组，"
-            f"新增 {added}，失败 {failed}",
+            f"辅种成功 {added}，站内已有 {result.get('exists', 0)}，失败 {failed}",
         ]
         if result.get("message"):
             lines.append(str(result["message"]))

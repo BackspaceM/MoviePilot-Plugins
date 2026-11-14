@@ -19,7 +19,7 @@ MAX_LINES = 400
 MAX_ROWS = 2000
 POLL_MS = 3000
 SUMMARY_LIMIT = 5  # 成功 / 失败两栏各显示最近几条
-_OK_STATES = frozenset({"added", "exists"})
+_OK_STATES = frozenset({"added"})
 _BAD_STATES = frozenset({"failed", "error"})
 
 try:
@@ -99,13 +99,21 @@ def log_text(plugin: Any, limit: int = 300) -> str:
 
 
 def summarize(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """把本轮名录压成「成功 / 失败」两栏，各留最近几条，其余只报总数。"""
+    """把本轮名录压成「辅种成功 / 失败」两栏，各留最近几条，其余只报总数。
+
+    成功栏只放真正添加了的（added）；站点种子本来就在下载器里的（exists）
+    不算成功，只单独计数。
+    """
     ok: List[str] = []
     bad: List[str] = []
+    exists_total = 0
     for row in rows:
         if not isinstance(row, dict):
             continue
         state = str(row.get("state") or "")
+        if state == "exists":
+            exists_total += 1
+            continue
         if state not in _OK_STATES and state not in _BAD_STATES:
             continue
         name = str(row.get("name") or "").strip() or "（未命名）"
@@ -119,6 +127,7 @@ def summarize(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "bad": bad[-SUMMARY_LIMIT:][::-1],
         "ok_total": len(ok),
         "bad_total": len(bad),
+        "exists_total": exists_total,
     }
 
 
@@ -146,7 +155,8 @@ def progress(stats: Dict[str, Any], running: bool, as_html: bool = True) -> str:
         f"下载器种子 {int(stats.get('last_scanned') or 0)} 个",
         f"归并 {int(stats.get('last_groups') or 0)} 组内容",
         f"实际搜站 {int(stats.get('last_processed') or 0)} 组",
-        f"新增 {int(stats.get('last_added') or 0)}",
+        f"辅种成功 {int(stats.get('last_added') or 0)}",
+        f"站内已有 {int(stats.get('last_exists') or 0)}",
         f"失败 {int(stats.get('last_failed') or 0)}",
     ]
     text = "｜".join(parts)
@@ -176,7 +186,7 @@ _POLL_JS = (
     "if(p){if(p.textContent!==t){p.textContent=t;}}}"
     "if(d){"
     "put('cs-ok',d.ok_text||'');put('cs-bad',d.bad_text||'');"
-    "put('cs-ok-count','共 '+(d.ok_total||0)+' 条');"
+    "put('cs-ok-count','共 '+(d.ok_total||0)+' 条 · 站内已有 '+(d.exists_total||0)+'（不算成功）');"
     "put('cs-bad-count','共 '+(d.bad_total||0)+' 条');"
     "put('cs-log',d.text||'');put('cs-state',d.progress||'');"
     "put('cs-run',d.running?'运行中':'空闲');"
@@ -275,11 +285,11 @@ def render(
     )
     state = f'<div class="cs-state" id="cs-state">{progress(stats, running)}</div>'
     cols_block = (
-        f'<div class="cs-sec">本轮结果<small>成功与失败分栏，各显示最近 {SUMMARY_LIMIT} 条</small></div>'
+        f'<div class="cs-sec">本轮辅种成功<small>只列真正添加了的，最近 {SUMMARY_LIMIT} 条</small></div>'
         '<div class="cs-cols">'
         '<div class="cs-col"><div class="cs-col-head">'
-        '<span class="cs-dot cs-dot-ok"></span>成功'
-        f'<small id="cs-ok-count">共 {summary["ok_total"]} 条</small></div>'
+        '<span class="cs-dot cs-dot-ok"></span>辅种成功'
+        f'<small id="cs-ok-count">共 {summary["ok_total"]} 条 · 站内已有 {summary["exists_total"]}（不算成功）</small></div>'
         f'<pre class="cs-col-body" id="cs-ok">{_e(summary_text(summary["ok"], summary["ok_total"]))}</pre>'
         '</div>'
         '<div class="cs-col"><div class="cs-col-head">'
@@ -300,10 +310,10 @@ def render(
         + _table(rows, truncated) + '</details>'
     )
     foot = (
-        '<div class="cs-foot">两栏只列最近几条，完整日志和全量名录点上面的标题展开，页面每 3 秒刷新一次。'
+        '<div class="cs-foot">左栏只列本轮真正辅种成功的种子；站点种子本来就在下载器里的'
+        '（站内已有）不算成功，只计个数。完整日志和全量名录点上面的标题展开，页面每 3 秒刷新一次。'
         '先把下载器里的种子按内容归并，同内容的多个辅种只搜一次站点、只添加一次；'
         '名称只用来找候选，最终要下载种子解析 info_hash 和文件清单，完全一致才会添加。'
-        '未匹配、跳过、已核对等记录不进两栏，展开「本轮扫描名录」可看全部。'
         '想强制重扫一遍，点「清空缓存」后再运行。</div>'
     )
     # v-html 不会执行 <script>，用静态 data URI 图片的 onload 启动轮询
