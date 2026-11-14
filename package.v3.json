@@ -426,5 +426,21 @@
       "v1.0.1": "补上宿主基类的 stop_service 抽象方法（V3 是 ABCMeta，缺一个会导致插件重载不 ACTIVE、整次安装回滚）；页面渲染不再触发状态桥采集，调度器不可用时返回空任务。",
       "v1.0.0": "首个版本：状态桥 URL / 本地状态文件 / 容器内磁盘自检三路降级，磁盘占用、盘温、SMART、容器状态与 UPS 规则，默认试运行，30 分钟冷却。"
     }
+  },
+  "PluginDebugger": {
+    "name": "插件调试",
+    "description": "本地改完插件打个 ZIP 就能直接装进 MoviePilot，不用等 GitHub 推送和插件市场刷新。网页上选文件即可上传，也可以填容器里能看到的 ZIP 路径；会检查包结构、读出主类名和版本，安装前自动备份旧版本，装完尝试自动重载，装错了能一键回滚。上传包可单个删除，删除要两步确认，确认按钮就在同一行。页面打开时只读一次状态，不轮询。",
+    "labels": "插件调试,ZIP安装,本地测试,备份,回滚,重载,开发辅助",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/plugindebugger.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：网页选 ZIP 上传（走 MoviePilotAPI 传 base64），也支持填容器内路径安装；校验 ZIP 与 __init__.py、AST 读出继承 _PluginBase 的主类名和版本，解压前做目录穿越防护；安装前备份旧版本、装完调 PluginManager 重载，可按插件一键回滚；上传包两段式删除，确认按钮紧跟同一行。页面静态、端点全兜底、日志按批落盘。"
+    }
   }
 }

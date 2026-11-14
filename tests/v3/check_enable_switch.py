@@ -98,11 +98,13 @@ def main():
             _cols, attrs, _elements = off.get_dashboard()
             check(attrs.get("subtitle") == "插件已停用", f"{plugin_id}: 停用后首页不采集")
 
-    # 名称辅种：日志改成成功 / 失败双栏
+    # 名称辅种：详情页是静态状态卡，不轮询；成功栏只放真正添加的
     module, cls, _ = cc.load_plugin(ROOT / "plugins.v3" / "namecrossseed")
     lv = module.logview
     check(cls.plugin_version == index["NameCrossSeed"]["version"], "名称辅种: 索引版本一致")
     check(lv.SUMMARY_LIMIT == 5, "名称辅种: 每栏 5 条")
+    check(callable(getattr(lv, "render_brief", None)), "名称辅种: 静态状态卡")
+    check(not hasattr(lv, "_POLL_JS") and not hasattr(lv, "render"), "名称辅种: 不再注入轮询脚本")
     rows = [
         {"name": f"种子{i}", "state": state,
          "message": "完成" if state == "added" else "超时"}
@@ -111,18 +113,19 @@ def main():
         )
     ]
     summary = lv.summarize(rows)
-    check(summary["ok_total"] == 3 and summary["bad_total"] == 3, "名称辅种: 成功/失败分类")
-    check(len(summary["ok"]) == 3 and len(summary["bad"]) == 3, "名称辅种: 两栏条数")
+    check(summary["ok_total"] == 2 and summary["bad_total"] == 3, "名称辅种: 成功/失败分类")
+    check(summary["exists_total"] == 1, "名称辅种: 站内已有单独计数")
     check("种子6" in summary["ok"][0], "名称辅种: 最新记录排在最前")
-    html = lv.render({}, "[00:00] 开始\n" * 20, rows)
-    check('id="cs-ok"' in html and 'id="cs-bad"' in html, "名称辅种: 双栏渲染")
-    check("<details open" not in html and html.count('<details class="cs-fold">') == 2,
-          "名称辅种: 完整日志与名录默认折叠")
-    check("<script" not in html, "名称辅种: 不注入脚本")
+    html = lv.render_brief({"last_message": "<script>x</script>"}, False)
+    check("辅种成功" in html and "<script" not in html and "&lt;script" in html,
+          "名称辅种: 状态卡转义且不注入脚本")
+    check("setInterval" not in html and "<table" not in html and "<details" not in html,
+          "名称辅种: 状态卡无轮询与大表格")
     seed = cls()
     seed.init_plugin({})
     data = seed.api_log().data
-    for key in ("ok_text", "bad_text", "ok_total", "bad_total", "text", "progress", "running"):
+    for key in ("ok_text", "bad_text", "ok_total", "bad_total", "exists_total",
+                "text", "progress", "running"):
         check(key in data, f"名称辅种: api_log 返回 {key}")
 
     print(f"合计 {checks} 项，通过 {checks - len(failures)}，失败 {len(failures)}")

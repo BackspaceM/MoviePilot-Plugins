@@ -136,22 +136,6 @@ def summarize(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def summary_text(items: Sequence[str], total: int) -> str:
-    if not items:
-        return "暂无记录"
-    rest = max(0, int(total) - len(items))
-    text = "\n".join(str(x) for x in items)
-    return text + (f"\n… 另有 {rest} 条" if rest else "")
-
-
-def scan_rows(plugin: Any) -> List[Dict[str, Any]]:
-    try:
-        rows = plugin.get_data(SCAN_KEY) or []
-    except Exception:  # noqa: BLE001
-        rows = []
-    return [x for x in rows if isinstance(x, dict)][-MAX_ROWS:]
-
-
 def progress(stats: Dict[str, Any], running: bool, as_html: bool = True) -> str:
     esc = _e if as_html else (lambda value: str(value if value is not None else ""))
     parts = [
@@ -177,7 +161,12 @@ _BRIEF_STYLE = """
 .cs *{box-sizing:border-box}
 .cs-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
   flex-wrap:wrap;margin:4px 0 12px}
+.cs-brand{display:flex;align-items:center;gap:11px;min-width:0}
+.cs-logo{width:42px;height:42px;border-radius:13px;flex:none;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#4F46E5,#7C3AED);box-shadow:0 6px 18px rgba(99,102,241,.32)}
+.cs-logo svg{width:23px;height:23px}
 .cs-title{font-size:17px;font-weight:700}
+.cs-sub{font-size:11px;opacity:.6;margin-top:1px}
 .cs-pill{font-size:11px;font-weight:700;padding:3px 9px;border-radius:7px;
   background:rgba(99,102,241,.14);color:#8B8BF5}
 .cs-card{border:1px solid rgba(127,127,127,.16);border-radius:12px;
@@ -213,9 +202,18 @@ def render_brief(stats: Dict[str, Any], running: bool = False) -> str:
     )
     message = str(stats.get("last_message") or "").strip()
     note = f'<div class="cs-note">{_e(message[:200])}</div>' if message else ""
+    logo = (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M9 7H7a4 4 0 0 0 0 8h2"/><path d="M15 7h2a4 4 0 0 1 0 8h-2"/>'
+        '<path d="M8 12h8"/>'
+        '</svg>'
+    )
     return (
         f'<div class="cs">{_BRIEF_STYLE}'
-        '<div class="cs-head"><span class="cs-title">名称辅种</span>'
+        '<div class="cs-head"><div class="cs-brand"><div class="cs-logo">' + logo + '</div>'
+        '<div><div class="cs-title">名称辅种</div>'
+        '<div class="cs-sub">同一份内容只搜一次、只加一次</div></div></div>'
         f'<span class="cs-pill">{"运行中" if running else "空闲"}</span></div>'
         f'<div class="cs-card">{body}</div>{note}'
         '<div class="cs-foot">这页只在打开时读一次状态，不会自动刷新；'

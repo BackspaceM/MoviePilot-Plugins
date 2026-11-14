@@ -75,6 +75,15 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _api_fail(action: str, exc: Exception) -> schemas.Response:
+    """接口兜底：记录异常类型，只回不含站点凭据的简短中文原因。"""
+    logger.warning(f"名称辅种：{action}异常 {type(exc).__name__}: {exc}")
+    return schemas.Response(
+        success=False,
+        message=f"{action}失败：{type(exc).__name__}，请查看插件日志",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 配置与下载器任务的轻量视图
 # ---------------------------------------------------------------------------
@@ -529,63 +538,78 @@ class NameCrossSeed(_PluginBase):
 
     def api_run(self) -> schemas.Response:
         """立即在后台执行一次辅种。"""
-        if not self._enabled:
-            return schemas.Response(success=False, message="插件未启用")
-        if not self._cookie:
-            return schemas.Response(success=False, message="未配置站点 Cookie")
-        if self._running:
-            return schemas.Response(success=False, message="已有任务在运行")
-        started = self.start_run(trigger="手动")
-        return schemas.Response(
-            success=started,
-            message="已开始，详情页日志会实时更新" if started else "任务启动失败",
-        )
+        try:
+            if not self._enabled:
+                return schemas.Response(success=False, message="插件未启用")
+            if not self._cookie:
+                return schemas.Response(success=False, message="未配置站点 Cookie")
+            if self._running:
+                return schemas.Response(success=False, message="已有任务在运行")
+            started = self.start_run(trigger="手动")
+            return schemas.Response(
+                success=started,
+                message="已开始，详情页日志会实时更新" if started else "任务启动失败",
+            )
+        except Exception as exc:  # noqa: BLE001 - 接口异常收敛成响应，不抛给宿主
+            return _api_fail("启动辅种", exc)
 
     def api_check(self) -> schemas.Response:
         """检测 cookie 是否有效。"""
-        if not self._cookie:
-            return schemas.Response(success=False, message="未配置站点 Cookie")
-        ok, message = self._build_client().check_login()
-        return schemas.Response(success=ok, message=message)
+        try:
+            if not self._cookie:
+                return schemas.Response(success=False, message="未配置站点 Cookie")
+            ok, message = self._build_client().check_login()
+            return schemas.Response(success=ok, message=message)
+        except Exception as exc:  # noqa: BLE001 - 接口异常收敛成响应，不抛给宿主
+            return _api_fail("检测 Cookie", exc)
 
     def api_clear_cache(self) -> schemas.Response:
         """清空重试缓存与本轮名录，下次会把全部种子重新核一遍。"""
-        self.save_data(_CACHE_KEY, {})
-        self.save_data(logview.SCAN_KEY, [])
-        stats = dict(self.get_data(_STATS_KEY) or {})
-        stats["pending_retry"] = 0
-        self.save_data(_STATS_KEY, stats)
-        logview.emit(self, "缓存已清空，下一轮会重新核对下载器里的全部种子。")
-        logview.flush(self)
-        return schemas.Response(success=True, message="缓存已清空，下轮全量重扫")
+        try:
+            self.save_data(_CACHE_KEY, {})
+            self.save_data(logview.SCAN_KEY, [])
+            stats = dict(self.get_data(_STATS_KEY) or {})
+            stats["pending_retry"] = 0
+            self.save_data(_STATS_KEY, stats)
+            logview.emit(self, "缓存已清空，下一轮会重新核对下载器里的全部种子。")
+            logview.flush(self)
+            return schemas.Response(success=True, message="缓存已清空，下轮全量重扫")
+        except Exception as exc:  # noqa: BLE001 - 接口异常收敛成响应，不抛给宿主
+            return _api_fail("清空缓存", exc)
 
     def api_log(self) -> schemas.Response:
         """保留给外部查进度：只读内存日志和统计，不再扫全量名录。"""
-        stats = self.get_data(_STATS_KEY)
-        stats = stats if isinstance(stats, dict) else {}
-        added = int(stats.get("last_added") or 0)
-        exists = int(stats.get("last_exists") or 0)
-        failed = int(stats.get("last_failed") or 0)
-        return schemas.Response(success=True, data={
-            "ok_text": f"辅种成功 {added} 个，站内已有 {exists} 组",
-            "bad_text": f"失败 {failed} 组",
-            "ok_total": added,
-            "bad_total": failed,
-            "exists_total": exists,
-            "text": logview.log_text(self),
-            "progress": logview.progress(stats, bool(self._running), as_html=False),
-            "running": bool(self._running),
-        })
+        try:
+            stats = self.get_data(_STATS_KEY)
+            stats = stats if isinstance(stats, dict) else {}
+            added = int(stats.get("last_added") or 0)
+            exists = int(stats.get("last_exists") or 0)
+            failed = int(stats.get("last_failed") or 0)
+            return schemas.Response(success=True, data={
+                "ok_text": f"辅种成功 {added} 个，站内已有 {exists} 组",
+                "bad_text": f"失败 {failed} 组",
+                "ok_total": added,
+                "bad_total": failed,
+                "exists_total": exists,
+                "text": logview.log_text(self),
+                "progress": logview.progress(stats, bool(self._running), as_html=False),
+                "running": bool(self._running),
+            })
+        except Exception as exc:  # noqa: BLE001 - 接口异常收敛成响应，不抛给宿主
+            return _api_fail("读取日志", exc)
 
     def api_status(self) -> schemas.Response:
         """返回运行状态概要。"""
-        return schemas.Response(success=True, data={
-            "enabled": self._enabled,
-            "running": self._running,
-            "downloaders": self._downloaders,
-            "cron": self._cron,
-            "stats": self.get_data(_STATS_KEY) or {},
-        })
+        try:
+            return schemas.Response(success=True, data={
+                "enabled": self._enabled,
+                "running": self._running,
+                "downloaders": self._downloaders,
+                "cron": self._cron,
+                "stats": self.get_data(_STATS_KEY) or {},
+            })
+        except Exception as exc:  # noqa: BLE001 - 接口异常收敛成响应，不抛给宿主
+            return _api_fail("查询状态", exc)
 
     # ------------------------------------------------------------------
     # 调度入口
