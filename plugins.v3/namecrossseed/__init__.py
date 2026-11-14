@@ -189,14 +189,14 @@ class NameCrossSeed(_PluginBase):
     plugin_desc = (
         "先把下载器里同一份文件的多个辅种归并成一组，每组只搜一次站点、只添加一次；"
         "名称只用来找候选，info_hash 和文件清单完全一致才添加。"
-        "发布名可用正则规则清洗，页面有实时日志与全量名录，详情页「本轮辅种成功」"
-        "只列真正添加了的记录。设置只要填 Cookie；搜索间隔与每轮请求上限可调，"
+        "发布名可用正则规则清洗；详情页只显示一张静态状态卡，不轮询、不刷日志，"
+        "逐组搜索词和结果去插件日志里看。设置只要填 Cookie；搜索间隔与每轮请求上限可调，"
         "预算用完的组下轮自动继续。"
     )
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png"
     )
-    plugin_version = "2.1.0"
+    plugin_version = "2.1.1"
     plugin_label = "做种,辅种,名称匹配,实时日志"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -454,7 +454,7 @@ class NameCrossSeed(_PluginBase):
                         "每组只搜一次站点、只添加一次，不会拿着同一个内容反复搜、反复插；"
                         "站点种子已经在下载器里就直接跳过。名称只负责找候选，"
                         "找到后还要解析 info_hash 和文件清单，完全一致才添加。"
-                        "运行日志、搜索词和逐条结果在详情页实时显示；想强制重扫点「清空缓存」。")}]),
+                        "运行日志、搜索词和逐条结果在插件卡片点「日志」看；想强制重扫点「清空缓存」。")}]),
             ]},
         ]
         return [{"component": "VForm", "content": content}], {
@@ -480,7 +480,7 @@ class NameCrossSeed(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_page(self) -> List[dict]:
-        """详情页：操作按钮 + 实时日志 + 本轮全量扫描名录。"""
+        """详情页只留按钮和一张静态状态卡，不轮询、不渲染全量名录。"""
         stats = self.get_data(_STATS_KEY) or {}
         pid = self.__class__.__name__
         buttons = [
@@ -498,18 +498,18 @@ class NameCrossSeed(_PluginBase):
                 "prepend-icon": "mdi-delete-sweep", "class": "ma-1"},
              "text": "清空缓存",
              "events": {"click": {"api": f"plugin/{pid}/clear_cache", "method": "post", "params": {}}}},
+            {"component": "VBtn", "props": {
+                "variant": "text", "prepend-icon": "mdi-refresh", "class": "ma-1"},
+             "text": "刷新状态",
+             "events": {"click": {"api": f"plugin/{pid}/status", "method": "get", "params": {}}}},
         ]
-        rows = logview.scan_rows(self)
-        page_html = logview.render(
-            stats=stats,
-            log=logview.log_text(self),
-            rows=rows,
-            running=bool(self._running),
-            truncated=len(rows) >= logview.MAX_ROWS,
-        )
+        try:
+            html_text = logview.render_brief(stats, bool(self._running))
+        except Exception:  # noqa: BLE001 - 页面渲染异常也要给个能用的页面
+            html_text = '<div class="cs">名称辅种</div>'
         return [
             {"component": "div", "content": buttons},
-            {"component": "div", "html": page_html},
+            {"component": "div", "html": html_text},
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:
@@ -556,19 +556,22 @@ class NameCrossSeed(_PluginBase):
         stats["pending_retry"] = 0
         self.save_data(_STATS_KEY, stats)
         logview.emit(self, "缓存已清空，下一轮会重新核对下载器里的全部种子。")
+        logview.flush(self)
         return schemas.Response(success=True, message="缓存已清空，下轮全量重扫")
 
     def api_log(self) -> schemas.Response:
-        """页面每 3 秒轮询一次：成功/失败双栏摘要 + 完整日志纯文本 + 进度。"""
+        """保留给外部查进度：只读内存日志和统计，不再扫全量名录。"""
         stats = self.get_data(_STATS_KEY)
         stats = stats if isinstance(stats, dict) else {}
-        summary = logview.summarize(logview.scan_rows(self))
+        added = int(stats.get("last_added") or 0)
+        exists = int(stats.get("last_exists") or 0)
+        failed = int(stats.get("last_failed") or 0)
         return schemas.Response(success=True, data={
-            "ok_text": logview.summary_text(summary["ok"], summary["ok_total"]),
-            "bad_text": logview.summary_text(summary["bad"], summary["bad_total"]),
-            "ok_total": summary["ok_total"],
-            "bad_total": summary["bad_total"],
-            "exists_total": summary["exists_total"],
+            "ok_text": f"辅种成功 {added} 个，站内已有 {exists} 组",
+            "bad_text": f"失败 {failed} 组",
+            "ok_total": added,
+            "bad_total": failed,
+            "exists_total": exists,
             "text": logview.log_text(self),
             "progress": logview.progress(stats, bool(self._running), as_html=False),
             "running": bool(self._running),
@@ -1205,6 +1208,7 @@ class NameCrossSeed(_PluginBase):
                                      _to_int(stats.get("pending_retry"), 0)),
         })
         self.save_data(_STATS_KEY, stats)
+        logview.flush(self)
         records = result.get("records") or []
         if records:
             history = self.get_data(_HISTORY_KEY) or []

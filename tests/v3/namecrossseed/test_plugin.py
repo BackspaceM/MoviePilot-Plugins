@@ -425,34 +425,58 @@ def test_display_name_and_simple_form() -> None:
     assert default["max_tasks"] == 0, "默认必须不限数量，扫全下载器"
 
 
-def test_api_has_log_and_page_shows_log_and_rows() -> None:
+def test_page_is_static_brief_without_polling() -> None:
+    """详情页瘦身后：只有按钮和一张静态状态卡，不注入轮询、不渲染名录。"""
     assert "/log" in {item["path"] for item in _plugin().get_api()}
     plugin, store = _scan_plugin(3)
     store["stats"] = {"last_run_text": "刚刚", "last_scanned": 3,
-                      "last_eligible": 3, "last_processed": 3}
+                      "last_eligible": 3, "last_processed": 3,
+                      "last_added": 1, "last_exists": 1, "last_failed": 0}
     page = plugin.get_page()
     html = "".join(str(x.get("html") or "") for x in page)
-    # 默认只给成功 / 失败两栏，完整日志与全量名录都折叠
-    assert 'id="cs-ok"' in html and 'id="cs-bad"' in html and "cs-cols" in html
-    assert "完整运行日志" in html and "cs-log" in html
-    assert "本轮扫描名录" in html and '<details class="cs-fold">' in html
-    assert "<details open" not in html
-    assert "__csPoll" in html and "NameCrossSeed/log" in html
+    assert "名称辅种" in html and "辅种成功" in html and "站内已有" in html
+    assert "刚刚" in html
+    # 这些都会带来每 3 秒的轮询或大表格渲染，必须都不在了
+    for gone in ("__csPoll", "setInterval", "cs-ok", "cs-bad", "cs-cols",
+                 "<details", "<table", "NameCrossSeed/log", "onload="):
+        assert gone not in html, gone
+    texts = []
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("component") == "VBtn":
+                texts.append(str(node.get("text") or ""))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(page)
+    assert "立即辅种" in texts and "刷新状态" in texts
 
 
-def test_log_emit_persists_every_line() -> None:
+def test_log_emit_buffers_then_flush_persists() -> None:
+    """日志按批落盘，一轮结束统一刷一次，不再每条都写数据库。"""
     from app.plugins.namecrossseed import logview
 
     plugin, store = _scan_plugin(0)
-    logview.emit(plugin, "第一条")
-    logview.emit(plugin, "第二条")
+    writes = []
+    raw = plugin.save_data
+    plugin.save_data = lambda key, value: (writes.append((key, value)), raw(key, value))[1]  # type: ignore[method-assign]
+    logview.clear(plugin)
+    writes.clear()
+
+    for i in range(60):
+        logview.emit(plugin, f"第 {i} 条")
     text = logview.log_text(plugin)
-    assert "第一条" in text and "第二条" in text
-    assert store["log"][-1].endswith("第二条")
+    assert "第 0 条" in text and "第 59 条" in text
+    log_writes = [w for w in writes if w[0] == logview.LOG_KEY]
+    assert 1 <= len(log_writes) <= 4, "60 条日志不该写 60 次库"
+
+    logview.flush(plugin)
+    assert store["log"][-1].endswith("第 59 条")
     assert "下载器种子 7 个" in logview.progress({"last_scanned": 7}, False)
-    assert "&lt;script&gt;" in logview.render(
-        {}, "<script>", [{"name": "<b>x</b>", "state": "added",
-                          "message": "ok", "downloader": "qb", "size_text": "1 GB"}]
+    assert "&lt;script&gt;" in logview.render_brief(
+        {"last_message": "<script>"}, False
     )
 
 
@@ -809,12 +833,13 @@ def test_renamed_english_identifiers_are_consistent() -> None:
     assert NameCrossSeed.__name__ == "NameCrossSeed"
     assert NameCrossSeed.plugin_name == "名称辅种"
     assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
-    assert NameCrossSeed.plugin_version == "2.1.0"
+    assert NameCrossSeed.plugin_version == "2.1.1"
     assert "namecrossseed.png" in NameCrossSeed.plugin_icon
     cmd = NameCrossSeed.get_command()[0]
     assert cmd["cmd"] == "/name_seed"
     assert cmd["data"]["action"] == "namecrossseed_run"
     assert _plugin().get_service()[0]["id"] == "NameCrossSeed"
     assert logview.PLUGIN_ID == "NameCrossSeed"
-    assert "plugin/NameCrossSeed/log" in logview._POLL_JS
+    assert not hasattr(logview, "_POLL_JS"), "详情页不再注入轮询脚本"
+    assert callable(logview.render_brief)
     assert "HDWinG" not in NameCrossSeed.plugin_desc
