@@ -1,8 +1,7 @@
 """名称辅种 —— 运行日志与静态状态页。
 
-详情页不再轮询，也不再渲染全量名录：运行日志主要交给宿主 logger（插件卡片的
-「日志」能看），插件数据里的日志攒够一批才落一次盘，一轮结束再统一刷一次，
-避免每条日志都写一次数据库把 MP 拖慢。
+日志只写宿主 logger，也就是插件卡片右上角「…」→ 查看日志能读到的那个文件；
+插件数据表里不再存日志，页面也不显示日志。逐组搜索词和结果去查看日志里看。
 """
 
 from __future__ import annotations
@@ -12,22 +11,24 @@ import time
 from typing import Any, Dict, List, Sequence
 
 PLUGIN_ID = "NameCrossSeed"
-LOG_KEY = "log"
 SCAN_KEY = "scan"
 MAX_LINES = 400
 MAX_ROWS = 2000
 SUMMARY_LIMIT = 5
-FLUSH_EVERY = 25
 _OK_STATES = frozenset({"added"})
 _BAD_STATES = frozenset({"failed", "error"})
 
 try:
     from app.sdk.logging import logger as _host_logger  # type: ignore
-except Exception:  # noqa: BLE001 - 离线 stub 环境
-    _host_logger = None
+except Exception:  # noqa: BLE001 - 离线桩里退到标准库，方便本地跑用例
+    try:
+        import logging
+
+        _host_logger = logging.getLogger("namecrossseed")
+    except Exception:  # noqa: BLE001
+        _host_logger = None
 
 _LOG_LINES: List[str] = []
-_UNFLUSHED = 0
 
 _STATE_LABEL = {
     "added": "已辅种", "exists": "已存在", "nomatch": "未匹配",
@@ -48,63 +49,65 @@ def _stamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
-def flush(plugin: Any) -> None:
-    """把攒下的日志一次写进插件数据；写失败也不影响辅种。"""
-    global _UNFLUSHED
-    if not _UNFLUSHED:
-        return
-    try:
-        plugin.save_data(LOG_KEY, list(_LOG_LINES[-MAX_LINES:]))
-    except Exception:  # noqa: BLE001
-        pass
-    _UNFLUSHED = 0
-
-
 def emit(plugin: Any, message: str, level: str = "info") -> None:
-    """追加一条运行日志：宿主 logger 每写一条，插件数据按批落盘。"""
-    global _UNFLUSHED
+    """每条都交给宿主 logger，插件这边只留一份内存副本给 /log 用。"""
     text = str(message or "").strip()
     if not text:
         return
-    line = f"[{_stamp()}] {text}"
-    _LOG_LINES.append(line)
+    _LOG_LINES.append(f"[{_stamp()}] {text}")
     if len(_LOG_LINES) > MAX_LINES:
         del _LOG_LINES[: len(_LOG_LINES) - MAX_LINES]
-    if _host_logger is not None:
-        try:
-            getattr(_host_logger, "warning" if level in ("warning", "error") else "info")(
-                f"名称辅种：{text}"
-            )
-        except Exception:  # noqa: BLE001
-            pass
-    _UNFLUSHED += 1
-    if _UNFLUSHED >= FLUSH_EVERY:
-        flush(plugin)
-
-
-def clear(plugin: Any) -> None:
-    global _UNFLUSHED
-    _LOG_LINES.clear()
-    _UNFLUSHED = 0
+    if _host_logger is None:
+        return
     try:
-        plugin.save_data(LOG_KEY, [])
-        plugin.save_data(SCAN_KEY, [])
+        method = getattr(_host_logger, "warning" if level in ("warning", "error") else "info")
+        method(f"名称辅种：{text}")
     except Exception:  # noqa: BLE001
         pass
 
 
+def clear(plugin: Any) -> None:
+    _LOG_LINES.clear()
+
+
 def log_lines(plugin: Any) -> List[str]:
-    if _LOG_LINES:
-        return list(_LOG_LINES)
-    try:
-        saved = plugin.get_data(LOG_KEY) or []
-    except Exception:  # noqa: BLE001
-        saved = []
-    return [str(x) for x in saved][-MAX_LINES:]
+    return list(_LOG_LINES[-MAX_LINES:])
 
 
 def log_text(plugin: Any, limit: int = 300) -> str:
     return "\n".join(log_lines(plugin)[-max(1, int(limit)):])
+
+
+def log_level_hint() -> str:
+    """读不到有效级别就返回空串，别为了一句提示把页面搞挂。"""
+    if _host_logger is None:
+        return "读不到 MP 的日志组件，逐组日志可能写不进查看日志，升级 MoviePilot 后再试。"
+    level = None
+    try:
+        from app.runtime import log as runtime_log
+
+        getter = getattr(runtime_log, "_effective_context_log_level", None)
+        if callable(getter):
+            level = getter()
+    except Exception:  # noqa: BLE001
+        pass
+    if not isinstance(level, int):
+        try:
+            getter = getattr(_host_logger, "_effective_context_log_level", None)
+            level = getter() if callable(getter) else getattr(_host_logger, "level", None)
+        except Exception:  # noqa: BLE001
+            pass
+    if not isinstance(level, int):
+        try:
+            import logging
+
+            level = logging.getLogger().getEffectiveLevel()
+        except Exception:  # noqa: BLE001
+            pass
+    if isinstance(level, int) and 20 < level <= 50:  # INFO = 20
+        return ("MP 的日志等级当前高于 INFO，逐组过程日志不会写进文件，查看日志里只剩警告和错误；"
+                "到 设置 → 系统 → 日志等级 调回 INFO，或在插件实例管理里清除这个插件的等级覆盖。")
+    return ""
 
 
 def summarize(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -177,15 +180,26 @@ _BRIEF_STYLE = """
 .cs-line span{opacity:.68}
 .cs-line b{font-weight:700;font-size:13px}
 .cs-note{font-size:12px;padding:9px 12px;border-radius:10px;line-height:1.7;
-  background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.28);margin-bottom:10px}
+  background:rgba(127,127,127,.07);border:1px solid rgba(127,127,127,.15);margin-bottom:10px}
+.cs-note b{font-weight:700;opacity:.75;margin-right:6px}
+.cs-tip{font-size:12px;padding:9px 12px;border-radius:10px;line-height:1.7;margin-bottom:10px;
+  background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.28)}
 .cs-foot{font-size:11px;opacity:.55;line-height:1.8}
 @media (max-width:620px){.cs-line{padding:6px 0}}
 </style>
 """
 
+_LOGO = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M9 7H7a4 4 0 0 0 0 8h2"/><path d="M15 7h2a4 4 0 0 1 0 8h-2"/>'
+    '<path d="M8 12h8"/>'
+    '</svg>'
+)
+
 
 def render_brief(stats: Dict[str, Any], running: bool = False) -> str:
-    """静态状态页：打开时读一次 stats，不注入轮询脚本、不渲染名录。"""
+    """静态状态页：打开时读一次 stats，不注入轮询脚本、不渲染日志和名录。"""
     stats = stats if isinstance(stats, dict) else {}
     rows = [
         ("上次运行", str(stats.get("last_run_text") or "还没跑过")),
@@ -201,22 +215,21 @@ def render_brief(stats: Dict[str, Any], running: bool = False) -> str:
         for label, value in rows
     )
     message = str(stats.get("last_message") or "").strip()
-    note = f'<div class="cs-note">{_e(message[:200])}</div>' if message else ""
-    logo = (
-        '<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" '
-        'stroke-linecap="round" stroke-linejoin="round">'
-        '<path d="M9 7H7a4 4 0 0 0 0 8h2"/><path d="M15 7h2a4 4 0 0 1 0 8h-2"/>'
-        '<path d="M8 12h8"/>'
-        '</svg>'
-    )
+    if message and ("中止" in message or "停止" in message):
+        message += "（这是上一轮的结果，当前已空闲，点「立即辅种」就能重跑）"
+    note = (f'<div class="cs-note"><b>上一轮结果</b>{_e(message[:200])}</div>'
+            if message else "")
+    hint = log_level_hint()
+    tip = f'<div class="cs-tip">{_e(hint)}</div>' if hint else ""
     return (
         f'<div class="cs">{_BRIEF_STYLE}'
-        '<div class="cs-head"><div class="cs-brand"><div class="cs-logo">' + logo + '</div>'
+        '<div class="cs-head"><div class="cs-brand"><div class="cs-logo">' + _LOGO + '</div>'
         '<div><div class="cs-title">名称辅种</div>'
         '<div class="cs-sub">同一份内容只搜一次、只加一次</div></div></div>'
         f'<span class="cs-pill">{"运行中" if running else "空闲"}</span></div>'
-        f'<div class="cs-card">{body}</div>{note}'
-        '<div class="cs-foot">这页只在打开时读一次状态，不会自动刷新；'
-        '要看每组的搜索词和逐条结果，点插件卡片上的「日志」。'
+        f'<div class="cs-card">{body}</div>{note}{tip}'
+        '<div class="cs-foot">这页只在打开时读一次状态，不显示日志也不自动刷新。'
+        '逐组搜索词和每条结果都在插件卡片右上角「…」→ 查看日志里；'
+        '如果那里只看到警告没有过程记录，是 MP 的日志级别被调高了，调回 INFO 即可。'
         '点上面的按钮会顺带刷新这里。</div></div>'
     )

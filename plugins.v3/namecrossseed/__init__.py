@@ -205,7 +205,7 @@ class NameCrossSeed(_PluginBase):
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png"
     )
-    plugin_version = "2.1.1"
+    plugin_version = "2.1.2"
     plugin_label = "做种,辅种,名称匹配,实时日志"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -255,7 +255,16 @@ class NameCrossSeed(_PluginBase):
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         """载入配置并重置运行状态。"""
-        self.stop_service()
+        # 不调 stop_service：那会把正在跑的一轮标成「已停止」，重载后界面一直挂着旧状态
+        with self._state_lock:
+            self._running = False
+            self._run_started = 0.0
+        self._stop_event = threading.Event()
+        self._thread = None
+        stats = dict(self.get_data(_STATS_KEY) or {})
+        if any(word in str(stats.get("last_message") or "") for word in ("中止", "停止")):
+            stats["last_message"] = ""
+            self.save_data(_STATS_KEY, stats)
         self._enabled = False
         self._notify = True
         self._cron = "0 4 * * *"
@@ -505,8 +514,12 @@ class NameCrossSeed(_PluginBase):
             {"component": "VBtn", "props": {
                 "variant": "tonal", "color": "warning",
                 "prepend-icon": "mdi-delete-sweep", "class": "ma-1"},
-             "text": "清空缓存",
+             "text": "重置状态",
              "events": {"click": {"api": f"plugin/{pid}/clear_cache", "method": "post", "params": {}}}},
+            {"component": "VBtn", "props": {
+                "variant": "text", "prepend-icon": "mdi-text-search", "class": "ma-1"},
+             "text": "日志自检",
+             "events": {"click": {"api": f"plugin/{pid}/logcheck", "method": "post", "params": {}}}},
             {"component": "VBtn", "props": {
                 "variant": "text", "prepend-icon": "mdi-refresh", "class": "ma-1"},
              "text": "刷新状态",
@@ -529,7 +542,9 @@ class NameCrossSeed(_PluginBase):
             {"path": "/check", "endpoint": self.api_check, "methods": ["POST"],
              "auth": "bear", "summary": "检测站点 Cookie"},
             {"path": "/clear_cache", "endpoint": self.api_clear_cache, "methods": ["POST"],
-             "auth": "bear", "summary": "清空辅种缓存"},
+             "auth": "bear", "summary": "重置运行状态并清空缓存"},
+            {"path": "/logcheck", "endpoint": self.api_logcheck, "methods": ["POST"],
+             "auth": "bear", "summary": "写两条测试日志，检查查看日志是否可用"},
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询运行状态"},
             {"path": "/log", "endpoint": self.api_log, "methods": ["GET"],
@@ -564,18 +579,32 @@ class NameCrossSeed(_PluginBase):
             return _api_fail("检测 Cookie", exc)
 
     def api_clear_cache(self) -> schemas.Response:
-        """清空重试缓存与本轮名录，下次会把全部种子重新核一遍。"""
+        """清空缓存、本轮名录，并把中止之类的旧状态一并复位。"""
         try:
             self.save_data(_CACHE_KEY, {})
             self.save_data(logview.SCAN_KEY, [])
             stats = dict(self.get_data(_STATS_KEY) or {})
             stats["pending_retry"] = 0
+            stats["last_message"] = ""
             self.save_data(_STATS_KEY, stats)
-            logview.emit(self, "缓存已清空，下一轮会重新核对下载器里的全部种子。")
-            logview.flush(self)
-            return schemas.Response(success=True, message="缓存已清空，下轮全量重扫")
+            with self._state_lock:
+                self._running = False
+                self._run_started = 0.0
+            self._stop_event = threading.Event()
+            logview.emit(self, "状态已重置，下一轮会重新核对下载器里的全部种子。")
+            return schemas.Response(success=True, message="状态已重置，下轮全量重扫")
         except Exception as exc:  # noqa: BLE001 - 接口异常收敛成响应，不抛给宿主
-            return _api_fail("清空缓存", exc)
+            return _api_fail("重置状态", exc)
+
+    def api_logcheck(self) -> schemas.Response:
+        """写两条测试日志，确认插件卡片「…」→ 查看日志这条链路是通的。"""
+        try:
+            logview.emit(self, "日志自检：这是 INFO，查看日志里应该能看到这一行。")
+            logview.emit(self, "日志自检：这是 WARNING，用来对照日志级别。", level="warning")
+            message = "已写入两条测试日志，去插件卡片右上角「…」→ 查看日志确认。"
+            return schemas.Response(success=True, message=message + logview.log_level_hint())
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("日志自检", exc)
 
     def api_log(self) -> schemas.Response:
         """保留给外部查进度：只读内存日志和统计，不再扫全量名录。"""
@@ -628,17 +657,22 @@ class NameCrossSeed(_PluginBase):
         """
         with self._state_lock:
             if self._running:
-                # 异常退出可能留下未复位标记，超过阈值后允许重新进入
-                if time.time() - self._run_started < _STALE_RUN_SECONDS:
-                    logger.info("名称辅种：上一轮尚未结束，本次跳过")
+                thread = getattr(self, "_thread", None)
+                alive = bool(thread and thread.is_alive())
+                if alive and time.time() - self._run_started < _STALE_RUN_SECONDS:
+                    logger.info("名称辅种：上一轮还没结束，本次跳过")
                     return False
-                logger.warning("名称辅种：上一轮运行状态疑似残留，强制重置后继续")
+                logger.info("名称辅种：清掉上一轮遗留的运行标记，重新开始")
             self._running = True
             self._run_started = time.time()
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is None:
             self._stop_event = stop_event = threading.Event()
         stop_event.clear()
+        started_stats = dict(self.get_data(_STATS_KEY) or {})
+        if started_stats.get("last_message"):
+            started_stats["last_message"] = ""
+            self.save_data(_STATS_KEY, started_stats)
         logview.emit(self, f"开始一轮辅种（{trigger}），正在读取下载器里的全部已完成任务…")
 
         add_once = getattr(scheduler_sdk, "add_plugin_once_job", None)
@@ -800,7 +834,7 @@ class NameCrossSeed(_PluginBase):
             for _, _, _, row in members:
                 row["group_text"] = group_label
             if self._stop_event.is_set():
-                stopped = "任务被中止"
+                stopped = "本轮已停止，剩余组下轮继续"
                 for _, _, _, row in members:
                     row["state"] = "pending"
                     row["message"] = stopped
@@ -1232,7 +1266,6 @@ class NameCrossSeed(_PluginBase):
                                      _to_int(stats.get("pending_retry"), 0)),
         })
         self.save_data(_STATS_KEY, stats)
-        logview.flush(self)
         records = result.get("records") or []
         if records:
             history = self.get_data(_HISTORY_KEY) or []

@@ -27,6 +27,13 @@ from app.plugins.namecrossseed.site import (
 )
 from app.plugins.namecrossseed.rank import rank_candidates, size_diff_ratio
 
+def host_log_text() -> str:
+    """emit 只写宿主 logger；测试里用内存副本核对内容。"""
+    from app.plugins.namecrossseed import logview
+
+    return "\n".join(logview._LOG_LINES)
+
+
 MOVIE = "Jojo.Rabbit.2019.1080p.MA.WEBRip.DD+5.1.x264-Porco"
 OTHER = "The.Mandalorian.S02.1080p.WEB-DL.x264-Group"
 SIZE = 15161507260
@@ -454,26 +461,42 @@ def test_page_is_static_brief_without_polling() -> None:
     assert "立即辅种" in texts and "刷新状态" in texts
 
 
-def test_log_emit_buffers_then_flush_persists() -> None:
-    """日志按批落盘，一轮结束统一刷一次，不再每条都写数据库。"""
+def test_log_emit_writes_host_logger_only() -> None:
+    """每条日志进宿主 logger（查看日志能读到），插件数据表一次都不写。"""
     from app.plugins.namecrossseed import logview
+
+    class Collector:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def info(self, text: str) -> None:
+            self.lines.append(text)
+
+        def warning(self, text: str) -> None:
+            self.lines.append(text)
 
     plugin, store = _scan_plugin(0)
     writes = []
     raw = plugin.save_data
     plugin.save_data = lambda key, value: (writes.append((key, value)), raw(key, value))[1]  # type: ignore[method-assign]
+    collector = Collector()
+    original = logview._host_logger
+    logview._host_logger = collector  # type: ignore[assignment]
     logview.clear(plugin)
     writes.clear()
+    try:
+        for i in range(60):
+            logview.emit(plugin, f"第 {i} 条")
+        logview.emit(plugin, "这条是警告", level="warning")
+    finally:
+        logview._host_logger = original  # type: ignore[assignment]
 
-    for i in range(60):
-        logview.emit(plugin, f"第 {i} 条")
-    text = logview.log_text(plugin)
-    assert "第 0 条" in text and "第 59 条" in text
-    log_writes = [w for w in writes if w[0] == logview.LOG_KEY]
-    assert 1 <= len(log_writes) <= 4, "60 条日志不该写 60 次库"
-
-    logview.flush(plugin)
-    assert store["log"][-1].endswith("第 59 条")
+    assert len(collector.lines) == 61, "每条都要交给宿主 logger"
+    assert "名称辅种：第 0 条" in collector.lines[0]
+    assert "名称辅种：这条是警告" in collector.lines[-1]
+    assert "第 59 条" in logview.log_text(plugin)
+    assert not writes, "日志不该再写插件数据表"
+    assert "log" not in store
     assert "下载器种子 7 个" in logview.progress({"last_scanned": 7}, False)
     assert "&lt;script&gt;" in logview.render_brief(
         {"last_message": "<script>"}, False
@@ -504,8 +527,8 @@ def test_full_scan_has_no_truncation() -> None:
     assert stats["last_processed"] == 60
     assert stats["last_groups"] == 60
     assert all(r["state"] == "nomatch" for r in rows)
-    assert "本轮结束：下载器 60 个种子" in "\n".join(store["log"])
-    assert "搜索词" in "\n".join(store["log"])
+    assert "本轮结束：下载器 60 个种子" in host_log_text()
+    assert "搜索词" in host_log_text()
 
 
 def test_limit_marks_remaining_as_pending_but_still_lists_all() -> None:
@@ -764,7 +787,7 @@ def test_duplicate_reseeds_are_grouped_and_searched_once() -> None:
     assert "共 4 个辅种" in rows[0]["group_text"]
     assert all(r["state"] == "nomatch" for r in rows)
     assert "同组代表" in rows[1]["message"]
-    assert "搜索词" in "\n".join(store["log"])
+    assert "搜索词" in host_log_text()
 
 
 def test_group_with_site_tracker_is_skipped_without_searching() -> None:
@@ -824,7 +847,73 @@ def test_one_group_exception_does_not_abort_round() -> None:
     assert calls["n"] == 3, "一组异常不能中断整轮"
     assert store["stats"]["last_processed"] == 3
     assert sum(1 for r in store["scan"] if r["state"] == "error") == 1
-    assert "处理异常" in "\n".join(store["log"])
+    assert "处理异常" in host_log_text()
+
+
+def test_init_plugin_resets_stale_run_state() -> None:
+    """重载/重装后不该还挂着上一轮的「已停止」和 running 标记。"""
+    from app.plugins.namecrossseed import _STATS_KEY, logview
+
+    plugin, store = _scan_plugin(0)
+    store[_STATS_KEY] = {"last_message": "任务被中止", "last_added": 3}
+    plugin._running = True
+    plugin._run_started = time.time()
+    plugin._stop_event.set()
+    plugin.init_plugin({})
+    assert plugin._running is False
+    assert plugin._run_started == 0.0
+    assert not plugin._stop_event.is_set()
+    assert store[_STATS_KEY]["last_message"] == ""
+    assert store[_STATS_KEY]["last_added"] == 3
+    assert not hasattr(logview, "flush"), "日志不再往数据库落盘"
+
+
+def test_reset_state_clears_aborted_message() -> None:
+    """点「重置状态」要真的把中止文案、待重试数和运行态清干净。"""
+    from app.plugins.namecrossseed import _STATS_KEY
+
+    plugin, store = _scan_plugin(0)
+    store[_STATS_KEY] = {"last_message": "本轮已停止，剩余组下轮继续", "pending_retry": 9}
+    plugin._running = True
+    plugin._stop_event.set()
+    resp = plugin.api_clear_cache()
+    assert resp.success
+    assert store[_STATS_KEY]["last_message"] == ""
+    assert store[_STATS_KEY]["pending_retry"] == 0
+    assert plugin._running is False
+    assert not plugin._stop_event.is_set()
+
+
+def test_logcheck_and_brief_point_to_host_log_viewer() -> None:
+    from app.plugins.namecrossseed import logview
+
+    plugin, _store = _scan_plugin(0)
+    logview.clear(plugin)
+    resp = plugin.api_logcheck()
+    assert resp.success and "查看日志" in resp.message
+    text = host_log_text()
+    assert "这是 INFO" in text and "这是 WARNING" in text
+
+    html = logview.render_brief({"last_message": "本轮已停止，剩余组下轮继续"}, False)
+    assert "上一轮结果" in html and "当前已空闲" in html
+    assert "查看日志" in html and "任务被中止" not in html
+    assert "<script" not in html
+
+
+def test_log_level_hint_when_info_is_filtered() -> None:
+    from app.plugins.namecrossseed import logview
+
+    class Fake:
+        def _effective_context_log_level(self) -> int:
+            return 30
+
+    original = logview._host_logger
+    logview._host_logger = Fake()  # type: ignore[assignment]
+    try:
+        assert "日志等级" in logview.log_level_hint()
+        assert "日志等级" in logview.render_brief({}, False)
+    finally:
+        logview._host_logger = original  # type: ignore[assignment]
 
 
 def test_renamed_english_identifiers_are_consistent() -> None:
@@ -833,7 +922,7 @@ def test_renamed_english_identifiers_are_consistent() -> None:
     assert NameCrossSeed.__name__ == "NameCrossSeed"
     assert NameCrossSeed.plugin_name == "名称辅种"
     assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
-    assert NameCrossSeed.plugin_version == "2.1.1"
+    assert NameCrossSeed.plugin_version == "2.1.2"
     assert "namecrossseed.png" in NameCrossSeed.plugin_icon
     cmd = NameCrossSeed.get_command()[0]
     assert cmd["cmd"] == "/name_seed"
