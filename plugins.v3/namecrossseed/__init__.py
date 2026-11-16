@@ -28,7 +28,7 @@ from app.sdk.network import RequestUtils
 from app.sdk.plugin import _PluginBase
 from app.sdk.services import DownloaderHelper
 
-from . import grouping, logview
+from . import grouping, logview, sources
 from .site import (
     DEFAULT_SITE_URL,
     DEFAULT_USER_AGENT,
@@ -99,6 +99,8 @@ class _TorrentView:
     tags: List[str] = field(default_factory=list)
     tracker: str = ""
     added_on: int = 0
+    # 路径模式的本地文件清单：复核时优先用它，下载器模式仍走 get_files
+    files: Dict[str, int] = field(default_factory=dict)
 
     @property
     def content_path(self) -> str:
@@ -196,16 +198,17 @@ class NameCrossSeed(_PluginBase):
 
     plugin_name = "名称辅种"
     plugin_desc = (
-        "先把下载器里同一份文件的多个辅种归并成一组，每组只搜一次站点、只添加一次；"
-        "名称只用来找候选，info_hash 和文件清单完全一致才添加。"
+        "来源可选「下载器已完成任务」或「本地路径」，两种模式都是拿名字去站点搜；"
+        "同一份内容的多个条目先归并成一组，每组只搜一次、只添加一次。"
+        "名称只用来召回，info_hash 和文件清单完全一致才添加。"
         "发布名可用正则规则清洗；详情页只显示一张静态状态卡，不轮询、不刷日志，"
-        "逐组搜索词和结果去插件日志里看。设置只要填 Cookie；搜索间隔与每轮请求上限可调，"
-        "预算用完的组下轮自动继续。"
+        "逐组搜索词和结果去插件日志里看。设置只要填 Cookie；路径模式另填扫描目录，"
+        "搜索间隔与每轮请求上限可调，预算用完的组下轮自动继续。"
     )
     plugin_icon = (
         "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/namecrossseed.png"
     )
-    plugin_version = "2.1.2"
+    plugin_version = "2.2.0"
     plugin_label = "做种,辅种,名称匹配,实时日志"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
@@ -236,6 +239,8 @@ class NameCrossSeed(_PluginBase):
     _min_size_gb: float = 0.0
     _cache_days: int = 7
     _name_rules: str = ""
+    _source_mode: str = "downloader"
+    _scan_dirs: List[str] = []
 
     # --- 运行态 ---
     _state_lock = threading.Lock()
@@ -287,6 +292,8 @@ class NameCrossSeed(_PluginBase):
         self._min_size_gb = 0.0
         self._cache_days = 7
         self._name_rules = ""
+        self._source_mode = "downloader"
+        self._scan_dirs: List[str] = []
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
@@ -312,6 +319,9 @@ class NameCrossSeed(_PluginBase):
         self._min_size_gb = max(_to_float(config.get("min_size_gb"), 0.0), 0.0)
         self._cache_days = max(_to_int(config.get("cache_days"), 7), 1)
         self._name_rules = str(config.get("name_rules") or "")
+        self._source_mode = ("path" if str(config.get("source_mode") or "").strip() == "path"
+                             else "downloader")
+        self._scan_dirs = sources.normalize_dirs(config.get("scan_dirs"))
         bad_rules = grouping.invalid_rules(self._name_rules)
         if bad_rules:
             logger.warning(f"名称辅种：忽略无效的名称正则 {bad_rules[:3]}")
@@ -431,10 +441,24 @@ class NameCrossSeed(_PluginBase):
                     "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
+                self._col(12, 5, [{"component": "VSelect", "props": {
+                    "model": "source_mode", "label": "从哪里找名字",
+                    "items": [{"title": "下载器已完成任务", "value": "downloader"},
+                              {"title": "本地路径", "value": "path"}],
+                    "hint": "两种模式都是拿名字去站点搜，找到后按文件清单核对",
+                    "persistentHint": True}}]),
+                self._col(12, 7, [{"component": "VTextField", "props": {
+                    "model": "scan_dirs", "label": "扫描目录（仅路径模式）",
+                    "placeholder": "/downloads,/media/movies",
+                    "hint": "容器里能看到的下载根目录，多个用逗号分隔；只扫顶层项",
+                    "persistentHint": True}}]),
+            ]},
+            {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VSelect", "props": {
                     "model": "downloaders", "label": "下载器", "multiple": True,
                     "chips": True, "clearable": True, "items": downloader_items,
-                    "hint": "留空就是全部已启用的下载器", "persistentHint": True}}]),
+                    "hint": "留空就是全部已启用的下载器；路径模式下用它接收辅种种子",
+                    "persistentHint": True}}]),
             ]},
             {"component": "VRow", "content": [
                 self._col(12, 6, [{"component": "VTextField", "props": {
@@ -468,10 +492,11 @@ class NameCrossSeed(_PluginBase):
             {"component": "VRow", "content": [
                 self._col(12, 12, [{"component": "VAlert", "props": {
                     "type": "info", "variant": "tonal"}, "text": (
-                        "装好填 Cookie 就能用。每次先把下载器里同一份文件的多个辅种归并成一组，"
-                        "每组只搜一次站点、只添加一次，不会拿着同一个内容反复搜、反复插；"
-                        "站点种子已经在下载器里就直接跳过。名称只负责找候选，"
-                        "找到后还要解析 info_hash 和文件清单，完全一致才添加。"
+                        "装好填 Cookie 就能用。来源可选「下载器已完成任务」或「本地路径」，"
+                        "两种模式都是拿名字去站点搜：同一份内容的多个条目先归并成一组，"
+                        "每组只搜一次、只添加一次。名称只负责找候选，找到后还要解析 info_hash "
+                        "和文件清单，完全一致才添加；下载器模式还会跳过站内已有的种子。"
+                        "路径模式要填容器里可见的扫描目录，并保留一个下载器用于接收种子。"
                         "运行日志、搜索词和逐条结果在插件卡片点「日志」看；想强制重扫点「清空缓存」。")}]),
             ]},
         ]
@@ -483,6 +508,8 @@ class NameCrossSeed(_PluginBase):
             "interval": 6,
             "max_requests": 300,
             "downloaders": [],
+            "source_mode": "downloader",
+            "scan_dirs": "",
             "site_url": DEFAULT_SITE_URL,
             "user_agent": _DEFAULT_UA,
             "cookie": "",
@@ -732,6 +759,9 @@ class NameCrossSeed(_PluginBase):
         每组只派一个代表搜站、只添加一次，组内成员复用结果但各留一行名录。
         """
         started = time.time()
+        unit = "条目" if self._source_mode == "path" else "辅种"
+        source_name = "路径" if self._source_mode == "path" else "下载器"
+        source_unit = "条目" if self._source_mode == "path" else "种子"
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is None:
             self._stop_event = stop_event = threading.Event()
@@ -766,42 +796,21 @@ class NameCrossSeed(_PluginBase):
             self._save_result(result, started)
             return
         host = self._site_host()
-        logview.emit(self, f"开始一轮辅种（{trigger}）：先只读盘点下载器，本阶段不访问站点…")
+        logview.emit(self, f"开始一轮辅种（{trigger}）：先只读盘点{source_name}，本阶段不访问站点…")
 
         # ---------------- 阶段一：全量采集，不访问站点 ----------------
         entries: List[Tuple[str, Any, _TorrentView, Dict[str, Any]]] = []
         known_hashes: Set[str] = set()
-        for downloader, service in services.items():
-            if self._stop_event.is_set():
-                break
-            torrents = self._completed_torrents(service)
-            if torrents is None:
-                result["message"] = f"{downloader} 读取任务失败"
-                logview.emit(self, result["message"], level="warning")
-                continue
-            count = 0
-            for item in torrents:
-                view = _view_of(item)
-                if not view:
-                    continue
-                known_hashes.add(view.hash)
-                row: Dict[str, Any] = {
-                    "downloader": downloader,
-                    "name": view.name[:140],
-                    "size_text": _format_size(view.size),
-                    "state": "pending",
-                    "message": "",
-                    "group_text": "",
-                }
-                entries.append((downloader, service, view, row))
-                count += 1
-            logview.emit(self, f"下载器 {downloader}：读到 {count} 个已完成任务（全量，不截断）。")
-
+        if self._source_mode == "path":
+            entries, known_hashes = self._collect_from_paths(result)
+        else:
+            entries, known_hashes = self._collect_from_downloaders(result, services)
         result["scanned"] = len(entries)
         # _handle 与本流程共享同一个集合：站点候选 hash 只要在里面就直接跳过
         self._known_hashes = known_hashes
         if not entries:
-            result["message"] = "下载器里没有可读取的已完成任务"
+            result["message"] = ("扫描目录里没有可用条目" if self._source_mode == "path"
+                                 else "下载器里没有可读取的已完成任务")
             logview.emit(self, result["message"], level="warning")
             self._save_result(result, started)
             return
@@ -829,7 +838,7 @@ class NameCrossSeed(_PluginBase):
         stopped = ""
         ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
         for number, (key, members) in enumerate(ordered, 1):
-            group_label = (f"内容组 #{number} · 共 {len(members)} 个辅种" if len(members) > 1
+            group_label = (f"内容组 #{number} · 共 {len(members)} 个{unit}" if len(members) > 1
                            else f"内容组 #{number}")
             for _, _, _, row in members:
                 row["group_text"] = group_label
@@ -839,7 +848,7 @@ class NameCrossSeed(_PluginBase):
                     row["state"] = "pending"
                     row["message"] = stopped
                 continue
-            gkey = "g:" + grouping.short_key(key)
+            gkey = ("p:" if self._source_mode == "path" else "g:") + grouping.short_key(key)
             cached = cache.get(gkey)
             site_covered = any(host and host in (v.tracker or "").lower()
                                for _, _, v, _ in members)
@@ -864,8 +873,8 @@ class NameCrossSeed(_PluginBase):
             if representative is None:
                 # 兼容旧版按单个种子存的缓存：升级后也别让这些组重复请求站点
                 legacy_hit = any(
-                    isinstance(cache.get(f"{e[0]}|{e[2].hash}"), dict)
-                    and not self._cache_expired(cache[f"{e[0]}|{e[2].hash}"])
+                    isinstance(cache.get(self._cache_key(e[0], e[2])), dict)
+                    and not self._cache_expired(cache[self._cache_key(e[0], e[2])])
                     for e in members
                 )
                 if legacy_hit:
@@ -889,7 +898,7 @@ class NameCrossSeed(_PluginBase):
             keys = grouping.search_keys(view.name, self._name_rules)
             logview.emit(
                 self,
-                f"[{processed}/{len(ordered)}] 第 {number} 组（{len(members)} 个辅种）"
+                f"[{processed}/{len(ordered)}] 第 {number} 组（{len(members)} 个{unit}）"
                 f"由「{view.name[:70]}」代表搜站｜搜索词：{' / '.join(keys[:4]) or '（无）'}",
             )
             # 单组异常必须隔离，绝不能像之前那样让一轮任务整段中断
@@ -948,7 +957,7 @@ class NameCrossSeed(_PluginBase):
         )
         logview.emit(
             self,
-            f"本轮结束：下载器 {len(entries)} 个种子 → {len(groups)} 组内容，"
+            f"本轮结束：{source_name} {len(entries)} 个{source_unit} → {len(groups)} 组内容，"
             f"实际搜站 {processed} 组、辅种成功 {result['added']} 个、"
             f"站内已有 {result['exists']} 组、失败 {result['failed']} 组"
             + (f"；{stopped}" if stopped else "")
@@ -956,6 +965,86 @@ class NameCrossSeed(_PluginBase):
         )
         self._save_result(result, started)
         self._notify_result(result)
+
+    def _collect_from_downloaders(
+        self, result: Dict[str, Any], services: Dict[str, Any]
+    ) -> Tuple[List[Tuple[str, Any, _TorrentView, Dict[str, Any]]], Set[str]]:
+        """下载器模式：全量读取已完成任务，顺手建全局 hash 集合。"""
+        entries: List[Tuple[str, Any, _TorrentView, Dict[str, Any]]] = []
+        known: Set[str] = set()
+        for downloader, service in services.items():
+            if self._stop_event.is_set():
+                break
+            torrents = self._completed_torrents(service)
+            if torrents is None:
+                result["message"] = f"{downloader} 读取任务失败"
+                logview.emit(self, result["message"], level="warning")
+                continue
+            count = 0
+            for item in torrents:
+                view = _view_of(item)
+                if not view:
+                    continue
+                known.add(view.hash)
+                row: Dict[str, Any] = {
+                    "downloader": downloader,
+                    "name": view.name[:140],
+                    "size_text": _format_size(view.size),
+                    "state": "pending",
+                    "message": "",
+                    "group_text": "",
+                }
+                entries.append((downloader, service, view, row))
+                count += 1
+            logview.emit(self, f"下载器 {downloader}：读到 {count} 个已完成任务（全量，不截断）。")
+        return entries, known
+
+    def _collect_from_paths(
+        self, result: Dict[str, Any]
+    ) -> Tuple[List[Tuple[str, Any, _TorrentView, Dict[str, Any]]], Set[str]]:
+        """路径模式：扫目录顶层项，用本地文件清单代替下载器任务做复核。"""
+        entries: List[Tuple[str, Any, _TorrentView, Dict[str, Any]]] = []
+        known: Set[str] = set()
+        if not self._scan_dirs:
+            result["message"] = "路径模式还没填扫描目录"
+            logview.emit(self, result["message"], level="warning")
+            return entries, known
+        services = self._services()
+        if not services:
+            result["message"] = "路径模式仍需要一个可用下载器来接收辅种种子"
+            logview.emit(self, result["message"], level="warning")
+            return entries, known
+        target, service = next(iter(services.items()))
+        try:
+            torrents, _error = service.instance.get_torrents()
+            for item in torrents or []:
+                value = str(_pick(
+                    item, "hash", "hashString", "hash_string", "info_hash"
+                ) or "").strip().lower()
+                if value:
+                    known.add(value)
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"名称辅种：路径模式读取已有种子失败 {err}")
+        for root in self._scan_dirs:
+            if self._stop_event.is_set():
+                break
+            items = sources.scan_paths([root])
+            for item in items:
+                view = _TorrentView(
+                    name=item.name, size=item.size, save_path=item.root,
+                    added_on=item.added_on, files=item.files,
+                )
+                row: Dict[str, Any] = {
+                    "downloader": f"路径:{item.root}",
+                    "name": view.name[:140],
+                    "size_text": _format_size(view.size),
+                    "state": "pending",
+                    "message": "",
+                    "group_text": "",
+                }
+                entries.append((target, service, view, row))
+            logview.emit(self, f"路径 {root}：读到 {len(items)} 个顶层项（全量，不截断）。")
+        return entries, known
 
     def _services(self) -> Dict[str, Any]:
         """按配置解析下载器服务，只保留支持辅种的类型。"""
@@ -1015,9 +1104,15 @@ class NameCrossSeed(_PluginBase):
                 merged[view.hash] = item
         return list(merged.values())
 
+    @staticmethod
+    def _cache_key(downloader: str, view: _TorrentView) -> str:
+        """按来源生成稳定缓存键；路径模式没有 hash，用名字 + 体积代替。"""
+        identity = view.hash or f"path:{view.name}|{view.size}"
+        return f"{downloader}|{identity}"
+
     def _eligible(self, view: _TorrentView, cache: Dict[str, Any], downloader: str) -> bool:
         """判断任务是否值得处理。"""
-        key = f"{downloader}|{view.hash}"
+        key = self._cache_key(downloader, view)
         entry = cache.get(key)
         if entry and not self._cache_expired(entry):
             return False
@@ -1158,20 +1253,26 @@ class NameCrossSeed(_PluginBase):
         """逐文件比对文件名与字节数，全部一致才算同源。"""
         if not meta.files:
             return False
-        try:
-            local_files = service.instance.get_files(view.hash)
-        except Exception as err:  # noqa: BLE001
-            logger.warning(f"名称辅种：读取文件清单失败 {err}")
-            return False
-        if not local_files:
-            return False
         local_map: Dict[str, int] = {}
-        for item in local_files:
-            name = _pick(item, "name", "path")
-            size = _pick(item, "size", "bytesTotal", "length")
-            if not name:
-                continue
-            local_map[os.path.basename(str(name))] = _to_int(size)
+        if view.files:
+            # 路径模式：直接拿扫描时记下的本地文件清单复核，不再问下载器
+            for name, size in view.files.items():
+                if name:
+                    local_map[os.path.basename(str(name))] = _to_int(size)
+        else:
+            try:
+                local_files = service.instance.get_files(view.hash)
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"名称辅种：读取文件清单失败 {err}")
+                return False
+            if not local_files:
+                return False
+            for item in local_files:
+                name = _pick(item, "name", "path")
+                size = _pick(item, "size", "bytesTotal", "length")
+                if not name:
+                    continue
+                local_map[os.path.basename(str(name))] = _to_int(size)
         site_map = {os.path.basename(path): int(size) for path, size in meta.files.items()}
         if not local_map or not site_map:
             return False
@@ -1234,7 +1335,7 @@ class NameCrossSeed(_PluginBase):
     ) -> None:
         if state == "skipped":
             return
-        cache[f"{downloader}|{view.hash}"] = {
+        cache[self._cache_key(downloader, view)] = {
             "r": state,
             "t": time.time(),
             "m": message[:200],

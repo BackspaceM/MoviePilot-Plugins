@@ -426,10 +426,12 @@ def test_display_name_and_simple_form() -> None:
     _walk_models(form, models)
     assert set(models) == {"enabled", "notify", "cron", "max_tasks", "interval",
                            "max_requests", "downloaders", "site_url", "user_agent",
-                           "cookie", "name_rules"}
-    assert len(models) <= 11, "设置项又变多了"
+                           "cookie", "name_rules", "source_mode", "scan_dirs"}
+    assert len(models) <= 13, "设置项又变多了"
     assert default["name_rules"] == "", "名称清洗规则默认留空即用内置规则"
     assert default["max_tasks"] == 0, "默认必须不限数量，扫全下载器"
+    assert default["source_mode"] == "downloader", "默认仍是下载器模式，老用户不受影响"
+    assert default["scan_dirs"] == ""
 
 
 def test_page_is_static_brief_without_polling() -> None:
@@ -922,7 +924,7 @@ def test_renamed_english_identifiers_are_consistent() -> None:
     assert NameCrossSeed.__name__ == "NameCrossSeed"
     assert NameCrossSeed.plugin_name == "名称辅种"
     assert NameCrossSeed.plugin_config_prefix == "namecrossseed_"
-    assert NameCrossSeed.plugin_version == "2.1.2"
+    assert NameCrossSeed.plugin_version == "2.2.0"
     assert "namecrossseed.png" in NameCrossSeed.plugin_icon
     cmd = NameCrossSeed.get_command()[0]
     assert cmd["cmd"] == "/name_seed"
@@ -932,3 +934,108 @@ def test_renamed_english_identifiers_are_consistent() -> None:
     assert not hasattr(logview, "_POLL_JS"), "详情页不再注入轮询脚本"
     assert callable(logview.render_brief)
     assert "HDWinG" not in NameCrossSeed.plugin_desc
+
+
+# ---------------------------------------------------------------------------
+# 双来源模式（v2.2.0）：下载器已完成任务 / 本地路径
+# ---------------------------------------------------------------------------
+
+def test_source_mode_defaults_to_downloader() -> None:
+    plugin = _plugin()
+    plugin._store = {}  # type: ignore[attr-defined]
+    assert plugin._source_mode == "downloader"
+    plugin.init_plugin({"source_mode": "path", "scan_dirs": "/downloads, /media/movies"})
+    assert plugin._source_mode == "path"
+    assert plugin._scan_dirs == ["/downloads", "/media/movies"]
+    plugin.init_plugin({"source_mode": "unknown", "scan_dirs": ""})
+    assert plugin._source_mode == "downloader"
+    assert plugin._scan_dirs == []
+
+
+def test_cache_key_isolated_for_path_items() -> None:
+    from app.plugins.namecrossseed import _TorrentView
+
+    path_view = _TorrentView(name="同一部剧", size=1024, files={"a.mkv": 1024})
+    downloaded = _TorrentView(hash="abc", name="同一部剧", size=1024)
+    path_key = NameCrossSeed._cache_key("qb", path_view)
+    assert "path:" in path_key and "同一部剧" in path_key
+    assert path_key != NameCrossSeed._cache_key("qb", downloaded)
+
+
+def test_files_match_uses_local_files_without_downloader() -> None:
+    from app.plugins.namecrossseed import _TorrentView
+
+    meta = TorrentMeta(files={"a.mkv": 100, "sub/b.mkv": 200}, name="Movie", total_size=300)
+    good = _TorrentView(name="Movie", size=300, files={"a.mkv": 100, "sub/b.mkv": 200})
+    bad = _TorrentView(name="Movie", size=300, files={"a.mkv": 100, "sub/b.mkv": 999})
+
+    class Bare:
+        type = "qbittorrent"
+        instance = None
+
+    plugin = _plugin()
+    assert plugin._files_match(Bare(), good, meta) is True
+    assert plugin._files_match(Bare(), bad, meta) is False
+
+
+def test_scan_paths_reads_top_level_items() -> None:
+    import os
+    import tempfile
+    from app.plugins.namecrossseed import sources
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "downloads")
+        os.makedirs(os.path.join(root, "剧集.S01"))
+        with open(os.path.join(root, "剧集.S01", "e01.mkv"), "wb") as handle:
+            handle.write(b"x" * 100)
+        with open(os.path.join(root, "电影.mkv"), "wb") as handle:
+            handle.write(b"y" * 200)
+        with open(os.path.join(root, "skip.torrent"), "wb") as handle:
+            handle.write(b"z")
+
+        items = sources.scan_paths([root])
+        by_name = {item.name: item for item in items}
+        assert set(by_name) == {"剧集.S01", "电影.mkv"}
+        assert by_name["电影.mkv"].size == 200
+        assert by_name["剧集.S01"].files == {"e01.mkv": 100}
+        assert sources.normalize_dirs(f"{root}, {root}/") == [root]
+
+
+def test_collect_from_paths_builds_entries() -> None:
+    import os
+    import tempfile
+    import threading
+    from app.plugins.namecrossseed import sources  # noqa: F401 - 确保模块已装载
+
+    plugin = _plugin()
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "Movie"))
+        with open(os.path.join(tmp, "Movie", "a.mkv"), "wb") as handle:
+            handle.write(b"x" * 100)
+        plugin._stop_event = threading.Event()
+        plugin._scan_dirs = [tmp]
+        plugin._services = lambda: {"qb": _Service(existing=["oldhash"])}  # type: ignore[method-assign]
+        result: Dict[str, Any] = {}
+        entries, known = plugin._collect_from_paths(result)
+        assert len(entries) == 1
+        assert known == {"oldhash"}
+        name, service, view, row = entries[0]
+        assert name == "qb" and service is not None
+        assert view.name == "Movie"
+        assert view.save_path == tmp
+        assert view.files == {"a.mkv": 100}
+        assert row["downloader"].startswith("路径:")
+
+
+def test_path_mode_rejects_missing_dirs_and_downloader() -> None:
+    import threading
+
+    plugin = _plugin()
+    plugin._stop_event = threading.Event()
+    plugin._scan_dirs = []
+    entries, known = plugin._collect_from_paths({})
+    assert entries == [] and known == set()
+    plugin._scan_dirs = ["/some/unreadable/path"]
+    plugin._services = lambda: {}  # type: ignore[method-assign]
+    entries, known = plugin._collect_from_paths({})
+    assert entries == [] and known == set()
