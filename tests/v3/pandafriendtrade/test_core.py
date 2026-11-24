@@ -95,6 +95,43 @@ class TestViews(unittest.TestCase):
         self.assertEqual(core.claimable_posters(board), ["x"])
 
 
+class TestPosterRarity(unittest.TestCase):
+    """海报奖励档位选择（囤魔力领完全图鉴）。"""
+    def test_rarity_of_key(self):
+        self.assertEqual(core.poster_rarity_of("normal_collection_once"), "normal")
+        self.assertEqual(core.poster_rarity_of("rare_collection_repeat"), "rare")
+        self.assertEqual(core.poster_rarity_of("animation_night_repeat"), "")
+
+    def test_claimable_filter_by_rarity(self):
+        board = {"tasks": [
+            {"key": "normal_collection_once", "status": "claimable"},
+            {"key": "rare_collection_once", "status": "claimable"},
+            {"key": "legendary_collection_repeat", "status": "claimable"},
+            {"key": "excellent_collection_once", "status": "in_progress"},
+        ]}
+        self.assertEqual(core.claimable_posters(board),
+                         ["normal_collection_once", "rare_collection_once", "legendary_collection_repeat"])
+        self.assertEqual(core.claimable_posters(board, ("rare",)), ["rare_collection_once"])
+        self.assertEqual(core.claimable_posters(board, ("normal", "legendary")),
+                         ["normal_collection_once", "legendary_collection_repeat"])
+
+    def test_config_poster_claim_rarities(self):
+        self.assertEqual(core.parse_config({}).poster_claim_rarities, ())
+        cfg = core.parse_config({"poster_claim_rarities": "normal, bogus, rare"})
+        self.assertEqual(cfg.poster_claim_rarities, ("normal", "rare"))
+
+    def test_build_plan_respects_poster_rarity(self):
+        home = {"claimable_income": "0", "task_status": [], "my_assets": [], "my_owner": {}}
+        poster_board = {"tasks": [
+            {"key": "normal_collection_once", "status": "claimable"},
+            {"key": "rare_collection_once", "status": "claimable"},
+        ]}
+        cfg = core.parse_config({"do_posters": True, "poster_claim_rarities": "rare"})
+        actions = core.build_plan(cfg, home, {}, poster_board)
+        keys = [a.params.get("task_key") for a in actions]
+        self.assertEqual(keys, ["rare_collection_once"])
+
+
 class TestDecisions(unittest.TestCase):
     def test_choose_work_income(self):
         s = core.Servant(uid=1, name="t", overall=60, attributes={"diligence": 90}, talent="",

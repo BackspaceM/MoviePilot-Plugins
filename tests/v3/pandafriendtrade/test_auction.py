@@ -258,6 +258,60 @@ class TestPluginIntegration(unittest.TestCase):
             self.plg._stop_auction_monitor()
             self.assertFalse(self.plg._auction_running)
 
+    def test_consignment_board_view_parses_items(self):
+        raw = load_live_consignment = None
+        import os
+        path = "/private/tmp/pandapt_probe/consignment_board.json"
+        if os.path.exists(path):
+            raw = json.load(open(path, encoding="utf-8"))
+        if not raw or raw.get("ret") != 0:
+            self.skipTest("live consignment sample unavailable")
+        fake = mock.MagicMock()
+        fake.home.return_value = self.MOD.site.Result.success({"me": {"uid": 10061}})
+        fake.consignment_board.return_value = self.MOD.site.Result.success(raw["data"])
+        with mock.patch.object(self.plg, "_client", return_value=fake):
+            result = self.plg._consignment_board_view()
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.data["lots"]), 5)
+        # 确认带 unowned_only 与 viewer uid
+        call = fake.consignment_board.call_args
+        self.assertEqual(call[0][0], 10061)
+        self.assertTrue(call[1].get("unowned_only"))
+
+    def test_consignment_endpoints_never_raise(self):
+        self.plg.init_plugin({"enabled": True, "dry_run": True, "cookie": "fake",
+                              "do_consignment": True, "consignment_auto_bid": True,
+                              "consignment_budget": 5000})
+        r1 = self.plg.api_consignment_check()
+        r2 = self.plg.api_consignment_grab()
+        self.assertTrue(hasattr(r1, "success"))
+        self.assertTrue(hasattr(r2, "success"))
+
+    def test_consignment_grab_dry_run_no_buy(self):
+        view = {"enabled": True, "balance": 900000.0, "max_bid": 10 ** 12,
+                "summary": "在售1件", "checked_at": "now", "lots": [
+                    auction_core.AuctionLot(
+                        id=7, poster_id=205, title="七武士", rarity="precious", status="open",
+                        can_bid=True, starting_price=250000, minimum_bid=310000,
+                        current_price=250000, min_increment=5000, highest_bid=250000,
+                        bidder_count=1, ends_at=99999, hard_ends_at=999999,
+                        rule_version="poster_auction_v3_precious", bid_fee_bps=800,
+                        leader_uid=1, leader_name="x", my_bid_amount=0, my_bid_rank=0,
+                        my_fee_total=0.0, owned_quantity=0, mode="open")]}
+        cfg = auction_core.parse_config({"cookie": "fake", "dry_run": True,
+                                          "do_consignment": True, "consignment_auto_bid": True,
+                                          "consignment_budget": 400000})
+        self.plg._cfg = cfg
+        # 直接 patch 看板视图，专注验证 api 的试运行分流
+        with mock.patch.object(self.plg, "_consignment_board_view",
+                               return_value=self.MOD.site.Result.success(view)):
+            fake = mock.MagicMock()
+            with mock.patch.object(self.plg, "_client", return_value=fake):
+                r = self.plg.api_consignment_grab()
+        self.assertTrue(r.success)
+        self.assertIn("试运行", r.message)
+        self.assertEqual(fake.auction_bid.call_count, 0)  # 试运行不出价
+
     def test_save_auction_state_is_serializable(self):
         view = self._board()
         view["summary"] = "测试行情"
@@ -266,6 +320,89 @@ class TestPluginIntegration(unittest.TestCase):
         # 状态卡渲染不联网、不抛异常
         page = self.plg.get_page()
         self.assertTrue(page)
+
+
+class TestConsignment(unittest.TestCase):
+    """海报寄售场解析与抢购决策。"""
+    def _live(self):
+        import os
+        path = "/private/tmp/pandapt_probe/consignment_board.json"
+        if not os.path.exists(path):
+            return None
+        try:
+            return json.load(open(path, encoding="utf-8"))
+        except Exception:
+            return None
+
+    def test_parse_live_consignment(self):
+        raw = self._live()
+        if not raw or raw.get("ret") != 0:
+            self.skipTest("live consignment sample unavailable")
+        view = auction_core.parse_consignment_board(raw["data"])
+        self.assertTrue(view["enabled"])
+        self.assertEqual(len(view["lots"]), 5)
+        # 全是 open 模式、未拥有
+        self.assertTrue(all(x.mode == "open" for x in view["lots"]))
+        self.assertTrue(all(x.owned_quantity == 0 for x in view["lots"]))
+        self.assertIn("在售", view["summary"] if "summary" in view else auction_core.consignment_summary(view))
+
+    def test_plan_disabled_by_default(self):
+        cfg = auction_core.parse_config({})
+        view = {"enabled": True, "balance": 100000.0, "max_bid": 10 ** 12, "lots": []}
+        self.assertEqual(auction_core.plan_consignment(cfg, view), [])
+
+    def test_plan_unowned_and_budget(self):
+        cfg = auction_core.parse_config({
+            "do_consignment": True, "consignment_auto_bid": True,
+            "consignment_budget": 5000, "consignment_unowned_only": True,
+        })
+        def lot(lid, pid, owned, price, minbid, mode="open", rarity="normal"):
+            return auction_core.AuctionLot(
+                id=lid, poster_id=pid, title=f"海报{pid}", rarity=rarity, status="open",
+                can_bid=True, starting_price=price, minimum_bid=minbid,
+                current_price=price, min_increment=200, highest_bid=price,
+                bidder_count=0, ends_at=9999, hard_ends_at=99999,
+                rule_version="poster_auction_v3_normal", bid_fee_bps=200,
+                leader_uid=0, leader_name="", my_bid_amount=0, my_bid_rank=0,
+                my_fee_total=0.0, owned_quantity=owned, mode=mode)
+        view = {"enabled": True, "balance": 100000.0, "max_bid": 10 ** 12, "lots": [
+            lot(1, 101, 0, 3500, 4000),       # 未拥有，预算内 -> 抢
+            lot(2, 102, 1, 3500, 4000),       # 已拥有 -> 跳过
+            lot(3, 103, 0, 8000, 8500),       # 超预算 -> 跳过
+            lot(4, 104, 0, 3000, 3000, "dutch"),  # 荷兰降价 -> dutch_buy
+        ]}
+        acts = auction_core.plan_consignment(cfg, view)
+        kinds = {d.lot_id: d.action_kind for d in acts}
+        self.assertIn(1, kinds)
+        self.assertEqual(kinds[1], "bid")
+        self.assertNotIn(2, kinds)  # 已有
+        self.assertNotIn(3, kinds)  # 超预算
+        self.assertEqual(kinds[4], "dutch_buy")
+
+    def test_plan_wanted_ids_and_rarity(self):
+        cfg = auction_core.parse_config({
+            "do_consignment": True, "consignment_auto_bid": True,
+            "consignment_budget": 10000,
+            "consignment_wanted_poster_ids": "205",
+        })
+        def lot(lid, pid, rarity):
+            return auction_core.AuctionLot(
+                id=lid, poster_id=pid, title="x", rarity=rarity, status="open", can_bid=True,
+                starting_price=1000, minimum_bid=1000, current_price=1000, min_increment=200,
+                highest_bid=1000, bidder_count=0, ends_at=9999, hard_ends_at=99999,
+                rule_version="v3", bid_fee_bps=0, leader_uid=0, leader_name="",
+                my_bid_amount=0, my_bid_rank=0, my_fee_total=0.0, owned_quantity=0)
+        view = {"enabled": True, "balance": 100000.0, "max_bid": 10 ** 12,
+                "lots": [lot(1, 146, "excellent"), lot(2, 205, "precious")]}
+        acts = auction_core.plan_consignment(cfg, view)
+        self.assertEqual([d.lot_id for d in acts], [2])  # 只要 205
+        # 改成按档位：只要 precious
+        cfg2 = auction_core.parse_config({
+            "do_consignment": True, "consignment_auto_bid": True,
+            "consignment_budget": 10000, "consignment_rarities": "precious",
+        })
+        acts2 = auction_core.plan_consignment(cfg2, view)
+        self.assertEqual([d.lot_id for d in acts2], [2])
 
 
 if __name__ == "__main__":

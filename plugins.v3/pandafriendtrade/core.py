@@ -126,6 +126,18 @@ class Config:
     auction_aggressive_steps: int = 0       # 额外加价档数（0=按站点最低有效价，越大越激进）
     auction_poll_seconds: int = 15          # 监控轮询间隔（秒），要抢倒计时建议 ≤20
 
+    # 海报寄售场（光影拍卖行之外的个人寄售）
+    do_consignment: bool = False              # 寄售场监控总开关
+    consignment_auto_bid: bool = False        # 自动抢购（dutch 直接买 / open 竞价）
+    consignment_budget: int = 0               # 单品价格上限（0=不买）
+    consignment_unowned_only: bool = True     # 只抢未拥有的海报（默认开）
+    consignment_wanted_poster_ids: Tuple[int, ...] = ()  # 想要的指定海报 ID，留空按稀有度
+    consignment_rarities: Tuple[str, ...] = ()           # 想要的档位，空=不限
+    consignment_modes: Tuple[str, ...] = ("open", "dutch")  # 参与的寄售模式
+
+    # 海报奖励领取档位（囤魔力领完全图鉴）
+    poster_claim_rarities: Tuple[str, ...] = ()  # 只领这些档位的任务奖励，空=全部可领
+
     @property
     def interact_cost_limit(self) -> int:
         """本次运行可用的单动作互动预算。"""
@@ -262,6 +274,17 @@ def parse_config(raw: Dict[str, Any]) -> Config:
         auction_require_no_leader=parse_bool(raw.get("auction_require_no_leader")),
         auction_aggressive_steps=max(0, min(20, _to_int(raw.get("auction_aggressive_steps")))),
         auction_poll_seconds=max(3, min(300, _to_int(raw.get("auction_poll_seconds"), 15))),
+        do_consignment=parse_bool(raw.get("do_consignment")),
+        consignment_auto_bid=parse_bool(raw.get("consignment_auto_bid")),
+        consignment_budget=max(0, _to_int(raw.get("consignment_budget"))),
+        consignment_unowned_only=parse_bool(raw.get("consignment_unowned_only"), True),
+        consignment_wanted_poster_ids=parse_int_list(raw.get("consignment_wanted_poster_ids")),
+        consignment_rarities=parse_choices(raw.get("consignment_rarities"),
+                                           ("normal", "excellent", "rare", "precious", "legendary")),
+        consignment_modes=tuple(x for x in parse_choices(
+            raw.get("consignment_modes", "open,dutch"), ("open", "sealed", "dutch"))),
+        poster_claim_rarities=parse_choices(raw.get("poster_claim_rarities"),
+                                            ("normal", "excellent", "rare", "precious", "legendary")),
     )
 
 
@@ -367,14 +390,28 @@ def claimable_tasks(home: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(out))
 
 
-def claimable_posters(board: Dict[str, Any]) -> List[str]:
+def poster_rarity_of(task_key: str) -> str:
+    """从任务 key 提取档位：normal_collection_once -> normal。"""
+    key = str(task_key or "")
+    for rarity in ("normal", "excellent", "rare", "precious", "legendary"):
+        if key.startswith(rarity + "_"):
+            return rarity
+    return ""
+
+
+def claimable_posters(board: Dict[str, Any], rarities: Tuple[str, ...] = ()) -> List[str]:
+    """可领的海报任务；rarities 非空时只领指定档位（囤魔力领完全图鉴用）。"""
     out: List[str] = []
+    wanted = set(rarities)
     for task in (board or {}).get("tasks") or []:
         if not isinstance(task, dict):
             continue
         key = str(task.get("key") or "")
-        if key and str(task.get("status") or "") == "claimable":
-            out.append(key)
+        if not key or str(task.get("status") or "") != "claimable":
+            continue
+        if wanted and poster_rarity_of(key) not in wanted:
+            continue
+        out.append(key)
     return list(dict.fromkeys(out))
 
 
@@ -601,8 +638,11 @@ def build_plan(cfg: Config, home: Dict[str, Any], board: Dict[str, Any],
         actions.extend(plan_commission(cfg, board, len(running)))
 
     if cfg.do_posters:
-        for key in claimable_posters(poster_board):
-            actions.append(Action("friendTradePosterTaskClaim", {"task_key": key}, f"领海报任务 {key}", "safe"))
+        for key in claimable_posters(poster_board, cfg.poster_claim_rarities):
+            rarity = poster_rarity_of(key)
+            label = f"[{RARITY_LABELS.get(rarity, rarity)}]" if rarity else ""
+            actions.append(Action("friendTradePosterTaskClaim", {"task_key": key},
+                                  f"领海报任务 {label} {key}", "safe"))
         # 赠送与兑换需要额外确认，交给 execute 层查状态后再决定，这里只标记意图
         if cfg.poster_auto_redeem:
             actions.append(Action("_poster_redeem", {}, "检查典藏册兑换", "safe"))
@@ -712,6 +752,14 @@ class AuctionLot:
     my_bid_rank: int
     my_fee_total: float
     owned_quantity: int
+    # 寄售场专有字段（拍卖行为默认值）
+    mode: str = "open"
+    is_mine: bool = False
+    can_buy: bool = False
+    next_drop_at: int = 0
+    floor_price: int = 0
+    drop_interval_seconds: int = 0
+    drop_amount: int = 0
 
     @property
     def rarity_label(self) -> str:
@@ -725,6 +773,24 @@ class AuctionLot:
     def increment(self) -> int:
         """优先用站点给的 min_increment，否则按稀有度档位。"""
         return self.min_increment or AUCTION_INCREMENTS.get(self.rarity, 200)
+
+    def as_dict(self) -> Dict[str, Any]:
+        """给端点返回可 JSON 序列化的字段（含寄售场可能有的字段）。"""
+        return {
+            "id": self.id, "poster_id": self.poster_id, "title": self.title,
+            "rarity": self.rarity, "rarity_label": self.rarity_label,
+            "status": self.status, "can_bid": self.can_bid,
+            "mode": getattr(self, "mode", "open"),
+            "owned_quantity": self.owned_quantity,
+            "current_price": self.current_price, "minimum_bid": self.minimum_bid,
+            "min_increment": self.min_increment, "highest_bid": self.highest_bid,
+            "leader": self.leader_name, "my_rank": self.my_bid_rank,
+            "ends_at": self.ends_at, "hard_ends_at": self.hard_ends_at,
+            "is_mine": bool(getattr(self, "is_mine", False)),
+            "can_buy": bool(getattr(self, "can_buy", False)),
+            "next_drop_at": getattr(self, "next_drop_at", 0),
+            "floor_price": getattr(self, "floor_price", 0),
+        }
 
 
 def parse_auction_board(board: Dict[str, Any], now: Optional[int] = None) -> Dict[str, Any]:
@@ -765,6 +831,13 @@ def parse_auction_board(board: Dict[str, Any], now: Optional[int] = None) -> Dic
             my_bid_rank=_to_int(my_bid.get("rank")),
             my_fee_total=_to_float(my_bid.get("fee_total")),
             owned_quantity=_to_int(row.get("owned_quantity")),
+            mode=str(row.get("mode") or "open"),
+            is_mine=bool(row.get("is_mine")),
+            can_buy=bool(row.get("can_buy")),
+            next_drop_at=_to_int(row.get("next_drop_at")),
+            floor_price=_to_int(row.get("floor_price")),
+            drop_interval_seconds=_to_int(row.get("drop_interval_seconds")),
+            drop_amount=_to_int(row.get("drop_amount")),
         ))
     return {
         "available": bool(data.get("available")),
@@ -907,3 +980,105 @@ def auction_summary(board: Dict[str, Any]) -> str:
         lead = lot.leader_name or "无人"
         parts.append(f"{lot.title}({lot.rarity_label}) {lot.current_price}魔力/领先:{lead}")
     return "；".join(parts) + (f"…等{len(lots)}件" if len(lots) > 6 else "")
+
+
+# ---------------------------------------------------------------- 海报寄售场决策
+
+@dataclass
+class ConsignmentDecision:
+    """寄售场抢购决策。mode=dutch 用 dutch_buy，mode=open/sealed 用 auction_bid。"""
+    lot_id: int
+    poster_id: int
+    title: str
+    rarity: str
+    mode: str
+    amount: int
+    fee: float
+    action_kind: str        # dutch_buy / bid
+    rule_version: str
+    reason: str
+
+
+def parse_consignment_board(board: Dict[str, Any], now: Optional[int] = None) -> Dict[str, Any]:
+    """寄售场看板：拍品在 items[]（拍卖行在 current[]），结构一致，复用解析器。"""
+    data = dict(board or {})
+    # 归一化字段：寄售场用 items，拍卖行用 current
+    if "current" not in data and isinstance(data.get("items"), list):
+        data["current"] = data["items"]
+    view = parse_auction_board(data, now=now)
+    view["can_list"] = bool(data.get("can_list"))
+    view["open_count"] = _to_int(data.get("open_count"))
+    view["inventory_revision"] = _to_int(data.get("inventory_revision"))
+    view["next_refresh_at"] = _to_int(data.get("next_refresh_at"))
+    return view
+
+
+def plan_consignment(cfg: Config, board: Dict[str, Any], now: Optional[int] = None) -> List[ConsignmentDecision]:
+    """按「未拥有/想要 + 价格上限」产出寄售场抢购决策（纯函数）。
+
+    寄售场有两种买法：
+    - dutch（荷兰降价）：按 current_price 直接买（friendTradePosterDutchBuy）；
+      next_drop_at 之后会降价，若现价已达标可直接买，否则交给用户设置更低预算等降价。
+    - open/sealed（竞价）：和拍卖行一样按 minimum_bid 出价（friendTradePosterAuctionBid）。
+    """
+    if not cfg.do_consignment or not cfg.consignment_auto_bid or cfg.consignment_budget <= 0:
+        return []
+    data = board if isinstance(board, dict) else {}
+    if not data.get("enabled", True):
+        return []
+    balance = _to_float(data.get("balance"))
+    max_bid = _to_int(data.get("max_bid"), 10 ** 12)
+    wanted = set(cfg.consignment_wanted_poster_ids)
+    rarities = set(cfg.consignment_rarities)
+    modes = set(cfg.consignment_modes) or {"open", "dutch"}
+    now_ts = int(now if now is not None else time.time())
+
+    decisions: List[ConsignmentDecision] = []
+    for lot in data.get("lots") or []:
+        if not isinstance(lot, AuctionLot):
+            continue
+        if lot.status != "open" or lot.is_mine:
+            continue
+        if lot.mode not in modes:
+            continue
+        # 未拥有过滤：已拥有该海报就不重复抢
+        if cfg.consignment_unowned_only and lot.owned_quantity > 0:
+            continue
+        # 想要过滤：指定海报 ID 优先；否则按稀有度档位
+        if wanted and lot.poster_id not in wanted:
+            continue
+        if not wanted and rarities and lot.rarity not in rarities:
+            continue
+
+        if lot.mode == "dutch":
+            amount = _to_int(lot.current_price)
+            action_kind = "dutch_buy"
+        else:
+            amount = lot.minimum_bid
+            action_kind = "bid"
+        if amount <= 0 or amount > min(cfg.consignment_budget, max_bid):
+            continue
+        fee = auction_fee(amount, lot.bid_fee_bps)
+        if amount + fee > balance:
+            continue
+        decisions.append(ConsignmentDecision(
+            lot_id=lot.id, poster_id=lot.poster_id, title=lot.title, rarity=lot.rarity,
+            mode=lot.mode, amount=amount, fee=fee, action_kind=action_kind,
+            rule_version=lot.rule_version,
+            reason=(f"寄售 {lot.mode}《{lot.title}》（{lot.rarity_label}）"
+                    f"{'未拥有' if lot.owned_quantity == 0 else f'已有{lot.owned_quantity}张'}，"
+                    f"{'现价' if lot.mode == 'dutch' else '最低出价'}{amount}魔力"
+                    f"（手续费{fee}）"),
+        ))
+    decisions.sort(key=lambda d: d.amount)
+    return decisions
+
+
+def consignment_summary(board: Dict[str, Any]) -> str:
+    data = board if isinstance(board, dict) else {}
+    lots = [x for x in data.get("lots") or [] if isinstance(x, AuctionLot) and x.status == "open"]
+    if not lots:
+        return "寄售场暂无在售海报"
+    unowned = sum(1 for x in lots if x.owned_quantity == 0)
+    dutch = sum(1 for x in lots if x.mode == "dutch")
+    return f"在售 {len(lots)} 件（未拥有 {unowned}，荷兰降价 {dutch}）"

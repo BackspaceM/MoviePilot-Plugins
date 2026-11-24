@@ -37,7 +37,7 @@ class ContractTests(unittest.TestCase):
 
     def test_metadata_and_lifecycle(self):
         self.assertEqual(PLUGIN_ID, "PandaFriendTrade")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.1.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.2.0")
         self.assertTrue(PLUGIN_CLS.plugin_icon.endswith("/icons/pandafriendtrade.png"))
         for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service"):
             self.assertTrue(callable(getattr(PLUGIN_CLS, name, None)), name)
@@ -50,7 +50,8 @@ class ContractTests(unittest.TestCase):
             app.add_api_route(f"/{route['path'].lstrip('/')}", route["endpoint"], methods=route["methods"])
         paths = {route.path for route in app.routes}
         for suffix in ("/run", "/dryrun", "/probe", "/preview", "/status",
-                       "/auction_check", "/auction_once", "/auction_monitor", "/auction_status"):
+                       "/auction_check", "/auction_once", "/auction_monitor", "/auction_status",
+                       "/consignment_check", "/consignment_grab"):
             self.assertIn(suffix, paths)
 
     def test_form_contains_all_rule_switches(self):
@@ -68,7 +69,10 @@ class ContractTests(unittest.TestCase):
                     "reserved_uids", "poster_gift_recipients",
                     "proxy_url", "proxy_bypass", "do_auction", "auction_auto_bid",
                     "auction_budget", "auction_total_budget", "auction_snipe_seconds",
-                    "auction_rarities", "auction_poll_seconds", "auction_aggressive_steps"):
+                    "auction_rarities", "auction_poll_seconds", "auction_aggressive_steps",
+                    "do_consignment", "consignment_auto_bid", "consignment_budget",
+                    "consignment_wanted_poster_ids", "consignment_rarities",
+                    "consignment_unowned_only", "poster_claim_rarities"):
             self.assertIn(key, models)
         self.assertEqual(defaults.get("do_auction"), False, "拍卖默认关")
         self.assertEqual(defaults.get("auction_auto_bid"), False, "自动出价默认关")
@@ -76,7 +80,7 @@ class ContractTests(unittest.TestCase):
     def test_page_buttons_all_clickable(self):
         page = self.plugin.get_page()
         buttons = [node for node in _walk(page) if node.get("component") == "VBtn"]
-        self.assertEqual(len(buttons), 9)
+        self.assertEqual(len(buttons), 11)
         declared = {route["path"].lstrip("/") for route in self.plugin.get_api()}
         for button in buttons:
             self.assertTrue(str(button.get("text") or "").strip(), "按钮不能有空文字")
@@ -95,7 +99,8 @@ class ContractTests(unittest.TestCase):
     def test_endpoints_never_raise(self):
         # 未配置 cookie 时所有端点都返回 Response，不抛异常
         for name in ("api_run", "api_dryrun", "api_probe", "api_preview", "api_status",
-                     "api_auction_check", "api_auction_once", "api_auction_monitor", "api_auction_status"):
+                     "api_auction_check", "api_auction_once", "api_auction_monitor", "api_auction_status",
+                     "api_consignment_check", "api_consignment_grab"):
             result = getattr(self.plugin, name)()
             self.assertIsNotNone(result)
             self.assertTrue(hasattr(result, "success"), name)

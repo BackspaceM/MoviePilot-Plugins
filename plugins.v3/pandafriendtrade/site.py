@@ -114,6 +114,48 @@ class PandaClient:
     def ajax_url(self) -> str:
         return f"{self.site}/ajax.php"
 
+    def _openers(self) -> list:
+        """候选通道：代理优先，直连兜底；未配代理就只有直连。"""
+        out = []
+        if self._opener is not None:
+            return [("直连", self._opener)]  # 测试注入，单一通道
+        if self.using_proxy:
+            out.append(("代理", self._proxy_opener))
+        direct = self._direct_opener or (urllib.request.build_opener() if not out else None)
+        if direct is not None:
+            out.append(("直连", direct))
+        return out or [("直连", urllib.request.build_opener())]
+
+    def _send_with_retry(self, body: bytes, headers: dict) -> tuple:
+        """发送 POST，网络层错误换通道+退避重试；返回 (raw, err)。"""
+        routes = self._openers()
+        last_err = ""
+        # 每个通道最多尝试 2 轮，轮间短退避，应对站点偶发 RemoteDisconnected
+        for round_no in range(2):
+            for name, opener in routes:
+                self._throttle()
+                self._last_request = time.monotonic()
+                req = urllib.request.Request(self.ajax_url, data=body,
+                                             headers=dict(headers), method="POST")
+                try:
+                    with opener.open(req, timeout=self.timeout) as response:
+                        return response.read().decode("utf-8", "ignore"), None
+                except urllib.error.HTTPError as exc:
+                    # 5xx 可换通道再试；4xx 是业务/鉴权问题，立即返回
+                    last_err = f"HTTP {exc.code}"
+                    if exc.code < 500:
+                        return "", last_err
+                except Exception as exc:  # noqa: BLE001
+                    last_err = f"{type(exc).__name__}: {exc}"
+                # 代理网络失败后标记，下一轮不再走代理
+                if name == "代理" and self.proxy_bypass and last_err.startswith((
+                        "RemoteDisconnected", "URLError", "TimeoutError", "ConnectionResetError", "OSError")):
+                    self.proxy_error = f"代理不可用（{last_err[:40]}），已降级直连"
+                    routes = [("直连", r) for n, r in routes if n == "直连"] or routes
+            if round_no == 0:
+                time.sleep(min(2.0, max(0.4, self.interval)))
+        return "", (last_err or "网络请求失败")
+
     def _throttle(self) -> None:
         if self.interval <= 0:
             return
@@ -139,26 +181,9 @@ class PandaClient:
         # cookie 只放进请求头，不写日志
         headers["Cookie"] = self.cookie
 
-        self._throttle()
-        self._last_request = time.monotonic()
-        req = urllib.request.Request(self.ajax_url, data=body, headers=headers, method="POST")
-        try:
-            with self._get_opener().open(req, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8", "ignore")
-        except urllib.error.HTTPError as exc:
-            return Result.fail(f"HTTP {exc.code}")
-        except Exception as exc:  # noqa: BLE001 - 网络异常统一兜底
-            # 代理失败时可降级直连一次（仅网络层错误，HTTP 业务错误不重试）
-            if self.using_proxy and self.proxy_bypass:
-                self.proxy_error = f"代理不可用（{type(exc).__name__}），已降级直连"
-                try:
-                    with (self._direct_opener or urllib.request.build_opener()).open(
-                            req, timeout=self.timeout) as response:
-                        raw = response.read().decode("utf-8", "ignore")
-                except Exception as exc2:  # noqa: BLE001
-                    return Result.fail(f"代理与直连均失败：{type(exc2).__name__}: {exc2}")
-            else:
-                return Result.fail(f"{type(exc).__name__}: {exc}")
+        raw, err = self._send_with_retry(body, headers)
+        if err is not None:
+            return Result.fail(err)
 
         try:
             parsed = json.loads(raw)
@@ -201,23 +226,36 @@ class PandaClient:
         return self.post("friendTradeScreeningHome")
 
     # ------------------------------------------------------------ 海报拍卖 / 寄售
+    # 站点拍卖/寄售组件的所有请求都必须带这个头，否则返回「请从电影图鉴页面使用」
+    _AUCTION_HEADERS = {"X-Friend-Trade-Auction": "1"}
+
     def auction_board(self) -> Result:
-        return self.post("friendTradePosterAuctionBoard")
+        return self.post("friendTradePosterAuctionBoard", headers=self._AUCTION_HEADERS)
 
     def auction_bids(self, auction_id: int, before_id: int = 0, page_size: int = 10) -> Result:
         return self.post("friendTradePosterAuctionBids",
-                         {"auction_id": auction_id, "before_id": before_id, "page_size": page_size})
+                         {"auction_id": auction_id, "before_id": before_id, "page_size": page_size},
+                         headers=self._AUCTION_HEADERS)
 
     def auction_history(self, before_id: int = 0, page_size: int = 10) -> Result:
         return self.post("friendTradePosterAuctionHistory",
-                         {"before_id": before_id, "page_size": page_size})
+                         {"before_id": before_id, "page_size": page_size},
+                         headers=self._AUCTION_HEADERS)
 
-    def consignment_board(self, viewer_uid: int, scope: str = "market") -> Result:
-        return self.post("friendTradePosterConsignmentBoard",
-                         {"expected_uid": viewer_uid, "scope": scope})
+    def consignment_board(self, viewer_uid: int, scope: str = "market",
+                          unowned_only: bool = True, page: int = 1, page_size: int = 24,
+                          rarity: str = "", sort: str = "price_asc") -> Result:
+        """个人寄售/市场看板。scope=market + unowned_only=1 抓市场上未拥有的海报。"""
+        return self.post("friendTradePosterConsignmentBoard", {
+            "expected_uid": viewer_uid, "scope": scope, "keyword": "",
+            "rarity": rarity, "sort": sort,
+            "unowned_only": "1" if unowned_only and scope == "market" else "0",
+            "page": page, "page_size": page_size,
+        }, headers=self._AUCTION_HEADERS)
 
     def consignment_recent_prices(self, viewer_uid: int) -> Result:
-        return self.post("friendTradePosterConsignmentRecentPrices", {"expected_uid": viewer_uid})
+        return self.post("friendTradePosterConsignmentRecentPrices",
+                         {"expected_uid": viewer_uid}, headers=self._AUCTION_HEADERS)
 
     # ------------------------------------------------------------ 写接口
     @staticmethod
@@ -323,7 +361,7 @@ class PandaClient:
             "request_uuid": self.new_uuid(),
             "expected_rule_version": rule_version,
             "expected_uid": viewer_uid,
-        })
+        }, headers=self._AUCTION_HEADERS)
 
     def dutch_buy(self, auction_id: int, max_price: Any, rule_version: str,
                   viewer_uid: int) -> Result:
@@ -334,7 +372,7 @@ class PandaClient:
             "max_price": str(max_price),
             "request_uuid": self.new_uuid(),
             "expected_rule_version": rule_version,
-        })
+        }, headers=self._AUCTION_HEADERS)
 
     def consignment_create(self, viewer_uid: int, poster_id: int, starting_price: int,
                            duration_hours: int, fee_bps: int = 0, listing_fee_bps: int = 0,
@@ -355,11 +393,13 @@ class PandaClient:
             payload["floor_price"] = floor_price
             payload["drop_interval_seconds"] = drop_interval
             payload["drop_amount"] = drop_amount
-        return self.post("friendTradePosterConsignmentCreate", payload)
+        return self.post("friendTradePosterConsignmentCreate", payload,
+                         headers=self._AUCTION_HEADERS)
 
     def consignment_cancel(self, viewer_uid: int, auction_id: int) -> Result:
         return self.post("friendTradePosterConsignmentCancel",
-                         {"expected_uid": viewer_uid, "auction_id": auction_id})
+                         {"expected_uid": viewer_uid, "auction_id": auction_id},
+                         headers=self._AUCTION_HEADERS)
 
 
 def probe(cookie: str, site: str = core.DEFAULT_SITE, timeout: int = 20) -> Result:

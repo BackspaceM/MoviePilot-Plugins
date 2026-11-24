@@ -104,6 +104,14 @@ DEFAULTS: dict[str, Any] = {
     "auction_require_no_leader": False,
     "auction_aggressive_steps": 0,
     "auction_poll_seconds": 15,
+    "do_consignment": False,
+    "consignment_auto_bid": False,
+    "consignment_budget": 0,
+    "consignment_unowned_only": True,
+    "consignment_wanted_poster_ids": "",
+    "consignment_rarities": "",
+    "consignment_modes": "open,dutch",
+    "poster_claim_rarities": "",
 }
 
 
@@ -180,6 +188,35 @@ def form() -> tuple[list[dict], dict[str, Any]]:
                    hint="要抢最后3分钟的延长，建议 ≤20 秒", persistentHint=True),
         ),
 
+        _section("②b 海报寄售场", "个人寄售的市场：抢「未拥有/想要」的海报，荷兰降价可直接买"),
+        _alert(
+            "寄售场和光影拍卖行是两个独立市场，都归「启动/停止抢拍」这个监控循环管。"
+            "市场看板会按「未拥有」过滤，避免重复买已有的海报；可以只盯指定海报或指定档位。",
+            "info",
+        ),
+        _row(
+            _field("VSwitch", "do_consignment", "开启寄售场监控", 4,
+                   hint="关闭则完全不碰寄售场", persistentHint=True),
+            _field("VSwitch", "consignment_auto_bid", "自动抢购", 4,
+                   hint="dutch 降价直接买、open 竞价出价；关掉则只监控", persistentHint=True),
+            _field("VSwitch", "consignment_unowned_only", "只要未拥有的海报", 4,
+                   hint="默认开，避免重复买已有的", persistentHint=True),
+        ),
+        _row(
+            _field("VTextField", "consignment_budget", "单品价格上限(魔力)", 6,
+                   hint="0=不买；超过上限的海报跳过", persistentHint=True),
+            _field("VTextField", "consignment_modes", "参与模式（open,dutch）", 6,
+                   hint="逗号分隔：open 竞价 / dutch 荷兰降价 / sealed 封标", persistentHint=True),
+        ),
+        _row(
+            _field("VTextarea", "consignment_wanted_poster_ids", "想要的指定海报 ID（留空=按档位）", 6, rows=3,
+                   placeholder="146, 205, 1468",
+                   hint="填了就只抢这些 ID，忽略档位设置", persistentHint=True),
+            _field("VTextField", "consignment_rarities", "想要的档位（ID留空时生效）", 6,
+                   placeholder="rare, precious, legendary",
+                   hint="可选 normal/excellent/rare/precious/legendary，留空=不限", persistentHint=True),
+        ),
+
         _section("③ 零风险领取", "不花魔力、无交易；默认开启"),
         _row(
             _field("VSwitch", "do_income", "领取挂机收益", 4),
@@ -231,6 +268,12 @@ def form() -> tuple[list[dict], dict[str, Any]]:
             _field("VTextarea", "poster_gift_recipients", "允许赠送的好友 UID", 4, rows=2,
                    placeholder="只送给这些 UID，留空则不赠送",
                    hint="赠送不可逆，留空最安全", persistentHint=True),
+        ),
+        _row(
+            _field("VTextField", "poster_claim_rarities", "领奖档位（囤魔力用）", 12,
+                   placeholder="留空=所有可领档位都领",
+                   hint="只领指定档位的典藏任务奖励，如填 normal 就先囤着其它档位的魔力；"
+                        "可选 normal/excellent/rare/precious/legendary，逗号分隔", persistentHint=True),
         ),
 
         _section("⑦ 消耗与不可逆（谨慎）", "默认全关；买人会真花魔力，释放不可撤回", ),
@@ -314,6 +357,8 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         _button("立即判断出价", "auction_once", "post", "mdi-gavel", "warning"),
         _button("启动/停止抢拍", "auction_monitor", "post", "mdi-fast-forward", "primary"),
         _button("拍卖状态", "auction_status", "get", "mdi-pulse"),
+        _button("检查寄售场", "consignment_check", "post", "mdi-store-search"),
+        _button("立即抢寄售", "consignment_grab", "post", "mdi-cart-arrow-down", "warning"),
     ]
 
     badge = '<span class="pf-badge on">正在运行</span>' if running else '<span class="pf-badge">空闲</span>'
@@ -369,6 +414,34 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + '「检查拍卖行情」只读不出价；要自动抢拍请开启监控循环，出价前确认预算与稀有度规则。</div>'
     )
 
+    # 海报寄售场区（只读缓存）
+    cons = data.get("consignment") if isinstance(data.get("consignment"), dict) else {}
+    c_rows = ""
+    for lot in (cons.get("lots") or [])[:8]:
+        if not isinstance(lot, dict):
+            continue
+        mode = lot.get("mode") or "open"
+        mode_label = {"dutch": "荷兰降价", "open": "竞价", "sealed": "封标"}.get(mode, mode)
+        owned = lot.get("owned", 0)
+        own_text = "未拥有" if not owned else f"已有{owned}张"
+        extra = (f" · 下次降价 {_e(lot.get('next_drop_at'))}" if mode == "dutch" and lot.get("next_drop_at") else "")
+        c_rows += (
+            f'<div class="pf-line"><span class="pf-line-v">'
+            f'{_e(lot.get("title"))} <small>[{_e(lot.get("rarity"))}] {mode_label}</small></span>'
+            f'<span class="pf-line-k">{own_text} · 现价 {_e(lot.get("price"))}'
+            f' · 最低 {_e(lot.get("minimum_bid"))}{extra}</span></div>'
+        )
+    consignment_html = (
+        '<div class="pf-sec">海报寄售场</div>'
+        + '<div class="pf-card">'
+        + f'<div class="pf-line"><span class="pf-line-k">最近行情</span>'
+        + f'<span class="pf-line-v">{_e(data.get("consignment_text") or "还没检查过")}</span></div>'
+        + c_rows
+        + '</div>'
+        + '<div class="pf-note">寄售场与光影拍卖行是两个市场，都由「启动/停止抢拍」统一监控。'
+        + '按「未拥有 / 想要的指定海报或档位 + 价格上限」自动抢；荷兰降价品现价合适就直接买。</div>'
+    )
+
     card = (
         '<div class="pf">' + _STYLE
         + '<div class="pf-head"><span class="pf-logo">🐼</span><span>'
@@ -381,6 +454,7 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + f'<div class="pf-card">{lines}</div>'
         + preview_html
         + auction_html
+        + consignment_html
         + '<div class="pf-sec">安全说明</div>'
         + '<div class="pf-note">不可逆动作（买入/抢人/追回/释放）默认全关，必须自己显式打开并设置价格与属性门槛。'
         + '站点已开启原生自动派遣时，插件不会重复派单，只结算已完成的委托。'

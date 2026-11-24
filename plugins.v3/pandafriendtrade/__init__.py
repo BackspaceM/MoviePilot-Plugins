@@ -31,6 +31,7 @@ LOG_TAG = "[PandaFriendTrade] "
 _LAST_KEY = "panda_ft_last_v1"
 _PROBE_KEY = "panda_ft_probe_v1"
 _AUCTION_KEY = "panda_ft_auction_v1"
+_CONSIGNMENT_KEY = "panda_ft_consignment_v1"
 _CMD_ACTION = "pandafriendtrade_run"
 _DEFAULT_CRON = "0 */6 * * *"
 
@@ -53,10 +54,10 @@ class PandaFriendTrade(_PluginBase):
                    "海报任务，并支持海报拍卖监控与倒计时自动加价抢拍。默认试运行，"
                    "出价/买人/释放等消耗或不可逆动作需显式开启。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pandafriendtrade.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
-    plugin_label = "熊猫PT,好友买卖,自动化,规则引擎"
+    plugin_label = "熊猫PT,好友买卖,海报拍卖,寄售场,代理,规则引擎"
     plugin_config_prefix = "pandafriendtrade_"
     plugin_order = 22
     auth_level = 1
@@ -80,6 +81,8 @@ class PandaFriendTrade(_PluginBase):
         self._auction_counts: Dict[int, int] = {}   # lot_id -> 本轮出价次数
         self._auction_last_bid: Dict[int, int] = {}  # lot_id -> 上次出价时间戳
         self._auction_state: Dict[str, Any] = {}   # 供页面展示，只读缓存
+        self._consignment_state: Dict[str, Any] = {}  # 寄售场只读缓存
+        self._viewer_uid: int = 0                  # 我的 UID，寄售场需要
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -94,10 +97,12 @@ class PandaFriendTrade(_PluginBase):
         self._last = dict(self.get_data(_LAST_KEY) or {})
         self._probe = dict(self.get_data(_PROBE_KEY) or {})
         self._auction_state = dict(self.get_data(_AUCTION_KEY) or {})
+        self._consignment_state = dict(self.get_data(_CONSIGNMENT_KEY) or {})
         if self._enabled and not self._cfg.cookie:
             logger.warning(f"{LOG_TAG}尚未填写站点 Cookie，运行会失败")
         # 配置重载后按开关决定是否常驻拍卖监控线程
-        if self._enabled and self._cfg.do_auction and self._cfg.cookie:
+        if (self._enabled and self._cfg.cookie
+                and (self._cfg.do_auction or self._cfg.do_consignment)):
             self._start_auction_monitor()
         else:
             self._stop_auction_monitor()
@@ -144,6 +149,10 @@ class PandaFriendTrade(_PluginBase):
                 "auction_text": (f'{self._auction_state.get("checked_at", "")}　'
                                  f'{self._auction_state.get("summary", "")}'
                                  if self._auction_state else "还没检查过拍卖"),
+                "consignment": self._consignment_state,
+                "consignment_text": (f'{self._consignment_state.get("checked_at", "")}　'
+                                     f'{self._consignment_state.get("summary", "")}'
+                                     if self._consignment_state else "还没检查过寄售场"),
             })
         except Exception as err:  # noqa: BLE001
             logger.error(f"{LOG_TAG}详情页渲染失败：{err}")
@@ -169,6 +178,10 @@ class PandaFriendTrade(_PluginBase):
              "auth": "bear", "summary": "启动/停止拍卖监控循环"},
             {"path": "/auction_status", "endpoint": self.api_auction_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询拍卖监控状态与最近报价"},
+            {"path": "/consignment_check", "endpoint": self.api_consignment_check, "methods": ["POST"],
+             "auth": "bear", "summary": "检查海报寄售场行情（只读）"},
+            {"path": "/consignment_grab", "endpoint": self.api_consignment_grab, "methods": ["POST"],
+             "auth": "bear", "summary": "按规则在寄售场抢未拥有/想要的海报"},
         ]
 
     # ------------------------------------------------------------------ 按钮端点
@@ -288,6 +301,50 @@ class PandaFriendTrade(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             return _api_fail("读取拍卖状态", exc)
 
+    def api_consignment_check(self) -> schemas.Response:
+        """只读检查寄售场行情，展示未拥有的可抢海报。"""
+        try:
+            if not self._cfg.cookie:
+                return schemas.Response(success=False, message="请先填写站点 Cookie")
+            result = self._consignment_board_view()
+            if not result.ok:
+                return schemas.Response(success=False, message=result.message)
+            view = result.data
+            self._save_consignment_state(view)
+            decisions = core.plan_consignment(self._cfg, view, now=int(time.time()))
+            text = (f"{view.get('summary')}｜余额 {view.get('balance')} 魔力。"
+                    f"符合抢购规则 {len(decisions)} 件")
+            if decisions:
+                text += "：" + "；".join(d.reason for d in decisions[:5])
+            return schemas.Response(success=True, message=text,
+                                    data={"lots": [x.as_dict() for x in view.get("lots", [])]})
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("检查寄售场", exc)
+
+    def api_consignment_grab(self) -> schemas.Response:
+        """按规则在寄售场抢购一次；试运行只列决策不真正买。"""
+        try:
+            if not self._cfg.cookie:
+                return schemas.Response(success=False, message="请先填写站点 Cookie")
+            result = self._consignment_board_view()
+            if not result.ok:
+                return schemas.Response(success=False, message=result.message)
+            view = result.data
+            decisions = core.plan_consignment(self._cfg, view, now=int(time.time()))
+            if not decisions:
+                reason = ("自动抢购未开启" if not self._cfg.consignment_auto_bid
+                          else "当前没有符合规则的海报（预算/未拥有/档位/模式等条件未满足）")
+                return schemas.Response(success=True, message=reason)
+            lines = [d.reason for d in decisions]
+            if self._dry_run:
+                return schemas.Response(success=True,
+                                        message="试运行，未抢购。计划：" + "；".join(lines))
+            done = self._apply_consignment_decisions(view, decisions)
+            return schemas.Response(success=True,
+                                    message=f"本轮抢购 {done}/{len(decisions)} 件：" + "；".join(lines))
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("寄售场抢购", exc)
+
     # ------------------------------------------------------------------ 运行入口
 
     def _start(self, force_dry: bool) -> schemas.Response:
@@ -344,7 +401,16 @@ class PandaFriendTrade(_PluginBase):
         return site.PandaClient(cfg.cookie, cfg.site, cfg.timeout, cfg.request_interval,
                                 proxy_url=cfg.proxy_url, proxy_bypass=cfg.proxy_bypass)
 
-    # ------------------------------------------------------------------ 拍卖内部
+    # ------------------------------------------------------------------ 拍卖 / 寄售内部
+
+    def _ensure_viewer_uid(self, client: site.PandaClient) -> int:
+        """缓存我的 UID：寄售场与出价都要 expected_uid，只查一次首页。"""
+        if self._viewer_uid > 0:
+            return self._viewer_uid
+        home = client.home()
+        if home.ok and isinstance(home.data, dict):
+            self._viewer_uid = core._to_int((home.data.get("me") or {}).get("uid"))
+        return self._viewer_uid
 
     def _auction_board_view(self) -> site.Result:
         """读拍卖看板并解析成视图，顺带记录快照供页面展示。"""
@@ -360,12 +426,7 @@ class PandaFriendTrade(_PluginBase):
                              decisions: List[core.BidDecision]) -> int:
         """真正执行出价。逐笔校验：金额仍 ≥ 当前最低、预算内、未领先。"""
         client = self._client()
-        viewer_uid = core._to_int((view.get("me") or {}).get("uid"))
-        # 看板未直接给 viewer uid，从首页 me 读一次；失败则用 0 让站点校验
-        if not viewer_uid:
-            home = client.home()
-            if home.ok and isinstance(home.data, dict):
-                viewer_uid = core._to_int((home.data.get("me") or {}).get("uid"))
+        viewer_uid = self._ensure_viewer_uid(client)
         lots = {lot.id: lot for lot in view.get("lots") or []
                 if isinstance(lot, core.AuctionLot)}
         now = int(time.time())
@@ -385,6 +446,51 @@ class PandaFriendTrade(_PluginBase):
                 logger.info(f"{LOG_TAG}拍卖出价成功：{d.reason}｜{result.message}")
             else:
                 logger.warning(f"{LOG_TAG}拍卖出价失败：{d.reason}｜{result.message}")
+        return done
+
+    def _consignment_board_view(self) -> site.Result:
+        """读寄售场看板（市场未拥有），解析成与拍卖行一致的视图。"""
+        client = self._client()
+        uid = self._ensure_viewer_uid(client)
+        if not uid:
+            return site.Result.fail("读不到我的 UID，无法查寄售场")
+        result = client.consignment_board(
+            uid, scope="market", unowned_only=self._cfg.consignment_unowned_only)
+        if not result.ok:
+            return result
+        view = core.parse_consignment_board(result.data or {}, now=int(time.time()))
+        view["summary"] = core.consignment_summary(view)
+        view["checked_at"] = _now()
+        return site.Result.success(view, result.message)
+
+    def _apply_consignment_decisions(self, view: Dict[str, Any],
+                                     decisions: List[core.ConsignmentDecision]) -> int:
+        """执行寄售场抢购：dutch 直接买，open/sealed 竞价。"""
+        client = self._client()
+        uid = self._ensure_viewer_uid(client)
+        lots = {lot.id: lot for lot in view.get("lots") or []
+                if isinstance(lot, core.AuctionLot)}
+        now = int(time.time())
+        done = 0
+        for d in decisions:
+            lot = lots.get(d.lot_id)
+            if not lot or lot.is_mine:
+                logger.info(f"{LOG_TAG}寄售跳过 lot {d.lot_id}：已被买走或状态变化")
+                continue
+            if d.amount > self._cfg.consignment_budget:
+                continue
+            if d.action_kind == "dutch_buy":
+                result = client.dutch_buy(d.lot_id, d.amount, d.rule_version, uid)
+            else:
+                # 寄售竞价复用拍卖出价接口（同一个后端 action）
+                result = client.auction_bid(d.lot_id, d.amount, d.rule_version, uid)
+            if result.ok:
+                done += 1
+                self._auction_counts[d.lot_id] = self._auction_counts.get(d.lot_id, 0) + 1
+                self._auction_last_bid[d.lot_id] = now
+                logger.info(f"{LOG_TAG}寄售抢购成功：{d.reason}｜{result.message}")
+            else:
+                logger.warning(f"{LOG_TAG}寄售抢购失败：{d.reason}｜{result.message}")
         return done
 
     def _start_auction_monitor(self) -> None:
@@ -409,26 +515,47 @@ class PandaFriendTrade(_PluginBase):
         restore = self._bind_instance()
         try:
             while not self._auction_stop.is_set():
-                try:
-                    view_result = self._auction_board_view()
-                    if not view_result.ok:
-                        logger.warning(f"{LOG_TAG}拍卖看板读取失败：{view_result.message}")
-                    else:
-                        view = view_result.data
-                        self._save_auction_state(view)
-                        decisions = core.plan_auction(
-                            self._cfg, view, now=int(time.time()),
-                            bid_counts=self._auction_counts,
-                            last_bid_at=self._auction_last_bid,
-                        )
-                        if decisions:
-                            if self._dry_run:
-                                logger.info(f"{LOG_TAG}[试运行]拍卖决策：" +
-                                            "；".join(d.reason for d in decisions))
-                            else:
-                                self._apply_bid_decisions(view, decisions)
-                except Exception as exc:  # noqa: BLE001 - 单轮异常不能终止循环
-                    logger.warning(f"{LOG_TAG}拍卖监控单轮异常：{type(exc).__name__}: {exc}")
+                # 光影拍卖行
+                if self._cfg.do_auction:
+                    try:
+                        view_result = self._auction_board_view()
+                        if not view_result.ok:
+                            logger.warning(f"{LOG_TAG}拍卖看板读取失败：{view_result.message}")
+                        else:
+                            view = view_result.data
+                            self._save_auction_state(view)
+                            decisions = core.plan_auction(
+                                self._cfg, view, now=int(time.time()),
+                                bid_counts=self._auction_counts,
+                                last_bid_at=self._auction_last_bid,
+                            )
+                            if decisions:
+                                if self._dry_run:
+                                    logger.info(f"{LOG_TAG}[试运行]拍卖决策：" +
+                                                "；".join(d.reason for d in decisions))
+                                else:
+                                    self._apply_bid_decisions(view, decisions)
+                    except Exception as exc:  # noqa: BLE001 - 单轮异常不能终止循环
+                        logger.warning(f"{LOG_TAG}拍卖监控单轮异常：{type(exc).__name__}: {exc}")
+                # 海报寄售场（光影拍卖行之外的个人寄售）
+                if self._cfg.do_consignment:
+                    try:
+                        c_result = self._consignment_board_view()
+                        if not c_result.ok:
+                            logger.warning(f"{LOG_TAG}寄售场读取失败：{c_result.message}")
+                        else:
+                            c_view = c_result.data
+                            self._save_consignment_state(c_view)
+                            c_decisions = core.plan_consignment(
+                                self._cfg, c_view, now=int(time.time()))
+                            if c_decisions:
+                                if self._dry_run:
+                                    logger.info(f"{LOG_TAG}[试运行]寄售抢购决策：" +
+                                                "；".join(d.reason for d in c_decisions))
+                                else:
+                                    self._apply_consignment_decisions(c_view, c_decisions)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"{LOG_TAG}寄售场单轮异常：{type(exc).__name__}: {exc}")
                 # 用 wait 而非 sleep，停止信号能立刻生效
                 self._auction_stop.wait(max(1, self._cfg.auction_poll_seconds))
         finally:
@@ -471,6 +598,31 @@ class PandaFriendTrade(_PluginBase):
             self.save_data(_AUCTION_KEY, self._auction_state)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{LOG_TAG}保存拍卖状态失败：{exc}")
+
+    def _save_consignment_state(self, view: Dict[str, Any]) -> None:
+        """寄售场只读摘要（含 mode/拥有数/降价时间），供页面展示。"""
+        lots = []
+        for lot in view.get("lots") or []:
+            if not isinstance(lot, core.AuctionLot):
+                continue
+            lots.append({
+                "id": lot.id, "title": lot.title, "rarity": lot.rarity,
+                "mode": lot.mode, "owned": lot.owned_quantity,
+                "price": lot.current_price, "minimum_bid": lot.minimum_bid,
+                "next_drop_at": lot.next_drop_at, "floor_price": lot.floor_price,
+                "ends_at": lot.ends_at, "status": lot.status,
+            })
+        self._consignment_state = {
+            "checked_at": view.get("checked_at") or _now(),
+            "summary": view.get("summary") or "",
+            "balance": view.get("balance"),
+            "open_count": view.get("open_count", 0),
+            "lots": lots,
+        }
+        try:
+            self.save_data(_CONSIGNMENT_KEY, self._consignment_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{LOG_TAG}保存寄售状态失败：{exc}")
 
     def _execute(self, dry: bool) -> None:
         cfg = self._cfg
