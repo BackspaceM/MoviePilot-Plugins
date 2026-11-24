@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -79,6 +80,10 @@ class Config:
     request_interval: float = 1.0
     max_actions: int = 60
 
+    # 代理：http/https/socks5，格式 [user:pass@]host:port；空则直连
+    proxy_url: str = ""
+    proxy_bypass: bool = False  # 代理失败时是否自动降级直连
+
     # 任务开关
     do_income: bool = True
     do_work: bool = False
@@ -107,6 +112,19 @@ class Config:
     reserved_uids: Tuple[int, ...] = ()
     poster_gift_recipients: Tuple[int, ...] = ()
     poster_auto_redeem: bool = False
+
+    # 海报拍卖
+    do_auction: bool = False          # 拍卖监控总开关
+    auction_auto_bid: bool = False    # 是否自动出价（否则只监控报警）
+    auction_budget: int = 0           # 单个拍品最高最终出价（0=不出价）
+    auction_total_budget: int = 0     # 本轮累计最多占用魔力（0=不限）
+    auction_snipe_seconds: int = 60   # 进入最后 N 秒才开始抢拍（0=立即）
+    auction_rarities: Tuple[str, ...] = ()  # 只抢这些稀有度，空=不限
+    auction_max_bids_per_lot: int = 3       # 单个拍品最多自动加价次数
+    auction_min_gap: int = 60               # 同一拍品两次出价最小间隔（秒）
+    auction_require_no_leader: bool = False  # 只抢无人领先(起拍价)的拍品
+    auction_aggressive_steps: int = 0       # 额外加价档数（0=按站点最低有效价，越大越激进）
+    auction_poll_seconds: int = 15          # 监控轮询间隔（秒），要抢倒计时建议 ≤20
 
     @property
     def interact_cost_limit(self) -> int:
@@ -161,6 +179,28 @@ def normalize_site(value: Any) -> str:
     return site if site.startswith("http") else DEFAULT_SITE
 
 
+def parse_choices(value: Any, allowed: Tuple[str, ...]) -> Tuple[str, ...]:
+    """解析逗号/空格分隔的选项，只保留白名单内的值。"""
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(x).strip().lower() for x in value]
+    else:
+        parts = [x.strip().lower() for x in re.split(r"[,，;；\s]+", str(value or ""))]
+    return tuple(x for x in dict.fromkeys(parts) if x in allowed)
+
+
+def normalize_proxy(value: Any) -> str:
+    """把代理 URL 规整为 urllib 可用形式；只接受常见协议，防止乱填。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    scheme = text.split("://", 1)[0].lower()
+    if scheme not in {"http", "https", "socks5", "socks5h"}:
+        return ""
+    return text
+
+
 def parse_config(raw: Dict[str, Any]) -> Config:
     """把宿主传入的配置字典规整为 Config；缺省值都取安全侧。"""
     raw = dict(raw or {})
@@ -183,6 +223,8 @@ def parse_config(raw: Dict[str, Any]) -> Config:
         timeout=max(5, min(120, _to_int(raw.get("timeout"), 30))),
         request_interval=max(0.0, min(10.0, _to_float(raw.get("request_interval"), 1.0))),
         max_actions=max(1, min(500, _to_int(raw.get("max_actions"), 60))),
+        proxy_url=normalize_proxy(raw.get("proxy_url")),
+        proxy_bypass=parse_bool(raw.get("proxy_bypass")),
         do_income=parse_bool(raw.get("do_income"), True),
         do_work=parse_bool(raw.get("do_work")),
         do_interact=parse_bool(raw.get("do_interact")),
@@ -208,6 +250,18 @@ def parse_config(raw: Dict[str, Any]) -> Config:
         reserved_uids=parse_int_list(raw.get("reserved_uids")),
         poster_gift_recipients=parse_int_list(raw.get("poster_gift_recipients")),
         poster_auto_redeem=parse_bool(raw.get("poster_auto_redeem")),
+        do_auction=parse_bool(raw.get("do_auction")),
+        auction_auto_bid=parse_bool(raw.get("auction_auto_bid")),
+        auction_budget=max(0, _to_int(raw.get("auction_budget"))),
+        auction_total_budget=max(0, _to_int(raw.get("auction_total_budget"))),
+        auction_snipe_seconds=max(0, min(3600, _to_int(raw.get("auction_snipe_seconds"), 60))),
+        auction_rarities=parse_choices(raw.get("auction_rarities"),
+                                       ("normal", "excellent", "rare", "precious", "legendary")),
+        auction_max_bids_per_lot=max(1, min(50, _to_int(raw.get("auction_max_bids_per_lot"), 3))),
+        auction_min_gap=max(0, min(3600, _to_int(raw.get("auction_min_gap"), 60))),
+        auction_require_no_leader=parse_bool(raw.get("auction_require_no_leader")),
+        auction_aggressive_steps=max(0, min(20, _to_int(raw.get("auction_aggressive_steps")))),
+        auction_poll_seconds=max(3, min(300, _to_int(raw.get("auction_poll_seconds"), 15))),
     )
 
 
@@ -614,3 +668,242 @@ def summarize(actions: List[Action]) -> Dict[str, int]:
         risk = action.risk if action.risk in out else "safe"
         out[risk] += 1
     return out
+
+
+# ---------------------------------------------------------------- 海报拍卖
+
+# 站点拍卖规则（实测 auctionboard.json 的 rules）
+AUCTION_PRICES: Dict[str, int] = {
+    "normal": 2000, "excellent": 5000, "rare": 15000,
+    "precious": 50000, "legendary": 150000,
+}
+AUCTION_INCREMENTS: Dict[str, int] = {
+    "normal": 200, "excellent": 500, "rare": 1500,
+    "precious": 5000, "legendary": 15000,
+}
+RARITY_LABELS: Dict[str, str] = {
+    "normal": "普通", "excellent": "优秀", "rare": "稀有",
+    "precious": "珍贵", "legendary": "传说",
+}
+
+
+@dataclass
+class AuctionLot:
+    """从拍卖看板 current[] 解析出的一个拍品视图。"""
+    id: int
+    poster_id: int
+    title: str
+    rarity: str
+    status: str
+    can_bid: bool
+    starting_price: int
+    minimum_bid: int
+    current_price: int
+    min_increment: int
+    highest_bid: int
+    bidder_count: int
+    ends_at: int
+    hard_ends_at: int
+    rule_version: str
+    bid_fee_bps: int
+    leader_uid: int
+    leader_name: str
+    my_bid_amount: int
+    my_bid_rank: int
+    my_fee_total: float
+    owned_quantity: int
+
+    @property
+    def rarity_label(self) -> str:
+        return RARITY_LABELS.get(self.rarity, self.rarity)
+
+    @property
+    def is_leading(self) -> bool:
+        return self.my_bid_rank == 1
+
+    @property
+    def increment(self) -> int:
+        """优先用站点给的 min_increment，否则按稀有度档位。"""
+        return self.min_increment or AUCTION_INCREMENTS.get(self.rarity, 200)
+
+
+def parse_auction_board(board: Dict[str, Any], now: Optional[int] = None) -> Dict[str, Any]:
+    """解析 friendTradePosterAuctionBoard.data，返回统一视图。"""
+    data = board or {}
+    now_ts = int(now if now is not None else time.time())
+    rules = data.get("rules") if isinstance(data.get("rules"), dict) else {}
+    lots: List[AuctionLot] = []
+    for row in data.get("current") or []:
+        if not isinstance(row, dict):
+            continue
+        aid = _to_int(row.get("id"))
+        if aid <= 0:
+            continue
+        poster = row.get("poster") if isinstance(row.get("poster"), dict) else {}
+        leader = row.get("leader") if isinstance(row.get("leader"), dict) else {}
+        my_bid = row.get("my_bid") if isinstance(row.get("my_bid"), dict) else {}
+        lots.append(AuctionLot(
+            id=aid,
+            poster_id=_to_int(poster.get("id")),
+            title=str(poster.get("title_cn") or poster.get("title") or f"#{aid}"),
+            rarity=str(poster.get("rarity") or "normal"),
+            status=str(row.get("status") or ""),
+            can_bid=bool(row.get("can_bid")),
+            starting_price=_to_int(row.get("starting_price")),
+            minimum_bid=_to_int(row.get("minimum_bid")),
+            current_price=_to_int(row.get("current_price")),
+            min_increment=_to_int(row.get("min_increment")),
+            highest_bid=_to_int(row.get("highest_bid")),
+            bidder_count=_to_int(row.get("bidder_count")),
+            ends_at=_to_int(row.get("ends_at")),
+            hard_ends_at=_to_int(row.get("hard_ends_at")),
+            rule_version=str(row.get("rule_version") or ""),
+            bid_fee_bps=_to_int(row.get("bid_fee_bps")),
+            leader_uid=_to_int(leader.get("uid")),
+            leader_name=str(leader.get("username") or ""),
+            my_bid_amount=_to_int(my_bid.get("amount")),
+            my_bid_rank=_to_int(my_bid.get("rank")),
+            my_fee_total=_to_float(my_bid.get("fee_total")),
+            owned_quantity=_to_int(row.get("owned_quantity")),
+        ))
+    return {
+        "available": bool(data.get("available")),
+        "enabled": bool(data.get("enabled")),
+        "balance": _to_float(data.get("balance")),
+        "max_bid": _to_int(data.get("max_bid"), 10 ** 12),
+        "server_time": _to_int(data.get("server_time"), now_ts),
+        "next_release_at": _to_int(data.get("next_release_at")),
+        "rules": rules,
+        "lots": lots,
+        "recent": data.get("recent") or [],
+    }
+
+
+def seconds_left(lot: AuctionLot, now: int) -> int:
+    """距离落槌的秒数（按 can_bid 的 ends_at，不按 hard_ends_at）。"""
+    return max(0, lot.ends_at - now)
+
+
+def auction_fee(amount: int, bps: int, my_previous: int = 0,
+                differential: bool = True) -> float:
+    """按站点算法算本次手续费：round(value*bps/1000) 之差 /10，累计到 0.1。
+
+    与 auctions.js bidFee 对齐：
+      roundedTenths(q) = floor((q*bps+500)/1000)，fee=(rounded(amount)-rounded(prev))/10
+    """
+    if bps <= 0 or amount <= 0:
+        return 0.0
+    base = my_previous if differential else 0
+    rounded = lambda q: (int(q) * bps + 500) // 1000
+    return max(0, rounded(amount) - rounded(base)) / 10.0
+
+
+def auction_debit(lot: AuctionLot, amount: int) -> float:
+    """本次出价实际占用魔力 = 本金差额 + 手续费差额。"""
+    principal = max(0, amount - lot.my_bid_amount)
+    fee = auction_fee(amount, lot.bid_fee_bps, lot.my_bid_amount, differential=True)
+    return round(principal + fee, 1)
+
+
+def next_bid_amount(lot: AuctionLot, board_max: int = 10 ** 12,
+                    aggressive_steps: int = 0) -> int:
+    """下一次出价金额。
+
+    站点已在 minimum_bid 里算好了当前最低有效出价（含领先者 + 一档增量），
+    例如实测：最高 293888，increment 5000，minimum_bid=298888。
+    因此默认直接用 minimum_bid，绝不重复加增量；只有用户显式设置激进档数时，
+    才在最低价基础上再叠加 N 档 increment。
+    """
+    step = lot.increment or AUCTION_INCREMENTS.get(lot.rarity, 200)
+    target = max(1, lot.minimum_bid) + max(0, aggressive_steps) * step
+    return max(1, min(board_max, target))
+
+
+@dataclass
+class BidDecision:
+    lot_id: int
+    amount: int
+    debit: float
+    reason: str
+    priority: int = 0
+
+
+def plan_auction(cfg: Config, board: Dict[str, Any], now: Optional[int] = None,
+                 bid_counts: Optional[Dict[int, int]] = None,
+                 last_bid_at: Optional[Dict[int, int]] = None) -> List[BidDecision]:
+    """产出拍卖出价决策（纯函数，不真正出价）。
+
+    规则：
+    - 看板可用 + 开启监控 + 拍品 open/can_bid；
+    - 只抢白名单稀有度（配置为空=不限）；
+    - 倒计时进入 snipe 窗口才抢（0=不等待，立即）；最后 3 分钟换领先会延长，
+      所以只要还没落槌就可以继续跟价，直到 hard_ends_at 也没用（看板只给 ends_at）；
+    - 我已领先就不重复出价；
+    - 出价金额 = max(minimum_bid, 当前最高+一档增量)，不得超过单品预算；
+    - 单品加价次数、两次间隔、本轮总额度都受配置约束。
+    """
+    if not cfg.do_auction or not cfg.auction_auto_bid or cfg.auction_budget <= 0:
+        return []
+    data = board if isinstance(board, dict) else {}
+    if not data.get("enabled", True):
+        return []
+    now_ts = int(now if now is not None else time.time())
+    balance = _to_float(data.get("balance"))
+    max_bid = _to_int(data.get("max_bid"), 10 ** 12)
+    bids = bid_counts or {}
+    last_at = last_bid_at or {}
+    rarities = set(cfg.auction_rarities)
+
+    decisions: List[BidDecision] = []
+    for lot in data.get("lots") or []:
+        if not isinstance(lot, AuctionLot):
+            continue
+        if lot.status != "open" or not lot.can_bid or lot.is_leading:
+            continue
+        if rarities and lot.rarity not in rarities:
+            continue
+        if cfg.auction_require_no_leader and lot.leader_uid:
+            continue
+        left = seconds_left(lot, now_ts)
+        if left <= 0:
+            continue
+        if cfg.auction_snipe_seconds > 0 and left > cfg.auction_snipe_seconds:
+            continue
+        if bids.get(lot.id, 0) >= cfg.auction_max_bids_per_lot:
+            continue
+        gap = now_ts - _to_int(last_at.get(lot.id))
+        if last_at.get(lot.id) and gap < cfg.auction_min_gap:
+            continue
+        amount = next_bid_amount(lot, max_bid, cfg.auction_aggressive_steps)
+        if amount > cfg.auction_budget:
+            continue
+        debit = auction_debit(lot, amount)
+        if debit > balance:
+            continue
+        if cfg.auction_total_budget > 0:
+            used = sum(d.debit for d in decisions)
+            if used + debit > cfg.auction_total_budget:
+                continue
+        urgency = 0 if left <= 60 else 1
+        decisions.append(BidDecision(
+            lot_id=lot.id, amount=amount, debit=debit,
+            reason=(f"{lot.title}（{lot.rarity_label}）当前{lot.current_price}魔力，"
+                    f"距落槌{left}秒，领先者{lot.leader_name or '无'}，"
+                    f"出价{amount}（占用{debit}）"),
+            priority=urgency,
+        ))
+    decisions.sort(key=lambda d: (d.priority, -d.debit))
+    return decisions
+
+
+def auction_summary(board: Dict[str, Any]) -> str:
+    """给页面/日志看的一行拍卖摘要。"""
+    data = board if isinstance(board, dict) else {}
+    lots = [x for x in data.get("lots") or [] if isinstance(x, AuctionLot) and x.status == "open"]
+    if not lots:
+        return "暂无进行中的拍卖"
+    parts = []
+    for lot in lots[:6]:
+        lead = lot.leader_name or "无人"
+        parts.append(f"{lot.title}({lot.rarity_label}) {lot.current_price}魔力/领先:{lead}")
+    return "；".join(parts) + (f"…等{len(lots)}件" if len(lots) > 6 else "")

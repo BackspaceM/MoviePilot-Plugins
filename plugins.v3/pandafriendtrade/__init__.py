@@ -30,6 +30,7 @@ from . import core, renderer, site
 LOG_TAG = "[PandaFriendTrade] "
 _LAST_KEY = "panda_ft_last_v1"
 _PROBE_KEY = "panda_ft_probe_v1"
+_AUCTION_KEY = "panda_ft_auction_v1"
 _CMD_ACTION = "pandafriendtrade_run"
 _DEFAULT_CRON = "0 */6 * * *"
 
@@ -48,10 +49,11 @@ class PandaFriendTrade(_PluginBase):
     """熊猫PT 好友买卖规则自动化。"""
 
     plugin_name = "熊猫好友买卖"
-    plugin_desc = ("按你的规则自动完成熊猫PT好友买卖的重复操作：领收益/任务、佣人工作互动、"
-                   "事务所派遣结算、海报任务。默认试运行，买人/释放等不可逆动作需显式开启。")
+    plugin_desc = ("按你的规则自动完成熊猫PT好友买卖：领收益/任务、佣人工作互动、事务所派遣结算、"
+                   "海报任务，并支持海报拍卖监控与倒计时自动加价抢拍。默认试运行，"
+                   "出价/买人/释放等消耗或不可逆动作需显式开启。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pandafriendtrade.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_label = "熊猫PT,好友买卖,自动化,规则引擎"
@@ -71,6 +73,13 @@ class PandaFriendTrade(_PluginBase):
         self._cfg: core.Config = core.parse_config({})
         self._last: Dict[str, Any] = {}
         self._probe: Dict[str, Any] = {}
+        # 拍卖监控线程（独立停止信号，不与普通任务互相干扰）
+        self._auction_stop = threading.Event()
+        self._auction_thread: Optional[threading.Thread] = None
+        self._auction_running = False
+        self._auction_counts: Dict[int, int] = {}   # lot_id -> 本轮出价次数
+        self._auction_last_bid: Dict[int, int] = {}  # lot_id -> 上次出价时间戳
+        self._auction_state: Dict[str, Any] = {}   # 供页面展示，只读缓存
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -84,14 +93,21 @@ class PandaFriendTrade(_PluginBase):
         self._notify = self._cfg.notify
         self._last = dict(self.get_data(_LAST_KEY) or {})
         self._probe = dict(self.get_data(_PROBE_KEY) or {})
+        self._auction_state = dict(self.get_data(_AUCTION_KEY) or {})
         if self._enabled and not self._cfg.cookie:
             logger.warning(f"{LOG_TAG}尚未填写站点 Cookie，运行会失败")
+        # 配置重载后按开关决定是否常驻拍卖监控线程
+        if self._enabled and self._cfg.do_auction and self._cfg.cookie:
+            self._start_auction_monitor()
+        else:
+            self._stop_auction_monitor()
 
     def get_state(self) -> bool:
         return bool(self._enabled)
 
     def stop_service(self) -> None:
         self._stop_event.set()
+        self._stop_auction_monitor()
         remover = getattr(scheduler_sdk, "remove_plugin_once_job", None)
         if callable(remover):
             try:
@@ -123,6 +139,11 @@ class PandaFriendTrade(_PluginBase):
                                if self._probe else "还没检测过"),
                 "schedule_text": (f"计划任务 {_DEFAULT_CRON}" if self._cfg.enabled
                                   else "定时已禁用，用下方按钮手动运行"),
+                "auction": self._auction_state,
+                "auction_running": self._auction_running,
+                "auction_text": (f'{self._auction_state.get("checked_at", "")}　'
+                                 f'{self._auction_state.get("summary", "")}'
+                                 if self._auction_state else "还没检查过拍卖"),
             })
         except Exception as err:  # noqa: BLE001
             logger.error(f"{LOG_TAG}详情页渲染失败：{err}")
@@ -140,6 +161,14 @@ class PandaFriendTrade(_PluginBase):
              "auth": "bear", "summary": "读取最近一轮的计划明细"},
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询运行状态"},
+            {"path": "/auction_check", "endpoint": self.api_auction_check, "methods": ["POST"],
+             "auth": "bear", "summary": "检查一次拍卖报价（只读，看当前行情与决策）"},
+            {"path": "/auction_once", "endpoint": self.api_auction_once, "methods": ["POST"],
+             "auth": "bear", "summary": "按规则执行一次拍卖出价判断"},
+            {"path": "/auction_monitor", "endpoint": self.api_auction_monitor, "methods": ["POST"],
+             "auth": "bear", "summary": "启动/停止拍卖监控循环"},
+            {"path": "/auction_status", "endpoint": self.api_auction_status, "methods": ["GET"],
+             "auth": "bear", "summary": "查询拍卖监控状态与最近报价"},
         ]
 
     # ------------------------------------------------------------------ 按钮端点
@@ -185,6 +214,79 @@ class PandaFriendTrade(_PluginBase):
             return schemas.Response(success=True, message=text)
         except Exception as exc:  # noqa: BLE001
             return _api_fail("读取状态", exc)
+
+    # ------------------------------------------------------------------ 拍卖端点
+
+    def api_auction_check(self) -> schemas.Response:
+        """只读检查一次拍卖行情，输出报价与站点规则，不出价。"""
+        try:
+            if not self._cfg.cookie:
+                return schemas.Response(success=False, message="请先填写站点 Cookie")
+            result = self._auction_board_view()
+            if not result.ok:
+                return schemas.Response(success=False, message=result.message)
+            view = result.data
+            summary = core.auction_summary(view)
+            rules = view.get("rules") or {}
+            ext = rules.get("extension_seconds", 180)
+            maxext = rules.get("max_extension_seconds", 1800)
+            text = (f"余额 {view.get('balance')} 魔力｜{summary}。"
+                    f"规则：最后3分钟换领先者延长{ext}秒（最多{ext and maxext}秒）。")
+            return schemas.Response(success=True, message=text,
+                                    data={"lots": [x.as_dict() for x in view.get("lots", [])]})
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("检查拍卖", exc)
+
+    def api_auction_once(self) -> schemas.Response:
+        """按规则判断并（非试运行时）出价一次；试运行只列决策。"""
+        try:
+            if not self._cfg.cookie:
+                return schemas.Response(success=False, message="请先填写站点 Cookie")
+            result = self._auction_board_view()
+            if not result.ok:
+                return schemas.Response(success=False, message=result.message)
+            view = result.data
+            decisions = core.plan_auction(
+                self._cfg, view, now=core.time.time(),
+                bid_counts=self._auction_counts, last_bid_at=self._auction_last_bid,
+            )
+            if not decisions:
+                reason = ("自动出价未开启" if not self._cfg.auction_auto_bid
+                          else "当前没有符合规则的拍品（预算/稀有度/倒计时/已领先等条件未满足）")
+                return schemas.Response(success=True, message=reason)
+            lines = [d.reason for d in decisions]
+            if self._dry_run:
+                return schemas.Response(success=True,
+                                        message="试运行，未出价。计划：" + "；".join(lines))
+            done = self._apply_bid_decisions(view, decisions)
+            return schemas.Response(success=True,
+                                    message=f"本轮出价 {done}/{len(decisions)} 笔：" + "；".join(lines))
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("拍卖出价", exc)
+
+    def api_auction_monitor(self) -> schemas.Response:
+        """启动/停止监控循环：已运行则停止，否则启动。"""
+        try:
+            if not self._cfg.cookie:
+                return schemas.Response(success=False, message="请先填写站点 Cookie")
+            if self._auction_running:
+                self._stop_auction_monitor()
+                return schemas.Response(success=True, message="拍卖监控已停止")
+            self._start_auction_monitor()
+            return schemas.Response(success=True,
+                                    message=f"拍卖监控已启动，每 {self._cfg.auction_poll_seconds} 秒检查一次")
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("切换拍卖监控", exc)
+
+    def api_auction_status(self) -> schemas.Response:
+        try:
+            state = self._auction_state or {}
+            status = "运行中" if self._auction_running else "已停止"
+            text = (f"监控{status}｜每 {self._cfg.auction_poll_seconds} 秒｜"
+                    f'最近 {state.get("checked_at", "未检查")}｜{state.get("summary", "无行情")}')
+            return schemas.Response(success=True, message=text, data=state)
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("读取拍卖状态", exc)
 
     # ------------------------------------------------------------------ 运行入口
 
@@ -239,7 +341,136 @@ class PandaFriendTrade(_PluginBase):
 
     def _client(self) -> site.PandaClient:
         cfg = self._cfg
-        return site.PandaClient(cfg.cookie, cfg.site, cfg.timeout, cfg.request_interval)
+        return site.PandaClient(cfg.cookie, cfg.site, cfg.timeout, cfg.request_interval,
+                                proxy_url=cfg.proxy_url, proxy_bypass=cfg.proxy_bypass)
+
+    # ------------------------------------------------------------------ 拍卖内部
+
+    def _auction_board_view(self) -> site.Result:
+        """读拍卖看板并解析成视图，顺带记录快照供页面展示。"""
+        result = self._client().auction_board()
+        if not result.ok:
+            return result
+        view = core.parse_auction_board(result.data or {}, now=int(time.time()))
+        view["summary"] = core.auction_summary(view)
+        view["checked_at"] = _now()
+        return site.Result.success(view, result.message)
+
+    def _apply_bid_decisions(self, view: Dict[str, Any],
+                             decisions: List[core.BidDecision]) -> int:
+        """真正执行出价。逐笔校验：金额仍 ≥ 当前最低、预算内、未领先。"""
+        client = self._client()
+        viewer_uid = core._to_int((view.get("me") or {}).get("uid"))
+        # 看板未直接给 viewer uid，从首页 me 读一次；失败则用 0 让站点校验
+        if not viewer_uid:
+            home = client.home()
+            if home.ok and isinstance(home.data, dict):
+                viewer_uid = core._to_int((home.data.get("me") or {}).get("uid"))
+        lots = {lot.id: lot for lot in view.get("lots") or []
+                if isinstance(lot, core.AuctionLot)}
+        now = int(time.time())
+        done = 0
+        for d in decisions:
+            lot = lots.get(d.lot_id)
+            if not lot or lot.is_leading or d.amount < lot.minimum_bid:
+                logger.info(f"{LOG_TAG}拍卖跳过 lot {d.lot_id}：状态已变化")
+                continue
+            if d.amount > self._cfg.auction_budget:
+                continue
+            result = client.auction_bid(d.lot_id, d.amount, lot.rule_version, viewer_uid)
+            if result.ok:
+                done += 1
+                self._auction_counts[d.lot_id] = self._auction_counts.get(d.lot_id, 0) + 1
+                self._auction_last_bid[d.lot_id] = now
+                logger.info(f"{LOG_TAG}拍卖出价成功：{d.reason}｜{result.message}")
+            else:
+                logger.warning(f"{LOG_TAG}拍卖出价失败：{d.reason}｜{result.message}")
+        return done
+
+    def _start_auction_monitor(self) -> None:
+        """启动常驻监控线程；已运行则不重复启动。"""
+        with self._lock:
+            if self._auction_running and self._auction_thread and self._auction_thread.is_alive():
+                return
+            self._auction_stop.clear()
+            self._auction_running = True
+        self._auction_thread = threading.Thread(
+            target=self._auction_loop, daemon=True, name="PandaFriendTradeAuction")
+        self._auction_thread.start()
+        logger.info(f"{LOG_TAG}拍卖监控已启动，间隔 {self._cfg.auction_poll_seconds} 秒")
+
+    def _stop_auction_monitor(self) -> None:
+        self._auction_stop.set()
+        with self._lock:
+            self._auction_running = False
+
+    def _auction_loop(self) -> None:
+        """监控循环：绑定实例 → 每轮读看板、按规则出价、落状态。"""
+        restore = self._bind_instance()
+        try:
+            while not self._auction_stop.is_set():
+                try:
+                    view_result = self._auction_board_view()
+                    if not view_result.ok:
+                        logger.warning(f"{LOG_TAG}拍卖看板读取失败：{view_result.message}")
+                    else:
+                        view = view_result.data
+                        self._save_auction_state(view)
+                        decisions = core.plan_auction(
+                            self._cfg, view, now=int(time.time()),
+                            bid_counts=self._auction_counts,
+                            last_bid_at=self._auction_last_bid,
+                        )
+                        if decisions:
+                            if self._dry_run:
+                                logger.info(f"{LOG_TAG}[试运行]拍卖决策：" +
+                                            "；".join(d.reason for d in decisions))
+                            else:
+                                self._apply_bid_decisions(view, decisions)
+                except Exception as exc:  # noqa: BLE001 - 单轮异常不能终止循环
+                    logger.warning(f"{LOG_TAG}拍卖监控单轮异常：{type(exc).__name__}: {exc}")
+                # 用 wait 而非 sleep，停止信号能立刻生效
+                self._auction_stop.wait(max(1, self._cfg.auction_poll_seconds))
+        finally:
+            if callable(restore):
+                try:
+                    restore()
+                except Exception:  # noqa: BLE001
+                    pass
+            with self._lock:
+                self._auction_running = False
+
+    def _bind_instance(self) -> Any:
+        """尽力绑定插件实例，让实例级日志等级覆盖对自建线程生效。"""
+        try:
+            from app.runtime.log import bind_plugin_instance  # 旧版宿主可能没有
+            return bind_plugin_instance(self)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _save_auction_state(self, view: Dict[str, Any]) -> None:
+        """只把可序列化的摘要落盘，页面渲染期不联网。"""
+        lots = []
+        for lot in view.get("lots") or []:
+            if not isinstance(lot, core.AuctionLot):
+                continue
+            lots.append({
+                "id": lot.id, "title": lot.title, "rarity": lot.rarity,
+                "current_price": lot.current_price, "minimum_bid": lot.minimum_bid,
+                "leader": lot.leader_name, "my_rank": lot.my_bid_rank,
+                "ends_at": lot.ends_at, "status": lot.status,
+                "my_bids": self._auction_counts.get(lot.id, 0),
+            })
+        self._auction_state = {
+            "checked_at": view.get("checked_at") or _now(),
+            "summary": view.get("summary") or "",
+            "balance": view.get("balance"),
+            "lots": lots,
+        }
+        try:
+            self.save_data(_AUCTION_KEY, self._auction_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{LOG_TAG}保存拍卖状态失败：{exc}")
 
     def _execute(self, dry: bool) -> None:
         cfg = self._cfg

@@ -34,7 +34,26 @@ def _alert(text: str, kind: str = "info") -> dict:
     return _row({
         "component": "VCol",
         "props": {"cols": 12},
-        "content": [{"component": "VAlert", "props": {"type": kind, "variant": "tonal"}, "text": text}],
+        "content": [{"component": "VAlert", "props": {"type": kind, "variant": "tonal", "density": "compact"}, "text": text}],
+    })
+
+
+def _section(title: str, subtitle: str) -> dict:
+    """醒目的分区标题条，让长配置页一眼能定位。"""
+    return _row({
+        "component": "VCol",
+        "props": {"cols": 12},
+        "content": [{
+            "component": "div",
+            "props": {"class": "pf-form-sec", "style": "margin:14px 0 6px;padding:10px 14px;border-radius:10px;"
+                      "background:linear-gradient(135deg,#eef2ff,#f5f3ff);border-left:4px solid #6366f1"},
+            "content": [
+                {"component": "div", "props": {"style": "font-weight:700;font-size:15px;color:#3730a3"},
+                 "text": f"{title}"},
+                {"component": "div", "props": {"style": "font-size:12px;color:#6b7280;margin-top:2px"},
+                 "text": subtitle},
+            ],
+        }],
     })
 
 
@@ -44,6 +63,8 @@ DEFAULTS: dict[str, Any] = {
     "notify": False,
     "cookie": "",
     "site": core.DEFAULT_SITE,
+    "proxy_url": "",
+    "proxy_bypass": True,
     "timeout": 30,
     "request_interval": 1.5,
     "max_actions": 60,
@@ -72,38 +93,94 @@ DEFAULTS: dict[str, Any] = {
     "reserved_uids": "",
     "poster_gift_recipients": "",
     "poster_auto_redeem": False,
+    "do_auction": False,
+    "auction_auto_bid": False,
+    "auction_budget": 0,
+    "auction_total_budget": 0,
+    "auction_snipe_seconds": 60,
+    "auction_rarities": "",
+    "auction_max_bids_per_lot": 3,
+    "auction_min_gap": 60,
+    "auction_require_no_leader": False,
+    "auction_aggressive_steps": 0,
+    "auction_poll_seconds": 15,
 }
 
 
 def form() -> tuple[list[dict], dict[str, Any]]:
-    """配置页：分组清晰，默认只开零风险项。"""
+    """配置页：分区清晰、敏感/高风险一眼可辨；默认只开零风险项。"""
     content = [
         _alert(
-            "把熊猫PT「好友买卖」的重复操作按你的规则自动化。所有动作分为安全（领取/结算）、"
-            "消耗魔力、不可逆（买卖/释放）三类；不可逆动作必须自己显式打开，默认全关。"
-            "强烈建议先保持「试运行」开启，看一遍日志确认计划无误再关掉。",
+            "把熊猫PT「好友买卖」的重复操作按你的规则自动化。动作分三档：安全（领取/结算）、"
+            "消耗魔力（互动/保护/拍卖）、不可逆（买卖/释放/赠送）。不可逆默认全关。"
+            "建议先保持「试运行」，去日志确认计划再正式执行。",
             "warning",
         ),
         _row(
             _field("VSwitch", "enabled", "启用插件", 4),
-            _field("VSwitch", "dry_run", "试运行（只统计不执行）", 4,
+            _field("VSwitch", "dry_run", "试运行（只出计划不执行）", 4,
                    hint="开启时只产出计划写日志，不真正点按钮；确认无误再关掉", persistentHint=True),
             _field("VSwitch", "notify", "发送通知", 4),
         ),
-        _alert("① 登录：Cookie 只保存在本机插件配置里，绝不写进代码或日志。失效后到站点重新复制一整串填进来。", "info"),
+
+        _section("① 登录与网络", "Cookie 只存本机；代理按需开启，SOCKS 需容器装 PySocks"),
         _row(
-            _field("VTextField", "site", "站点地址", 4, placeholder=core.DEFAULT_SITE),
-            _field("VTextField", "timeout", "请求超时(秒)", 2),
-            _field("VTextField", "request_interval", "请求间隔(秒)", 2,
-                   hint="别调太小，避免触发站点风控", persistentHint=True),
-            _field("VTextField", "max_actions", "每轮动作上限", 4),
+            _field("VTextField", "site", "站点地址", 6, placeholder=core.DEFAULT_SITE),
+            _field("VTextField", "timeout", "请求超时(秒)", 3),
+            _field("VTextField", "max_actions", "每轮动作上限", 3),
+        ),
+        _row(
+            _field("VTextField", "proxy_url", "代理地址（可选）", 8,
+                   placeholder="http://host:port 或 socks5://user:pass@host:port",
+                   hint="留空=直连；支持 http/https/socks5", persistentHint=True),
+            _field("VSwitch", "proxy_bypass", "代理失败时降级直连", 4),
         ),
         _row(
             _field("VTextarea", "cookie", "站点 Cookie", 12, rows=3,
                    placeholder="c_secure_uid=...; c_secure_pass=...; ...",
-                   hint="从浏览器开发者工具复制完整 Cookie，包含所有 c_secure_* 项", persistentHint=True),
+                   hint="浏览器开发者工具复制完整 Cookie，含所有 c_secure_* 项", persistentHint=True),
         ),
-        _alert("② 零风险项（默认可开）：领取挂机收益、领成长任务奖励、结算已完成委托。这些不花魔力、不可逆交易。", "success"),
+        _alert("请求间隔在下方「高级」里调，默认 1.5 秒，别调太小以免触发站点风控。", "info"),
+
+        _section("② 海报拍卖（重点）", "监控报价 · 倒计时抢拍 · 自动加价；最后 3 分钟换领先者会延长至 3 分钟",
+                 ),
+        _alert(
+            "站点是「暗拍」：填的是你的最终出价，站点已算好最低有效价 minimum_bid（含领先者+一档增量），"
+            "插件默认按这个价出，不会重复加价。出价后不可撤销；未中标本金全退、手续费不退。"
+            "最后 3 分钟换领先者会把截止延长到 3 分钟（最多延长 30 分钟），所以进入窗口后可持续跟价。",
+            "warning",
+        ),
+        _row(
+            _field("VSwitch", "do_auction", "开启拍卖监控", 4,
+                   hint="关闭则完全不碰拍卖；开启后按下面规则决定是否出价", persistentHint=True),
+            _field("VSwitch", "auction_auto_bid", "自动出价抢海报", 4,
+                   hint="关掉则只监控记录报价、不出价", persistentHint=True),
+            _field("VSwitch", "auction_require_no_leader", "只抢无人出价的拍品", 4,
+                   hint="开启后不与已有领先者竞价，更省钱", persistentHint=True),
+        ),
+        _row(
+            _field("VTextField", "auction_budget", "单品出价上限(魔力)", 4,
+                   hint="0=不出价；超过此价的拍品跳过", persistentHint=True),
+            _field("VTextField", "auction_total_budget", "本轮总占用上限(魔力)", 4,
+                   hint="0=不限；累计实际占用超过就停", persistentHint=True),
+            _field("VTextField", "auction_snipe_seconds", "抢拍窗口(秒)", 4,
+                   hint="距落槌≤N秒才出价；0=一发现就抢。设 60 适合最后1分钟跟价", persistentHint=True),
+        ),
+        _row(
+            _field("VTextField", "auction_rarities", "只抢稀有度（留空=全部）", 6,
+                   placeholder="rare, precious, legendary",
+                   hint="可选 normal/excellent/rare/precious/legendary，逗号分隔", persistentHint=True),
+            _field("VTextField", "auction_aggressive_steps", "额外加价档数(0=最低价)", 6,
+                   hint="0=按站点最低有效价；每加1档多出一个增量，更激进也更费魔力", persistentHint=True),
+        ),
+        _row(
+            _field("VTextField", "auction_max_bids_per_lot", "单品最多加价次数", 4),
+            _field("VTextField", "auction_min_gap", "两次加价最小间隔(秒)", 4),
+            _field("VTextField", "auction_poll_seconds", "监控轮询间隔(秒)", 4,
+                   hint="要抢最后3分钟的延长，建议 ≤20 秒", persistentHint=True),
+        ),
+
+        _section("③ 零风险领取", "不花魔力、无交易；默认开启"),
         _row(
             _field("VSwitch", "do_income", "领取挂机收益", 4),
             _field("VSwitch", "do_tasks", "领成长任务奖励", 4),
@@ -113,7 +190,8 @@ def form() -> tuple[list[dict], dict[str, Any]]:
             _field("VSwitch", "do_achievements", "领成就奖励", 6),
             _field("VSwitch", "do_level_posters", "领等级海报", 6),
         ),
-        _alert("③ 佣人互动 / 工作：工作不花魔力；互动可选免费或付费，付费上限由你设定。", "info"),
+
+        _section("④ 佣人工作与互动", "工作不花魔力；互动可选免费或设预算"),
         _row(
             _field("VSwitch", "do_work", "自动安排工作", 3),
             _field("VSelect", "work_policy", "工作策略", 3,
@@ -130,12 +208,13 @@ def form() -> tuple[list[dict], dict[str, Any]]:
         ),
         _row(
             _field("VTextField", "interact_budget", "单次互动魔力上限", 4,
-                   hint="仅在「设定上限」模式生效；付费项：投喂100/小奖励300/深入交流1000", persistentHint=True),
+                   hint="仅「设定上限」生效；投喂100/小奖励300/深入交流1000", persistentHint=True),
             _field("VSwitch", "do_initiative", "自动主动互动(我作为佣人)", 4),
             _field("VTextarea", "reserved_uids", "保留佣人 UID（不参与任何自动操作）", 4, rows=2,
                    placeholder="12349, 107691", hint="逗号/空格/换行分隔", persistentHint=True),
         ),
-        _alert("④ 事务所：站点已内置自动派遣时插件不会重复派单，只做结算；想让插件全权派遣请先到站点关掉原生助手。", "info"),
+
+        _section("⑤ 事务所", "站点已开原生自动派遣时不重复派单，只结算"),
         _row(
             _field("VSwitch", "do_commission", "自动派出委托", 6,
                    hint="站点原生自动派遣开着时自动跳过派出", persistentHint=True),
@@ -144,7 +223,8 @@ def form() -> tuple[list[dict], dict[str, Any]]:
                           {"title": "魔力优先", "value": "magic"},
                           {"title": "海报优先", "value": "posters"}]),
         ),
-        _alert("⑤ 海报（电影图鉴）：领典藏任务奖励不花魔力；赠送不可逆、兑换按站点规则，默认关闭。", "info"),
+
+        _section("⑥ 海报其它", "典藏任务 / 兑换 / 赠送；赠送不可逆，默认关"),
         _row(
             _field("VSwitch", "do_posters", "自动领海报任务奖励", 4),
             _field("VSwitch", "poster_auto_redeem", "检查并兑换典藏册", 4),
@@ -152,7 +232,8 @@ def form() -> tuple[list[dict], dict[str, Any]]:
                    placeholder="只送给这些 UID，留空则不赠送",
                    hint="赠送不可逆，留空最安全", persistentHint=True),
         ),
-        _alert("⑥ 消耗 / 不可逆：默认全关。打开前请想清楚——买人会真实花魔力，释放佣人不可撤回。", "error"),
+
+        _section("⑦ 消耗与不可逆（谨慎）", "默认全关；买人会真花魔力，释放不可撤回", ),
         _row(
             _field("VSwitch", "do_protect", "自动买保护(消耗魔力)", 3),
             _field("VTextField", "protect_minutes", "保护剩余阈值(分钟)", 3),
@@ -161,15 +242,16 @@ def form() -> tuple[list[dict], dict[str, Any]]:
         ),
         _row(
             _field("VTextField", "buy_max_price", "买人价格上限(魔力)", 4,
-                   hint="0 = 不买；只有详情实时价格在上限内才会买", persistentHint=True),
+                   hint="0=不买；只有详情实时价在上限内才买", persistentHint=True),
             _field("VTextField", "buy_min_overall", "买人属性均值下限", 4,
-                   hint="0 = 不限；过滤低属性佣人", persistentHint=True),
+                   hint="0=不限；过滤低属性佣人", persistentHint=True),
             _field("VSwitch", "do_release", "启用释放(不可逆)", 4),
         ),
         _row(
             _field("VSwitch", "release_temporary", "自动释放临时佣人", 12,
                    hint="需同时打开「启用释放」；临时佣人到期会被释放，不可撤回", persistentHint=True),
         ),
+
         _alert("所有动作都会先产出计划并写进插件日志（卡片右上角「…」→ 查看日志）。试运行时只记录不执行。", "info"),
     ]
     return content, dict(DEFAULTS)
@@ -228,6 +310,10 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         _button("检测 Cookie", "probe", "post", "mdi-account-check"),
         _button("查看最近计划", "preview", "post", "mdi-text-search"),
         _button("刷新状态", "status", "get", "mdi-refresh"),
+        _button("检查拍卖行情", "auction_check", "post", "mdi-camera-iris"),
+        _button("立即判断出价", "auction_once", "post", "mdi-gavel", "warning"),
+        _button("启动/停止抢拍", "auction_monitor", "post", "mdi-fast-forward", "primary"),
+        _button("拍卖状态", "auction_status", "get", "mdi-pulse"),
     ]
 
     badge = '<span class="pf-badge on">正在运行</span>' if running else '<span class="pf-badge">空闲</span>'
@@ -253,6 +339,36 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         items = "".join(f"<li>{_e(x)}</li>" for x in previews[:20])
         preview_html = f'<div class="pf-sec">最近计划明细（最多 20 条）</div><div class="pf-note"><ul>{items}</ul></div>'
 
+    # 拍卖行情区（只读缓存，渲染期不联网）
+    auction = data.get("auction") if isinstance(data.get("auction"), dict) else {}
+    auction_on = bool(data.get("auction_running"))
+    a_badge = '<span class="pf-badge on">抢拍监控中</span>' if auction_on else '<span class="pf-badge">监控未启动</span>'
+    a_lots = auction.get("lots") or []
+    a_rows = ""
+    for lot in a_lots[:8]:
+        if not isinstance(lot, dict):
+            continue
+        rank = lot.get("my_rank") or 0
+        rank_text = ("我领先" if rank == 1 else f"我第{rank}名") if rank else "未参与"
+        a_rows += (
+            f'<div class="pf-line"><span class="pf-line-v">'
+            f'{_e(lot.get("title"))} <small>[{_e(lot.get("rarity"))}]</small></span>'
+            f'<span class="pf-line-k">现价 {_e(lot.get("current_price"))} · '
+            f'最低 {_e(lot.get("minimum_bid"))} · {rank_text}</span></div>'
+        )
+    auction_html = (
+        '<div class="pf-sec">海报拍卖' + a_badge + '</div>'
+        + '<div class="pf-card">'
+        + f'<div class="pf-line"><span class="pf-line-k">最近行情</span>'
+        + f'<span class="pf-line-v">{_e(data.get("auction_text") or "还没检查过")}</span></div>'
+        + f'<div class="pf-line"><span class="pf-line-k">当前余额</span>'
+        + f'<span class="pf-line-v">{_e(auction.get("balance", "—"))} 魔力</span></div>'
+        + a_rows
+        + '</div>'
+        + '<div class="pf-note">站点为暗拍：填最终出价，站点已算好最低有效价；最后 3 分钟换领先者会延长至 3 分钟。'
+        + '「检查拍卖行情」只读不出价；要自动抢拍请开启监控循环，出价前确认预算与稀有度规则。</div>'
+    )
+
     card = (
         '<div class="pf">' + _STYLE
         + '<div class="pf-head"><span class="pf-logo">🐼</span><span>'
@@ -264,6 +380,7 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + '<div class="pf-sec">运行状态</div>'
         + f'<div class="pf-card">{lines}</div>'
         + preview_html
+        + auction_html
         + '<div class="pf-sec">安全说明</div>'
         + '<div class="pf-note">不可逆动作（买入/抢人/追回/释放）默认全关，必须自己显式打开并设置价格与属性门槛。'
         + '站点已开启原生自动派遣时，插件不会重复派单，只结算已完成的委托。'

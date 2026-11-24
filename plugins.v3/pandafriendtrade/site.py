@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from . import core
 
@@ -44,13 +44,71 @@ class PandaClient:
           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
     def __init__(self, cookie: str, site: str = core.DEFAULT_SITE, timeout: int = 30,
-                 interval: float = 1.0, opener: Any = None) -> None:
+                 interval: float = 1.0, opener: Any = None, proxy_url: str = "",
+                 proxy_bypass: bool = False) -> None:
         self.cookie = str(cookie or "").strip()
         self.site = core.normalize_site(site)
         self.timeout = max(5, min(120, int(timeout)))
         self.interval = max(0.0, min(10.0, float(interval)))
         self._opener = opener  # 便于测试注入
         self._last_request = 0.0
+        self.proxy_url = core.normalize_proxy(proxy_url)
+        self.proxy_bypass = bool(proxy_bypass)
+        self.proxy_error = ""
+        self._proxy_opener = None
+        self._direct_opener = None
+        if self.proxy_url and opener is None:
+            self._build_proxy_opener()
+
+    def _build_proxy_opener(self) -> None:
+        """构造带代理的 opener；SOCKS 需要 PySocks，缺失时记录错误并走直连。"""
+        url = self.proxy_url
+        try:
+            from urllib.request import ProxyHandler, build_opener
+            if url.startswith("socks5"):
+                try:
+                    from sockshandler import SocksiPyHandler  # type: ignore  # PySocks
+                    import socks  # type: ignore
+                except ImportError:
+                    self.proxy_error = "SOCKS 代理需要容器安装 PySocks，已临时直连"
+                    return
+                host, port = self._proxy_host_port(url)
+                if not host:
+                    self.proxy_error = "代理地址格式无效，已临时直连"
+                    return
+                from urllib.parse import urlparse, unquote
+                parsed = urlparse(url)
+                username = unquote(parsed.username or "")
+                password = unquote(parsed.password or "")
+                proxy_type = socks.SOCKS5
+                handler = SocksiPyHandler(proxy_type, host, port,
+                                          username=username or None, password=password or None)
+                self._proxy_opener = build_opener(handler)
+            else:
+                handler = ProxyHandler({"http": url, "https": url})
+                self._proxy_opener = build_opener(handler)
+        except Exception as exc:  # noqa: BLE001
+            self.proxy_error = f"代理配置失败（{type(exc).__name__}），已临时直连"
+
+    @staticmethod
+    def _proxy_host_port(url: str) -> Tuple[str, int]:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return parsed.hostname or "", int(parsed.port or 1080)
+        except Exception:
+            return "", 0
+
+    @property
+    def using_proxy(self) -> bool:
+        return bool(self.proxy_url and not self.proxy_error and self._proxy_opener is not None)
+
+    def _get_opener(self) -> Any:
+        if self._opener is not None:
+            return self._opener
+        if self.using_proxy:
+            return self._proxy_opener
+        return self._direct_opener or urllib.request.build_opener()
 
     @property
     def ajax_url(self) -> str:
@@ -83,15 +141,24 @@ class PandaClient:
 
         self._throttle()
         self._last_request = time.monotonic()
+        req = urllib.request.Request(self.ajax_url, data=body, headers=headers, method="POST")
         try:
-            req = urllib.request.Request(self.ajax_url, data=body, headers=headers, method="POST")
-            opener = self._opener or urllib.request.build_opener()
-            with opener.open(req, timeout=self.timeout) as response:
+            with self._get_opener().open(req, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8", "ignore")
         except urllib.error.HTTPError as exc:
             return Result.fail(f"HTTP {exc.code}")
         except Exception as exc:  # noqa: BLE001 - 网络异常统一兜底
-            return Result.fail(f"{type(exc).__name__}: {exc}")
+            # 代理失败时可降级直连一次（仅网络层错误，HTTP 业务错误不重试）
+            if self.using_proxy and self.proxy_bypass:
+                self.proxy_error = f"代理不可用（{type(exc).__name__}），已降级直连"
+                try:
+                    with (self._direct_opener or urllib.request.build_opener()).open(
+                            req, timeout=self.timeout) as response:
+                        raw = response.read().decode("utf-8", "ignore")
+                except Exception as exc2:  # noqa: BLE001
+                    return Result.fail(f"代理与直连均失败：{type(exc2).__name__}: {exc2}")
+            else:
+                return Result.fail(f"{type(exc).__name__}: {exc}")
 
         try:
             parsed = json.loads(raw)
@@ -132,6 +199,25 @@ class PandaClient:
 
     def screening_home(self) -> Result:
         return self.post("friendTradeScreeningHome")
+
+    # ------------------------------------------------------------ 海报拍卖 / 寄售
+    def auction_board(self) -> Result:
+        return self.post("friendTradePosterAuctionBoard")
+
+    def auction_bids(self, auction_id: int, before_id: int = 0, page_size: int = 10) -> Result:
+        return self.post("friendTradePosterAuctionBids",
+                         {"auction_id": auction_id, "before_id": before_id, "page_size": page_size})
+
+    def auction_history(self, before_id: int = 0, page_size: int = 10) -> Result:
+        return self.post("friendTradePosterAuctionHistory",
+                         {"before_id": before_id, "page_size": page_size})
+
+    def consignment_board(self, viewer_uid: int, scope: str = "market") -> Result:
+        return self.post("friendTradePosterConsignmentBoard",
+                         {"expected_uid": viewer_uid, "scope": scope})
+
+    def consignment_recent_prices(self, viewer_uid: int) -> Result:
+        return self.post("friendTradePosterConsignmentRecentPrices", {"expected_uid": viewer_uid})
 
     # ------------------------------------------------------------ 写接口
     @staticmethod
@@ -227,6 +313,53 @@ class PandaClient:
             "events_json": events_json,
             "answer_json": answer_json,
         })
+
+    def auction_bid(self, auction_id: int, amount: int, rule_version: str,
+                    viewer_uid: int) -> Result:
+        """拍品出价：暗拍最终价，带 UUID 防重放 + 规则版本 + 账号校验。"""
+        return self.post("friendTradePosterAuctionBid", {
+            "auction_id": auction_id,
+            "amount": int(amount),
+            "request_uuid": self.new_uuid(),
+            "expected_rule_version": rule_version,
+            "expected_uid": viewer_uid,
+        })
+
+    def dutch_buy(self, auction_id: int, max_price: Any, rule_version: str,
+                  viewer_uid: int) -> Result:
+        """荷兰式降价买：按当前价成交。"""
+        return self.post("friendTradePosterDutchBuy", {
+            "expected_uid": viewer_uid,
+            "auction_id": auction_id,
+            "max_price": str(max_price),
+            "request_uuid": self.new_uuid(),
+            "expected_rule_version": rule_version,
+        })
+
+    def consignment_create(self, viewer_uid: int, poster_id: int, starting_price: int,
+                           duration_hours: int, fee_bps: int = 0, listing_fee_bps: int = 0,
+                           mode: str = "auction", floor_price: int = 0,
+                           drop_interval: int = 0, drop_amount: int = 0) -> Result:
+        """个人海报寄售上架。"""
+        payload: Dict[str, Any] = {
+            "expected_uid": viewer_uid,
+            "poster_id": poster_id,
+            "starting_price": starting_price,
+            "duration_hours": duration_hours,
+            "expected_seller_fee_bps": fee_bps,
+            "expected_listing_fee_bps": listing_fee_bps,
+            "request_uuid": self.new_uuid(),
+        }
+        if mode == "dutch":
+            payload["mode"] = "dutch"
+            payload["floor_price"] = floor_price
+            payload["drop_interval_seconds"] = drop_interval
+            payload["drop_amount"] = drop_amount
+        return self.post("friendTradePosterConsignmentCreate", payload)
+
+    def consignment_cancel(self, viewer_uid: int, auction_id: int) -> Result:
+        return self.post("friendTradePosterConsignmentCancel",
+                         {"expected_uid": viewer_uid, "auction_id": auction_id})
 
 
 def probe(cookie: str, site: str = core.DEFAULT_SITE, timeout: int = 20) -> Result:

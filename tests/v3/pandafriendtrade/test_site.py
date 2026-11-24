@@ -136,6 +136,46 @@ class TestClient(unittest.TestCase):
             self.assertTrue(r.ok, expected)
             self.assertIn(f"action={expected}", op.last_req.data.decode())
 
+    def test_proxy_config_http(self):
+        c = site.PandaClient("cookie", interval=0, proxy_url="http://127.0.0.1:7890")
+        self.assertTrue(c.using_proxy)
+        self.assertEqual(c.proxy_url, "http://127.0.0.1:7890")
+
+    def test_proxy_config_socks_without_pysocks(self):
+        c = site.PandaClient("cookie", interval=0, proxy_url="socks5://1.2.3.4:1080")
+        # 没有 PySocks 时记录提示且不冒充在用代理
+        if c.proxy_error:
+            self.assertFalse(c.using_proxy)
+            self.assertIn("PySocks", c.proxy_error)
+
+    def test_no_proxy_by_default(self):
+        c = site.PandaClient("cookie", interval=0)
+        self.assertFalse(c.using_proxy)
+
+    def test_auction_and_consignment_actions(self):
+        cases = [
+            (lambda c: c.auction_bid(1, 2000, "poster_auction_v3_normal", 10061),
+             "friendTradePosterAuctionBid"),
+            (lambda c: c.dutch_buy(2, 5000, "poster_auction_v3_normal", 10061),
+             "friendTradePosterDutchBuy"),
+            (lambda c: c.auction_board(), "friendTradePosterAuctionBoard"),
+            (lambda c: c.auction_bids(3), "friendTradePosterAuctionBids"),
+            (lambda c: c.consignment_board(10061), "friendTradePosterConsignmentBoard"),
+            (lambda c: c.consignment_cancel(10061, 4), "friendTradePosterConsignmentCancel"),
+        ]
+        for call, expected in cases:
+            op = FakeOpener(data={})
+            r = call(site.PandaClient("cookie", interval=0, opener=op))
+            self.assertTrue(r.ok, expected)
+            self.assertIn(f"action={expected}", op.last_req.data.decode())
+
+    def test_auction_bid_payload_fields(self):
+        op = FakeOpener(data={})
+        site.PandaClient("cookie", interval=0, opener=op).auction_bid(7, 8888, "v3", 10061)
+        body = op.last_req.data.decode()
+        for key in ("auction_id", "amount", "request_uuid", "expected_rule_version", "expected_uid"):
+            self.assertIn(f"params%5B{key}%5D", body)
+
     def test_trade_rejects_unknown_action(self):
         c = site.PandaClient("cookie", interval=0, opener=FakeOpener())
         self.assertFalse(c.trade("friendTradeHack", 1, "1").ok)
