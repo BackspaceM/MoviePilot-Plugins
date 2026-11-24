@@ -405,5 +405,107 @@ class TestConsignment(unittest.TestCase):
         self.assertEqual([d.lot_id for d in acts2], [2])
 
 
+class TestUnifiedSnipe(unittest.TestCase):
+    """v1.3.0：拍卖行+寄售场合并为一个低价抢购项目。"""
+
+    def _lot(self, lid, title, rarity, price, mode="open", owned=0, is_mine=False,
+             leading=False, min_bid=None):
+        return auction_core.AuctionLot(
+            id=lid, poster_id=1000 + lid, title=title, rarity=rarity, status="open",
+            can_bid=True, starting_price=price,
+            minimum_bid=min_bid if min_bid is not None else price,
+            current_price=price, min_increment=200, highest_bid=price, bidder_count=0,
+            ends_at=99999, hard_ends_at=999999, rule_version="v3", bid_fee_bps=0,
+            leader_uid=9 if leading else 0, leader_name="other" if leading else "",
+            my_bid_amount=0, my_bid_rank=1 if leading else 0, my_fee_total=0.0,
+            owned_quantity=owned, mode=mode, is_mine=is_mine, can_buy=True)
+
+    def test_task_options_from_page(self):
+        board = {"tasks": [
+            {"key": "normal_collection_once", "title": "普通海报集合", "group": "once", "status": "claimable"},
+            {"key": "animation_night_repeat", "title": "动画电影之夜", "group": "theme_repeat", "status": "claimable"},
+            {"key": "growth_journey_repeat", "title": "心灵成长之旅", "group": "theme_repeat", "status": "in_progress"},
+        ]}
+        items = auction_core.parse_task_options(board)
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0], {"title": "【一次性典藏】普通海报集合", "value": "normal_collection_once"})
+        self.assertEqual(items[1], {"title": "【主题片单交付】动画电影之夜", "value": "animation_night_repeat"})
+
+    def test_task_options_fallback(self):
+        items = auction_core.parse_task_options(None)
+        titles = [x["title"] for x in items]
+        self.assertIn("【一次性典藏】完全图鉴", titles)
+        self.assertIn("【主题片单交付】心灵成长之旅", titles)
+
+    def test_claim_by_task_keys(self):
+        board = {"tasks": [
+            {"key": "normal_collection_once", "title": "普通海报集合", "status": "claimable"},
+            {"key": "animation_night_repeat", "title": "动画电影之夜", "status": "claimable"},
+            {"key": "growth_journey_repeat", "title": "心灵成长之旅", "status": "claimable"},
+        ]}
+        self.assertEqual(auction_core.claimable_posters_by_tasks(board, ("animation_night_repeat",)),
+                         ["animation_night_repeat"])
+        self.assertEqual(len(auction_core.claimable_posters_by_tasks(board, ())), 3)
+
+    def test_snipe_low_price_first_across_markets(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True, "poster_snipe_max_price": 9000,
+            "poster_snipe_unowned_only": True,
+        })
+        a_view = {"enabled": True, "balance": 100000, "lots": [
+            self._lot(1, "贵拍卖", "rare", 8000, min_bid=8100),
+            self._lot(2, "便宜拍卖", "normal", 2000, min_bid=2100),
+        ]}
+        c_view = {"enabled": True, "balance": 100000, "lots": [
+            self._lot(3, "便宜寄售", "normal", 1000, mode="dutch"),
+        ]}
+        decisions = auction_core.plan_snipe(cfg, a_view, c_view, now=100)
+        self.assertEqual([d.lot_id for d in decisions], [3, 2, 1])  # 价格 1000/2100/8100 升序
+        self.assertEqual(decisions[0].action_kind, "dutch_buy")
+        self.assertEqual(decisions[0].source, "寄售场")
+        self.assertEqual(decisions[1].action_kind, "bid")
+
+    def test_snipe_respects_rarity_owner_and_budget(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True, "poster_snipe_max_price": 5000,
+            "poster_snipe_rarities": "normal,rare",
+        })
+        a_view = {"enabled": True, "balance": 100000, "lots": [
+            self._lot(1, "传说超预算", "legendary", 100000, mode="dutch"),
+            self._lot(2, "普通", "normal", 2000, mode="dutch"),
+            self._lot(3, "已有", "normal", 3000, mode="dutch", owned=1),
+            self._lot(4, "我的", "normal", 1000, mode="dutch", is_mine=True),
+            self._lot(5, "领先中", "rare", 4000, min_bid=4500, leading=True),
+        ]}
+        decisions = auction_core.plan_snipe(cfg, a_view, None, now=100)
+        self.assertEqual([d.lot_id for d in decisions], [2])
+
+    def test_snipe_disabled_by_default(self):
+        cfg = auction_core.parse_config({})
+        self.assertFalse(cfg.do_poster_snipe)
+        self.assertEqual(auction_core.plan_snipe(cfg, {}, {}), [])
+
+    def test_new_config_backward_compat(self):
+        cfg = auction_core.parse_config({"do_auction": True, "auction_budget": 7000,
+                                         "auction_rarities": "rare"})
+        self.assertTrue(cfg.do_poster_snipe)
+        self.assertEqual(cfg.poster_snipe_max_price, 7000)
+        self.assertEqual(cfg.poster_snipe_rarities, ("rare",))
+
+    def test_consignment_page_size_is_site_valid(self):
+        import importlib
+        site_mod = importlib.import_module("pandafriendtrade.site")
+        import inspect
+        sig = inspect.signature(site_mod.PandaClient.consignment_board)
+        self.assertEqual(sig.parameters["page_size"].default, 9)
+
+    def test_snipe_summary(self):
+        a = {"lots": [self._lot(1, "甲", "normal", 5000)]}
+        c = {"lots": [self._lot(2, "乙", "rare", 9000)]}
+        text = auction_core.snipe_summary(a, c)
+        self.assertIn("最低5000", text)
+        self.assertIn("最低9000", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

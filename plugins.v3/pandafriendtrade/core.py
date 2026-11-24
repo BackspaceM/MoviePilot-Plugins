@@ -138,6 +138,14 @@ class Config:
     # 海报奖励领取档位（囤魔力领完全图鉴）
     poster_claim_rarities: Tuple[str, ...] = ()  # 只领这些档位的任务奖励，空=全部可领
 
+    # ---- 合并后的「海报低价抢购」：拍卖行 + 寄售场归为一个项目 ----
+    do_poster_snipe: bool = False            # 总开关；缺省兼容旧 do_auction/do_consignment
+    poster_snipe_max_price: int = 0          # 单件价格上限(魔力)，0=不买
+    poster_snipe_rarities: Tuple[str, ...] = ()  # 稀有度白名单，空=不限
+    poster_snipe_unowned_only: bool = True   # 只抢未拥有
+    poster_snipe_poll_seconds: int = 15      # 统一轮询间隔
+    poster_claim_tasks: Tuple[str, ...] = ()  # 领奖档位多选（站点 task_key），空=全部可领
+
     @property
     def interact_cost_limit(self) -> int:
         """本次运行可用的单动作互动预算。"""
@@ -189,6 +197,15 @@ def parse_int_list(value: Any) -> Tuple[int, ...]:
 def normalize_site(value: Any) -> str:
     site = str(value or DEFAULT_SITE).strip().rstrip("/")
     return site if site.startswith("http") else DEFAULT_SITE
+
+
+def parse_str_list(value: Any) -> Tuple[str, ...]:
+    """解析逗号/空格分隔的字符串或列表，保序去重、不做白名单过滤。"""
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(x).strip() for x in value]
+    else:
+        parts = [x.strip() for x in re.split(r"[,，;；\s]+", str(value or ""))]
+    return tuple(x for x in dict.fromkeys(parts) if x)
 
 
 def parse_choices(value: Any, allowed: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -285,6 +302,22 @@ def parse_config(raw: Dict[str, Any]) -> Config:
             raw.get("consignment_modes", "open,dutch"), ("open", "sealed", "dutch"))),
         poster_claim_rarities=parse_choices(raw.get("poster_claim_rarities"),
                                             ("normal", "excellent", "rare", "precious", "legendary")),
+        # 合并项目：新字段优先，缺省回退到旧字段，保证老配置升级后行为不变
+        do_poster_snipe=parse_bool(
+            raw.get("do_poster_snipe"),
+            parse_bool(raw.get("do_auction")) or parse_bool(raw.get("do_consignment"))),
+        poster_snipe_max_price=max(0, _to_int(
+            raw.get("poster_snipe_max_price"),
+            max(_to_int(raw.get("auction_budget")), _to_int(raw.get("consignment_budget"))))),
+        poster_snipe_rarities=(parse_str_list(raw.get("poster_snipe_rarities"))
+                               or parse_str_list(raw.get("auction_rarities"))
+                               or parse_str_list(raw.get("consignment_rarities"))),
+        poster_snipe_unowned_only=parse_bool(raw.get("poster_snipe_unowned_only"), True),
+        poster_snipe_poll_seconds=max(3, min(300, _to_int(
+            raw.get("poster_snipe_poll_seconds"), _to_int(raw.get("auction_poll_seconds"), 15)))),
+        poster_claim_tasks=tuple(str(x).strip() for x in
+                                 (raw.get("poster_claim_tasks") or ())
+                                 if str(x).strip()),
     )
 
 
@@ -410,6 +443,69 @@ def claimable_posters(board: Dict[str, Any], rarities: Tuple[str, ...] = ()) -> 
         if not key or str(task.get("status") or "") != "claimable":
             continue
         if wanted and poster_rarity_of(key) not in wanted:
+            continue
+        out.append(key)
+    return list(dict.fromkeys(out))
+
+
+# 任务档位：站点 posterTaskBoard 的 group -> 中文分类名（实测 2026-11）
+TASK_GROUP_LABELS: Dict[str, str] = {
+    "once": "一次性典藏",
+    "theme_repeat": "主题片单交付",
+    "rarity_repeat": "额外海报",
+}
+# 兜底档位：扫描失败时配置页仍有可选中文项；key/title 均来自实测任务板
+DEFAULT_TASK_OPTIONS: Tuple[Tuple[str, str, str], ...] = (
+    ("once", "普通海报集合", "normal_collection_once"),
+    ("once", "优秀海报集合", "excellent_collection_once"),
+    ("once", "稀有海报集合", "rare_collection_once"),
+    ("once", "珍贵海报集合", "precious_collection_once"),
+    ("once", "传说海报集合", "legendary_collection_once"),
+    ("once", "完全图鉴", "movie_catalog_album"),
+    ("theme_repeat", "动画电影之夜", "animation_night_repeat"),
+    ("theme_repeat", "悬疑犯罪现场", "crime_scene_repeat"),
+    ("theme_repeat", "心灵成长之旅", "growth_journey_repeat"),
+)
+
+
+def parse_task_options(board: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """从 friendTradePosterTaskBoard 扫描领奖档位，生成中文多选下拉项。
+
+    站点任务会更新，选项以扫描结果为准；扫描为空时退回内置兜底档位。
+    title 带【分类】前缀，让「一次性典藏 / 主题片单交付」在一个多选框里可区分。
+    """
+    tasks = ((board or {}).get("tasks") or [])
+    items: List[Dict[str, str]] = []
+    seen = set()
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        key = str(task.get("key") or "").strip()
+        title = str(task.get("title") or "").strip()
+        if not key or not title or key in seen:
+            continue
+        seen.add(key)
+        group = str(task.get("group") or "")
+        prefix = TASK_GROUP_LABELS.get(group, "")
+        items.append({"title": (f"【{prefix}】{title}" if prefix else title), "value": key})
+    if not items:
+        for group, title, key in DEFAULT_TASK_OPTIONS:
+            prefix = TASK_GROUP_LABELS.get(group, "")
+            items.append({"title": (f"【{prefix}】{title}" if prefix else title), "value": key})
+    return items
+
+
+def claimable_posters_by_tasks(board: Dict[str, Any], task_keys: Tuple[str, ...]) -> List[str]:
+    """按站点 task_key 过滤可领海报任务；task_keys 为空则领全部可领项。"""
+    wanted = set(str(x) for x in (task_keys or ()))
+    out: List[str] = []
+    for task in (board or {}).get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        key = str(task.get("key") or "")
+        if not key or str(task.get("status") or "") != "claimable":
+            continue
+        if wanted and key not in wanted:
             continue
         out.append(key)
     return list(dict.fromkeys(out))
@@ -638,7 +734,11 @@ def build_plan(cfg: Config, home: Dict[str, Any], board: Dict[str, Any],
         actions.extend(plan_commission(cfg, board, len(running)))
 
     if cfg.do_posters:
-        for key in claimable_posters(poster_board, cfg.poster_claim_rarities):
+        if cfg.poster_claim_tasks:
+            claim_keys = claimable_posters_by_tasks(poster_board, cfg.poster_claim_tasks)
+        else:
+            claim_keys = claimable_posters(poster_board, cfg.poster_claim_rarities)
+        for key in claim_keys:
             rarity = poster_rarity_of(key)
             label = f"[{RARITY_LABELS.get(rarity, rarity)}]" if rarity else ""
             actions.append(Action("friendTradePosterTaskClaim", {"task_key": key},
@@ -1082,3 +1182,100 @@ def consignment_summary(board: Dict[str, Any]) -> str:
     unowned = sum(1 for x in lots if x.owned_quantity == 0)
     dutch = sum(1 for x in lots if x.mode == "dutch")
     return f"在售 {len(lots)} 件（未拥有 {unowned}，荷兰降价 {dutch}）"
+
+
+# ---------------------------------------------------------------- 统一低价抢购（拍卖行 + 寄售场）
+
+@dataclass
+class SnipeDecision:
+    """海报低价抢购决策：source 标来源，action_kind 标买法。"""
+    lot_id: int
+    poster_id: int
+    title: str
+    rarity: str
+    source: str           # auction=光影拍卖行 / consignment=海报寄售场
+    mode: str             # open / sealed / dutch
+    amount: int           # 实际支付/出价
+    fee: float
+    action_kind: str      # dutch_buy / bid
+    rule_version: str
+    reason: str
+
+
+def plan_snipe(cfg: Config,
+               auction_view: Optional[Dict[str, Any]],
+               consignment_view: Optional[Dict[str, Any]],
+               now: Optional[int] = None) -> List[SnipeDecision]:
+    """把拍卖行与寄售场的在售海报合并成一个候选池，按价格从低到高产出抢购决策。
+
+    规则（单一项目、逻辑收敛）：
+    - 总开关 do_poster_snipe + 价格上限 poster_snipe_max_price（0=不抢）；
+    - 来自两个市场的所有 open 拍品，排除我的、已拥有的（可选）、稀有度不在白名单的；
+    - 每个候选的「到手价」：dutch 用当前价直接买，open/sealed 用最低有效出价 minimum_bid；
+    - 按到手价升序排列——先抢最便宜的，价格超过上限或余额不足就跳过后面更贵的；
+    - 不设抢拍倒计时策略（低价优先，不等最后几秒，避免错过便宜货）；
+    - 出价动作仍受单点规则保护：不领先、不重复、金额≥站点最低有效价。
+    """
+    if not cfg.do_poster_snipe or cfg.poster_snipe_max_price <= 0:
+        return []
+    now_ts = int(now if now is not None else time.time())
+    rarities = set(cfg.poster_snipe_rarities)
+    balance = 0.0
+    for view in (auction_view, consignment_view):
+        if isinstance(view, dict) and _to_float(view.get("balance")) > balance:
+            balance = _to_float(view.get("balance"))
+
+    candidates: List[SnipeDecision] = []
+    for view, source in ((auction_view, "拍卖行"), (consignment_view, "寄售场")):
+        if not isinstance(view, dict) or not view.get("enabled", True):
+            continue
+        for lot in view.get("lots") or []:
+            if not isinstance(lot, AuctionLot):
+                continue
+            if lot.status != "open" or lot.is_mine or lot.can_bid is False and lot.can_buy is False:
+                continue
+            if cfg.poster_snipe_unowned_only and lot.owned_quantity > 0:
+                continue
+            if rarities and lot.rarity not in rarities:
+                continue
+            if lot.mode == "dutch":
+                amount = _to_int(lot.current_price)
+                kind = "dutch_buy"
+            else:
+                amount = _to_int(lot.minimum_bid)
+                kind = "bid"
+                if lot.is_leading:
+                    continue
+            if amount <= 0 or amount > cfg.poster_snipe_max_price:
+                continue
+            fee = auction_fee(amount, lot.bid_fee_bps)
+            if balance > 0 and amount + fee > balance:
+                continue
+            candidates.append(SnipeDecision(
+                lot_id=lot.id, poster_id=lot.poster_id, title=lot.title, rarity=lot.rarity,
+                source=source, mode=lot.mode, amount=amount, fee=fee, action_kind=kind,
+                rule_version=lot.rule_version,
+                reason=(f"[{source}]《{lot.title}》{lot.rarity_label} "
+                        f"{'荷兰现价' if kind == 'dutch_buy' else '最低出价'}{amount}魔力"
+                        f"（手续费{fee}，未拥有）"),
+            ))
+
+    # 核心：低价优先。同价时寄售场在前（可直接买、无需等落槌）
+    candidates.sort(key=lambda d: (d.amount, 0 if d.source == "寄售场" else 1))
+    return candidates
+
+
+def snipe_summary(auction_view: Optional[Dict[str, Any]],
+                  consignment_view: Optional[Dict[str, Any]]) -> str:
+    """给页面看的一行合并行情摘要。"""
+    parts = []
+    for view, name in ((auction_view, "拍卖行"), (consignment_view, "寄售场")):
+        lots = [x for x in (view or {}).get("lots") or []
+                if isinstance(x, AuctionLot) and x.status == "open"]
+        if not lots:
+            parts.append(f"{name}无在售")
+            continue
+        cheapest = min(lots, key=lambda x: x.current_price or x.minimum_bid)
+        price = cheapest.current_price or cheapest.minimum_bid
+        parts.append(f"{name}{len(lots)}件，最低{price}《{cheapest.title}》")
+    return "；".join(parts)

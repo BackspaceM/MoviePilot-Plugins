@@ -112,11 +112,38 @@ DEFAULTS: dict[str, Any] = {
     "consignment_rarities": "",
     "consignment_modes": "open,dutch",
     "poster_claim_rarities": "",
+    # 合并后的海报低价抢购项目
+    "do_poster_snipe": False,
+    "poster_snipe_max_price": 0,
+    "poster_snipe_rarities": "",
+    "poster_snipe_unowned_only": True,
+    "poster_snipe_poll_seconds": 15,
+    "poster_claim_tasks": "",
 }
 
 
-def form() -> tuple[list[dict], dict[str, Any]]:
-    """配置页：分区清晰、敏感/高风险一眼可辨；默认只开零风险项。"""
+# 稀有度中文多选下拉项（value 用站点 key）
+RARITY_ITEMS = [
+    {"title": "普通", "value": "normal"},
+    {"title": "优秀", "value": "excellent"},
+    {"title": "稀有", "value": "rare"},
+    {"title": "珍贵", "value": "precious"},
+    {"title": "传说", "value": "legendary"},
+]
+
+
+def _multi_select(model: str, label: str, items: list, hint: str = "") -> dict:
+    return {
+        "component": "VSelect",
+        "props": {"model": model, "label": label, "items": items,
+                  "multiple": True, "chips": True, "closableChips": True,
+                  "clearable": True, "hint": hint, "persistentHint": bool(hint)},
+    }
+
+
+def form(task_options: list | None = None) -> tuple[list[dict], dict[str, Any]]:
+    """配置页：按网页分类分区（好友买卖 / 事务所 / 电影图鉴·海报）；默认只开零风险项。"""
+    task_items = task_options if isinstance(task_options, list) and task_options else core.parse_task_options(None)
     content = [
         _alert(
             "把熊猫PT「好友买卖」的重复操作按你的规则自动化。动作分三档：安全（领取/结算）、"
@@ -148,87 +175,15 @@ def form() -> tuple[list[dict], dict[str, Any]]:
                    placeholder="c_secure_uid=...; c_secure_pass=...; ...",
                    hint="浏览器开发者工具复制完整 Cookie，含所有 c_secure_* 项", persistentHint=True),
         ),
-        _alert("请求间隔在下方「高级」里调，默认 1.5 秒，别调太小以免触发站点风控。", "info"),
+        _alert("请求间隔默认 1.5 秒，别调太小以免触发站点风控。", "info"),
 
-        _section("② 海报拍卖（重点）", "监控报价 · 倒计时抢拍 · 自动加价；最后 3 分钟换领先者会延长至 3 分钟",
-                 ),
-        _alert(
-            "站点是「暗拍」：填的是你的最终出价，站点已算好最低有效价 minimum_bid（含领先者+一档增量），"
-            "插件默认按这个价出，不会重复加价。出价后不可撤销；未中标本金全退、手续费不退。"
-            "最后 3 分钟换领先者会把截止延长到 3 分钟（最多延长 30 分钟），所以进入窗口后可持续跟价。",
-            "warning",
-        ),
-        _row(
-            _field("VSwitch", "do_auction", "开启拍卖监控", 4,
-                   hint="关闭则完全不碰拍卖；开启后按下面规则决定是否出价", persistentHint=True),
-            _field("VSwitch", "auction_auto_bid", "自动出价抢海报", 4,
-                   hint="关掉则只监控记录报价、不出价", persistentHint=True),
-            _field("VSwitch", "auction_require_no_leader", "只抢无人出价的拍品", 4,
-                   hint="开启后不与已有领先者竞价，更省钱", persistentHint=True),
-        ),
-        _row(
-            _field("VTextField", "auction_budget", "单品出价上限(魔力)", 4,
-                   hint="0=不出价；超过此价的拍品跳过", persistentHint=True),
-            _field("VTextField", "auction_total_budget", "本轮总占用上限(魔力)", 4,
-                   hint="0=不限；累计实际占用超过就停", persistentHint=True),
-            _field("VTextField", "auction_snipe_seconds", "抢拍窗口(秒)", 4,
-                   hint="距落槌≤N秒才出价；0=一发现就抢。设 60 适合最后1分钟跟价", persistentHint=True),
-        ),
-        _row(
-            _field("VTextField", "auction_rarities", "只抢稀有度（留空=全部）", 6,
-                   placeholder="rare, precious, legendary",
-                   hint="可选 normal/excellent/rare/precious/legendary，逗号分隔", persistentHint=True),
-            _field("VTextField", "auction_aggressive_steps", "额外加价档数(0=最低价)", 6,
-                   hint="0=按站点最低有效价；每加1档多出一个增量，更激进也更费魔力", persistentHint=True),
-        ),
-        _row(
-            _field("VTextField", "auction_max_bids_per_lot", "单品最多加价次数", 4),
-            _field("VTextField", "auction_min_gap", "两次加价最小间隔(秒)", 4),
-            _field("VTextField", "auction_poll_seconds", "监控轮询间隔(秒)", 4,
-                   hint="要抢最后3分钟的延长，建议 ≤20 秒", persistentHint=True),
-        ),
-
-        _section("②b 海报寄售场", "个人寄售的市场：抢「未拥有/想要」的海报，荷兰降价可直接买"),
-        _alert(
-            "寄售场和光影拍卖行是两个独立市场，都归「启动/停止抢拍」这个监控循环管。"
-            "市场看板会按「未拥有」过滤，避免重复买已有的海报；可以只盯指定海报或指定档位。",
-            "info",
-        ),
-        _row(
-            _field("VSwitch", "do_consignment", "开启寄售场监控", 4,
-                   hint="关闭则完全不碰寄售场", persistentHint=True),
-            _field("VSwitch", "consignment_auto_bid", "自动抢购", 4,
-                   hint="dutch 降价直接买、open 竞价出价；关掉则只监控", persistentHint=True),
-            _field("VSwitch", "consignment_unowned_only", "只要未拥有的海报", 4,
-                   hint="默认开，避免重复买已有的", persistentHint=True),
-        ),
-        _row(
-            _field("VTextField", "consignment_budget", "单品价格上限(魔力)", 6,
-                   hint="0=不买；超过上限的海报跳过", persistentHint=True),
-            _field("VTextField", "consignment_modes", "参与模式（open,dutch）", 6,
-                   hint="逗号分隔：open 竞价 / dutch 荷兰降价 / sealed 封标", persistentHint=True),
-        ),
-        _row(
-            _field("VTextarea", "consignment_wanted_poster_ids", "想要的指定海报 ID（留空=按档位）", 6, rows=3,
-                   placeholder="146, 205, 1468",
-                   hint="填了就只抢这些 ID，忽略档位设置", persistentHint=True),
-            _field("VTextField", "consignment_rarities", "想要的档位（ID留空时生效）", 6,
-                   placeholder="rare, precious, legendary",
-                   hint="可选 normal/excellent/rare/precious/legendary，留空=不限", persistentHint=True),
-        ),
-
-        _section("③ 零风险领取", "不花魔力、无交易；默认开启"),
+        # ===== 分类一：好友买卖（对应网页「好友买卖」）=====
+        _section("① 好友买卖 · 日常", "挂机收益、成长任务、佣人工作与互动；默认只开零风险项"),
         _row(
             _field("VSwitch", "do_income", "领取挂机收益", 4),
             _field("VSwitch", "do_tasks", "领成长任务奖励", 4),
             _field("VSwitch", "do_settle", "结算已完成委托", 4),
         ),
-        _row(
-            _field("VSwitch", "do_achievements", "领成就奖励", 6),
-            _field("VSwitch", "do_level_posters", "领等级海报", 6),
-        ),
-
-        _section("④ 佣人工作与互动", "工作不花魔力；互动可选免费或设预算"),
         _row(
             _field("VSwitch", "do_work", "自动安排工作", 3),
             _field("VSelect", "work_policy", "工作策略", 3,
@@ -247,11 +202,16 @@ def form() -> tuple[list[dict], dict[str, Any]]:
             _field("VTextField", "interact_budget", "单次互动魔力上限", 4,
                    hint="仅「设定上限」生效；投喂100/小奖励300/深入交流1000", persistentHint=True),
             _field("VSwitch", "do_initiative", "自动主动互动(我作为佣人)", 4),
-            _field("VTextarea", "reserved_uids", "保留佣人 UID（不参与任何自动操作）", 4, rows=2,
+            _field("VSwitch", "do_achievements", "领成就奖励", 4),
+        ),
+        _row(
+            _field("VSwitch", "do_level_posters", "领等级海报", 4),
+            _field("VTextarea", "reserved_uids", "保留佣人 UID（不参与任何自动操作）", 8, rows=2,
                    placeholder="12349, 107691", hint="逗号/空格/换行分隔", persistentHint=True),
         ),
 
-        _section("⑤ 事务所", "站点已开原生自动派遣时不重复派单，只结算"),
+        # ===== 分类二：事务所（对应网页「事务所」）=====
+        _section("② 事务所", "站点已开原生自动派遣时不重复派单，只结算"),
         _row(
             _field("VSwitch", "do_commission", "自动派出委托", 6,
                    hint="站点原生自动派遣开着时自动跳过派出", persistentHint=True),
@@ -261,7 +221,44 @@ def form() -> tuple[list[dict], dict[str, Any]]:
                           {"title": "海报优先", "value": "posters"}]),
         ),
 
-        _section("⑥ 海报其它", "典藏任务 / 兑换 / 赠送；赠送不可逆，默认关"),
+        # ===== 分类三：电影图鉴·海报（对应网页「电影图鉴」）—— 海报项全归这里 =====
+        _section("③ 电影图鉴 · 海报", "海报低价抢购 + 领奖档位 + 兑换赠送，全部海报项集中在此"),
+
+        _alert(
+            "海报低价抢购：拍卖行和寄售场合并为一个项目，统一按「价格从低到高」捡漏，先抢最便宜的。"
+            "荷兰降价品按当前价直接买，竞价品按站点最低有效价出价（暗拍，不重复加价）。"
+            "拍卖看板偶发断连会自动重试，连续失败才会写警告日志。", "info"),
+        _row(
+            _field("VSwitch", "do_poster_snipe", "开启海报低价抢购", 6,
+                   hint="一个开关同时管拍卖行+寄售场；关闭则完全不碰抢购", persistentHint=True),
+            _field("VTextField", "poster_snipe_max_price", "单件价格上限(魔力)", 6,
+                   hint="0=不抢；超过此价的海报跳过，只抢更便宜的", persistentHint=True),
+        ),
+        _row(
+            {
+                "component": "VCol", "props": {"cols": 12, "md": 6},
+                "content": [_multi_select("poster_snipe_rarities", "只抢这些稀有度（不选=全部）",
+                                          RARITY_ITEMS, "中文多选，可多选；留空不限稀有度")],
+            },
+            _field("VSwitch", "poster_snipe_unowned_only", "只要未拥有的海报", 6,
+                   hint="默认开，避免重复买已有的", persistentHint=True),
+        ),
+        _row(
+            _field("VTextField", "poster_snipe_poll_seconds", "抢购轮询间隔(秒)", 6,
+                   hint="建议 15 秒；两个市场各查一次", persistentHint=True),
+            _field("VTextField", "max_actions", "每轮动作上限", 6),
+        ),
+
+        _alert(
+            "领奖档位来自页面海报任务实时扫描。先在详情页点「扫描任务档位」，再回到本页下拉框选择要领的档位；"
+            "「一次性典藏」「主题片单交付」都在这个多选框里（带【分类】前缀）。留空=领所有可领档位。",
+            "info"),
+        _row({
+            "component": "VCol", "props": {"cols": 12},
+            "content": [_multi_select("poster_claim_tasks", "领奖档位（多选，来自页面任务）",
+                                      task_items,
+                                      "未扫描时显示内置档位；点详情页「扫描任务档位」后刷新")],
+        }),
         _row(
             _field("VSwitch", "do_posters", "自动领海报任务奖励", 4),
             _field("VSwitch", "poster_auto_redeem", "检查并兑换典藏册", 4),
@@ -269,14 +266,9 @@ def form() -> tuple[list[dict], dict[str, Any]]:
                    placeholder="只送给这些 UID，留空则不赠送",
                    hint="赠送不可逆，留空最安全", persistentHint=True),
         ),
-        _row(
-            _field("VTextField", "poster_claim_rarities", "领奖档位（囤魔力用）", 12,
-                   placeholder="留空=所有可领档位都领",
-                   hint="只领指定档位的典藏任务奖励，如填 normal 就先囤着其它档位的魔力；"
-                        "可选 normal/excellent/rare/precious/legendary，逗号分隔", persistentHint=True),
-        ),
 
-        _section("⑦ 消耗与不可逆（谨慎）", "默认全关；买人会真花魔力，释放不可撤回", ),
+        # ===== 分类四：消耗与不可逆 =====
+        _section("④ 消耗与不可逆（谨慎）", "默认全关；买人会真花魔力，释放不可撤回"),
         _row(
             _field("VSwitch", "do_protect", "自动买保护(消耗魔力)", 3),
             _field("VTextField", "protect_minutes", "保护剩余阈值(分钟)", 3),
@@ -293,6 +285,46 @@ def form() -> tuple[list[dict], dict[str, Any]]:
         _row(
             _field("VSwitch", "release_temporary", "自动释放临时佣人", 12,
                    hint="需同时打开「启用释放」；临时佣人到期会被释放，不可撤回", persistentHint=True),
+        ),
+
+        # ===== 高级兼容：旧拍卖/寄售细分字段，仅保留给老配置与旧脚本，正常无需改 =====
+        _section("高级兼容（旧版细分参数，正常无需修改）",
+                 "新用户只用上面的「③ 海报低价抢购」即可；这里保留旧字段以兼容已有配置。"),
+        _row(
+            _field("VSwitch", "do_auction", "旧·开启拍卖监控", 4),
+            _field("VSwitch", "auction_auto_bid", "旧·自动出价", 4),
+            _field("VSwitch", "auction_require_no_leader", "旧·只抢无人出价", 4),
+        ),
+        _row(
+            _field("VTextField", "auction_budget", "旧·单品出价上限", 4),
+            _field("VTextField", "auction_total_budget", "旧·本轮总占用上限", 4),
+            _field("VTextField", "auction_snipe_seconds", "旧·抢拍窗口(秒)", 4),
+        ),
+        _row(
+            _field("VTextField", "auction_rarities", "旧·只抢稀有度", 6),
+            _field("VTextField", "auction_aggressive_steps", "旧·额外加价档数", 6),
+        ),
+        _row(
+            _field("VTextField", "auction_max_bids_per_lot", "旧·单品最多加价次数", 4),
+            _field("VTextField", "auction_min_gap", "旧·加价最小间隔(秒)", 4),
+            _field("VTextField", "auction_poll_seconds", "旧·轮询间隔(秒)", 4),
+        ),
+        _row(
+            _field("VSwitch", "do_consignment", "旧·开启寄售场监控", 4),
+            _field("VSwitch", "consignment_auto_bid", "旧·自动抢购", 4),
+            _field("VSwitch", "consignment_unowned_only", "旧·只要未拥有", 4),
+        ),
+        _row(
+            _field("VTextField", "consignment_budget", "旧·单品价格上限", 6),
+            _field("VTextField", "consignment_modes", "旧·参与模式", 6),
+        ),
+        _row(
+            _field("VTextarea", "consignment_wanted_poster_ids", "旧·想要的指定海报 ID", 6, rows=3),
+            _field("VTextField", "consignment_rarities", "旧·想要的档位", 6),
+        ),
+        _row(
+            _field("VTextField", "poster_claim_rarities", "旧·领奖稀有度", 6),
+            _field("VTextField", "request_interval", "请求间隔(秒)", 6),
         ),
 
         _alert("所有动作都会先产出计划并写进插件日志（卡片右上角「…」→ 查看日志）。试运行时只记录不执行。", "info"),
@@ -353,12 +385,12 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         _button("检测 Cookie", "probe", "post", "mdi-account-check"),
         _button("查看最近计划", "preview", "post", "mdi-text-search"),
         _button("刷新状态", "status", "get", "mdi-refresh"),
-        _button("检查拍卖行情", "auction_check", "post", "mdi-camera-iris"),
-        _button("立即判断出价", "auction_once", "post", "mdi-gavel", "warning"),
-        _button("启动/停止抢拍", "auction_monitor", "post", "mdi-fast-forward", "primary"),
-        _button("拍卖状态", "auction_status", "get", "mdi-pulse"),
+        _button("扫描任务档位", "scan_tasks", "post", "mdi-file-search"),
+        _button("检查海报行情", "snipe_check", "post", "mdi-magnify"),
+        _button("立即低价抢购", "snipe_once", "post", "mdi-cart-arrow-down", "warning"),
+        _button("启动/停止抢购", "snipe_monitor", "post", "mdi-fast-forward", "primary"),
         _button("检查寄售场", "consignment_check", "post", "mdi-store-search"),
-        _button("立即抢寄售", "consignment_grab", "post", "mdi-cart-arrow-down", "warning"),
+        _button("拍卖状态", "auction_status", "get", "mdi-pulse"),
     ]
 
     badge = '<span class="pf-badge on">正在运行</span>' if running else '<span class="pf-badge">空闲</span>'
@@ -384,62 +416,35 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         items = "".join(f"<li>{_e(x)}</li>" for x in previews[:20])
         preview_html = f'<div class="pf-sec">最近计划明细（最多 20 条）</div><div class="pf-note"><ul>{items}</ul></div>'
 
-    # 拍卖行情区（只读缓存，渲染期不联网）
-    auction = data.get("auction") if isinstance(data.get("auction"), dict) else {}
-    auction_on = bool(data.get("auction_running"))
-    a_badge = '<span class="pf-badge on">抢拍监控中</span>' if auction_on else '<span class="pf-badge">监控未启动</span>'
-    a_lots = auction.get("lots") or []
-    a_rows = ""
-    for lot in a_lots[:8]:
+    # 海报低价抢购区（单一项目：拍卖行 + 寄售场合并，按价格从低到高；只读缓存）
+    snipe = data.get("snipe") if isinstance(data.get("snipe"), dict) else {}
+    snipe_on = bool(data.get("snipe_on"))
+    s_badge = '<span class="pf-badge on">抢购监控中</span>' if snipe_on else '<span class="pf-badge">监控未启动</span>'
+    s_rows = ""
+    for lot in (snipe.get("lots") or [])[:10]:
         if not isinstance(lot, dict):
             continue
-        rank = lot.get("my_rank") or 0
-        rank_text = ("我领先" if rank == 1 else f"我第{rank}名") if rank else "未参与"
-        a_rows += (
+        source = lot.get("source") or ""
+        mode = {"dutch": "荷兰降价", "open": "竞价", "sealed": "封标"}.get(lot.get("mode"), lot.get("mode") or "")
+        s_rows += (
             f'<div class="pf-line"><span class="pf-line-v">'
-            f'{_e(lot.get("title"))} <small>[{_e(lot.get("rarity"))}]</small></span>'
-            f'<span class="pf-line-k">现价 {_e(lot.get("current_price"))} · '
-            f'最低 {_e(lot.get("minimum_bid"))} · {rank_text}</span></div>'
+            f'{_e(lot.get("title"))} <small>[{_e(lot.get("rarity"))}] {_e(source)}·{_e(mode)}</small></span>'
+            f'<span class="pf-line-k">{_e(lot.get("amount"))} 魔力</span></div>'
         )
-    auction_html = (
-        '<div class="pf-sec">海报拍卖' + a_badge + '</div>'
+    snipe_html = (
+        '<div class="pf-sec">电影图鉴 · 海报低价抢购' + s_badge + '</div>'
         + '<div class="pf-card">'
         + f'<div class="pf-line"><span class="pf-line-k">最近行情</span>'
-        + f'<span class="pf-line-v">{_e(data.get("auction_text") or "还没检查过")}</span></div>'
+        + f'<span class="pf-line-v">{_e(data.get("snipe_text") or "还没检查过")}</span></div>'
         + f'<div class="pf-line"><span class="pf-line-k">当前余额</span>'
-        + f'<span class="pf-line-v">{_e(auction.get("balance", "—"))} 魔力</span></div>'
-        + a_rows
+        + f'<span class="pf-line-v">{_e(snipe.get("balance", "—"))} 魔力</span></div>'
+        + f'<div class="pf-line"><span class="pf-line-k">符合低价规则</span>'
+        + f'<span class="pf-line-v">{_e(snipe.get("candidates", 0))} 件（按价格从低到高）</span></div>'
+        + s_rows
         + '</div>'
-        + '<div class="pf-note">站点为暗拍：填最终出价，站点已算好最低有效价；最后 3 分钟换领先者会延长至 3 分钟。'
-        + '「检查拍卖行情」只读不出价；要自动抢拍请开启监控循环，出价前确认预算与稀有度规则。</div>'
-    )
-
-    # 海报寄售场区（只读缓存）
-    cons = data.get("consignment") if isinstance(data.get("consignment"), dict) else {}
-    c_rows = ""
-    for lot in (cons.get("lots") or [])[:8]:
-        if not isinstance(lot, dict):
-            continue
-        mode = lot.get("mode") or "open"
-        mode_label = {"dutch": "荷兰降价", "open": "竞价", "sealed": "封标"}.get(mode, mode)
-        owned = lot.get("owned", 0)
-        own_text = "未拥有" if not owned else f"已有{owned}张"
-        extra = (f" · 下次降价 {_e(lot.get('next_drop_at'))}" if mode == "dutch" and lot.get("next_drop_at") else "")
-        c_rows += (
-            f'<div class="pf-line"><span class="pf-line-v">'
-            f'{_e(lot.get("title"))} <small>[{_e(lot.get("rarity"))}] {mode_label}</small></span>'
-            f'<span class="pf-line-k">{own_text} · 现价 {_e(lot.get("price"))}'
-            f' · 最低 {_e(lot.get("minimum_bid"))}{extra}</span></div>'
-        )
-    consignment_html = (
-        '<div class="pf-sec">海报寄售场</div>'
-        + '<div class="pf-card">'
-        + f'<div class="pf-line"><span class="pf-line-k">最近行情</span>'
-        + f'<span class="pf-line-v">{_e(data.get("consignment_text") or "还没检查过")}</span></div>'
-        + c_rows
-        + '</div>'
-        + '<div class="pf-note">寄售场与光影拍卖行是两个市场，都由「启动/停止抢拍」统一监控。'
-        + '按「未拥有 / 想要的指定海报或档位 + 价格上限」自动抢；荷兰降价品现价合适就直接买。</div>'
+        + '<div class="pf-note">拍卖行与寄售场已合并为一个项目，统一按价格从低到高捡漏，先抢最便宜的。'
+        + '「检查海报行情」只读不出价；自动抢购请在配置页开启「海报低价抢购」并设置价格上限。'
+        + '领奖档位请先点「扫描任务档位」，再到配置页下拉框选择。</div>'
     )
 
     card = (
@@ -453,8 +458,7 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + '<div class="pf-sec">运行状态</div>'
         + f'<div class="pf-card">{lines}</div>'
         + preview_html
-        + auction_html
-        + consignment_html
+        + snipe_html
         + '<div class="pf-sec">安全说明</div>'
         + '<div class="pf-note">不可逆动作（买入/抢人/追回/释放）默认全关，必须自己显式打开并设置价格与属性门槛。'
         + '站点已开启原生自动派遣时，插件不会重复派单，只结算已完成的委托。'

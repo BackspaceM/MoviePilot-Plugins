@@ -114,14 +114,19 @@ class PandaClient:
     def ajax_url(self) -> str:
         return f"{self.site}/ajax.php"
 
-    def _openers(self) -> list:
-        """候选通道：代理优先，直连兜底；未配代理就只有直连。"""
-        out = []
+    def _openers(self, fresh: bool = False) -> list:
+        """候选通道：代理优先，直连兜底；未配代理就只有直连。
+
+        fresh=True 时每轮新建 opener：HTTPConnection 会缓存 socket，站点单方面
+        关闭后复用就抛 RemoteDisconnected；换新 opener 可从根上规避。
+        """
         if self._opener is not None:
             return [("直连", self._opener)]  # 测试注入，单一通道
+        out = []
         if self.using_proxy:
             out.append(("代理", self._proxy_opener))
-        direct = self._direct_opener or (urllib.request.build_opener() if not out else None)
+        direct = (urllib.request.build_opener() if fresh
+                  else (self._direct_opener or (urllib.request.build_opener() if not out else None)))
         if direct is not None:
             out.append(("直连", direct))
         return out or [("直连", urllib.request.build_opener())]
@@ -130,8 +135,11 @@ class PandaClient:
         """发送 POST，网络层错误换通道+退避重试；返回 (raw, err)。"""
         routes = self._openers()
         last_err = ""
-        # 每个通道最多尝试 2 轮，轮间短退避，应对站点偶发 RemoteDisconnected
-        for round_no in range(2):
+        # 每个通道最多尝试 3 轮，轮间短退避，应对站点偶发 RemoteDisconnected。
+        # 第 2 轮起新建 opener，彻底丢弃可能失效的 keep-alive 连接。
+        for round_no in range(3):
+            if round_no >= 1 and self._opener is None:
+                routes = self._openers(fresh=True)
             for name, opener in routes:
                 self._throttle()
                 self._last_request = time.monotonic()
@@ -178,6 +186,8 @@ class PandaClient:
         headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
         headers.setdefault("X-Requested-With", "XMLHttpRequest")
         headers.setdefault("Referer", f"{self.site}/friend-trade.php")
+        # 关闭 keep-alive：站点会在空闲后单方面断连，复用连接会抛 RemoteDisconnected
+        headers.setdefault("Connection", "close")
         # cookie 只放进请求头，不写日志
         headers["Cookie"] = self.cookie
 
@@ -243,7 +253,7 @@ class PandaClient:
                          headers=self._AUCTION_HEADERS)
 
     def consignment_board(self, viewer_uid: int, scope: str = "market",
-                          unowned_only: bool = True, page: int = 1, page_size: int = 24,
+                          unowned_only: bool = True, page: int = 1, page_size: int = 9,
                           rarity: str = "", sort: str = "price_asc") -> Result:
         """个人寄售/市场看板。scope=market + unowned_only=1 抓市场上未拥有的海报。"""
         return self.post("friendTradePosterConsignmentBoard", {

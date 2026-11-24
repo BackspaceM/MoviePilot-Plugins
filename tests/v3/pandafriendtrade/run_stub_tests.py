@@ -37,7 +37,7 @@ class ContractTests(unittest.TestCase):
 
     def test_metadata_and_lifecycle(self):
         self.assertEqual(PLUGIN_ID, "PandaFriendTrade")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.2.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.3.0")
         self.assertTrue(PLUGIN_CLS.plugin_icon.endswith("/icons/pandafriendtrade.png"))
         for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service"):
             self.assertTrue(callable(getattr(PLUGIN_CLS, name, None)), name)
@@ -100,7 +100,8 @@ class ContractTests(unittest.TestCase):
         # 未配置 cookie 时所有端点都返回 Response，不抛异常
         for name in ("api_run", "api_dryrun", "api_probe", "api_preview", "api_status",
                      "api_auction_check", "api_auction_once", "api_auction_monitor", "api_auction_status",
-                     "api_consignment_check", "api_consignment_grab"):
+                     "api_consignment_check", "api_consignment_grab",
+                     "api_scan_tasks", "api_snipe_check", "api_snipe_once", "api_snipe_monitor"):
             result = getattr(self.plugin, name)()
             self.assertIsNotNone(result)
             self.assertTrue(hasattr(result, "success"), name)
