@@ -460,5 +460,21 @@
     "history": {
       "v1.0.0": "首个版本：本地文件索引 → Reseed 服务端匹配 → 下载种子 → 文件清单二次复核 → 加进下载器做种。HTTP 走 login / sites_info / upload_json，不需要 socket.io 或第三方依赖；索引摘要缓存 24 小时，避免触发服务端限流。配置页不读宿主数据、详情页静态不轮询，逐组过程只写宿主日志；按钮端点全兜底，自建后台线程会尝试绑定插件实例以兼容实例级日志等级覆盖。"
     }
+  },
+  "PandaFriendTrade": {
+    "name": "熊猫好友买卖",
+    "description": "按用户规则自动化熊猫PT「好友买卖」的重复操作：领取收益与任务奖励、佣人工作安排与互动（免费/付费上限可选）、事务所派遣与结算、电影图鉴海报任务、佣人保护，以及显式开启后的买入/抢人/释放。默认试运行只产出计划不执行；不可逆交易默认全关并需设置价格与属性门槛；站点原生自动派遣开着时不重复派单。Cookie 只存本机配置，不写日志或代码。",
+    "labels": "熊猫PT,好友买卖,佣人,事务所,海报,规则自动化",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pandafriendtrade.png",
+    "author": "BackspaceM",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "project_url": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "repo": "https://github.com/BackspaceM/MoviePilot-Plugins",
+    "history": {
+      "v1.0.0": "首个版本：实测站点 34+ 个 ajax 接口，规则引擎把动作分安全/消耗/不可逆三级。默认只开领收益、领任务、结算；试运行先产出计划写日志。工作按收益/关系/心情/天赋四种策略挑选，互动可选免费或设魔力上限，买人必须先查详情拿实时价格再过预算与属性门槛。站点已开原生自动派遣时不重复派单，只结算已完成委托。配置页零宿主 IO、详情页静态不轮询、按钮端点全兜底，自建线程绑定插件实例以兼容实例级日志等级。"
+    }
   }
 }
