@@ -507,5 +507,103 @@ class TestUnifiedSnipe(unittest.TestCase):
         self.assertIn("最低9000", text)
 
 
+class TestSnipeRoundsAndRanges(unittest.TestCase):
+    """v1.4.0：抢购轮次 + 每稀有度价格区间 + 已抢去重（手续费不退）。"""
+
+    def _lot(self, lid, rarity, price, mode="dutch", source_price=None):
+        return auction_core.AuctionLot(
+            id=lid, poster_id=2000 + lid, title=f"海报{lid}", rarity=rarity, status="open",
+            can_bid=True, starting_price=price, minimum_bid=price, current_price=price,
+            min_increment=200, highest_bid=price, bidder_count=0, ends_at=99999,
+            hard_ends_at=999999, rule_version="v3", bid_fee_bps=0,
+            leader_uid=0, leader_name="", my_bid_amount=0, my_bid_rank=0,
+            my_fee_total=0.0, owned_quantity=0, mode=mode, is_mine=False, can_buy=True)
+
+    def test_parse_ranges(self):
+        cfg = auction_core.parse_config({
+            "snipe_range_excellent": "5000-7000",
+            "snipe_range_rare": "15000~20000",
+            "snipe_range_precious": "30000",
+            "snipe_range_normal": "",
+            "snipe_range_legendary": "颠倒 90000-10000",
+        })
+        self.assertEqual(cfg.poster_snipe_ranges["excellent"], (5000, 7000))
+        self.assertEqual(cfg.poster_snipe_ranges["rare"], (15000, 20000))
+        self.assertEqual(cfg.poster_snipe_ranges["precious"], (0, 30000))
+        self.assertEqual(cfg.poster_snipe_ranges["legendary"], (10000, 90000))  # 写反自动纠正
+        self.assertNotIn("normal", cfg.poster_snipe_ranges)
+
+    def test_rarity_price_range_filter(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True,
+            "snipe_range_excellent": "5000-7000",
+            "snipe_range_rare": "15000-20000",
+            "poster_snipe_rounds": 10,
+        })
+        lots = [
+            self._lot(1, "excellent", 4000),   # 低于优秀下限，跳过
+            self._lot(2, "excellent", 6000),   # 命中
+            self._lot(3, "excellent", 8000),   # 高于优秀上限，跳过
+            self._lot(4, "rare", 18000),       # 命中
+            self._lot(5, "rare", 25000),       # 高于稀有上限，跳过
+            self._lot(6, "normal", 100),       # 未配区间且全局上限=0，跳过
+        ]
+        view = {"enabled": True, "balance": 1000000, "lots": lots}
+        got = [d.lot_id for d in auction_core.plan_snipe(cfg, view, None, now=100)]
+        self.assertEqual(got, [2, 4])  # 仍按价格从低到高
+
+    def test_global_cap_is_gate_when_ranges_set(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True, "poster_snipe_max_price": 6500,
+            "snipe_range_excellent": "5000-7000", "poster_snipe_rounds": 10,
+        })
+        view = {"enabled": True, "balance": 1000000, "lots": [
+            self._lot(1, "excellent", 6000), self._lot(2, "excellent", 6900)]}
+        self.assertEqual([d.lot_id for d in auction_core.plan_snipe(cfg, view, None, now=100)], [1])
+
+    def test_rounds_limit(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True, "poster_snipe_max_price": 99999,
+            "poster_snipe_rounds": 2,
+        })
+        view = {"enabled": True, "balance": 1000000, "lots": [
+            self._lot(i, "normal", 1000 * i) for i in (5, 1, 3, 2, 4)]}
+        got = [d.amount for d in auction_core.plan_snipe(cfg, view, None, now=100)]
+        self.assertEqual(got, [1000, 2000])  # 只抢最便宜的 2 笔
+
+    def test_rounds_default_and_clamp(self):
+        self.assertEqual(auction_core.parse_config({}).poster_snipe_rounds, 3)
+        self.assertEqual(auction_core.parse_config({"poster_snipe_rounds": 999}).poster_snipe_rounds, 50)
+        self.assertEqual(auction_core.parse_config({"poster_snipe_rounds": 0}).poster_snipe_rounds, 1)
+
+    def test_attempted_skipped(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True, "poster_snipe_max_price": 99999,
+            "poster_snipe_rounds": 10,
+        })
+        view = {"enabled": True, "balance": 1000000, "lots": [
+            self._lot(1, "normal", 1000), self._lot(2, "normal", 2000)]}
+        tried = {auction_core.snipe_dedup_key("拍卖行", 1)}
+        got = [d.lot_id for d in auction_core.plan_snipe(cfg, view, None, now=100,
+                                                          attempted=tried)]
+        self.assertEqual(got, [2])  # 已出价过的不再抢，避免重复扣手续费
+
+    def test_decision_has_dedup_key_and_fee_hint(self):
+        cfg = auction_core.parse_config({
+            "do_poster_snipe": True, "poster_snipe_max_price": 99999,
+        })
+        view = {"enabled": True, "balance": 1000000, "lots": [self._lot(7, "normal", 3000)]}
+        d = auction_core.plan_snipe(cfg, view, None, now=100)[0]
+        self.assertEqual(d.dedup_key, "拍卖行:7")
+        self.assertIn("手续费", d.reason)
+        self.assertIn("未中标不退", d.reason)
+        self.assertEqual(d.as_dict()["dedup_key"], "拍卖行:7")
+
+    def test_no_price_config_no_bid(self):
+        cfg = auction_core.parse_config({"do_poster_snipe": True})
+        view = {"enabled": True, "balance": 1000000, "lots": [self._lot(1, "normal", 100)]}
+        self.assertEqual(auction_core.plan_snipe(cfg, view, None, now=100), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2,6 +2,7 @@
 """熊猫好友买卖插件离线回归测试（复用全仓契约桩）。"""
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import unittest
@@ -37,7 +38,7 @@ class ContractTests(unittest.TestCase):
 
     def test_metadata_and_lifecycle(self):
         self.assertEqual(PLUGIN_ID, "PandaFriendTrade")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.3.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.4.0")
         self.assertTrue(PLUGIN_CLS.plugin_icon.endswith("/icons/pandafriendtrade.png"))
         for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service"):
             self.assertTrue(callable(getattr(PLUGIN_CLS, name, None)), name)
@@ -51,7 +52,9 @@ class ContractTests(unittest.TestCase):
         paths = {route.path for route in app.routes}
         for suffix in ("/run", "/dryrun", "/probe", "/preview", "/status",
                        "/auction_check", "/auction_once", "/auction_monitor", "/auction_status",
-                       "/consignment_check", "/consignment_grab"):
+                       "/consignment_check", "/consignment_grab",
+                       "/scan_tasks", "/snipe_check", "/snipe_once", "/snipe_monitor",
+                       "/snipe_reset"):
             self.assertIn(suffix, paths)
 
     def test_form_contains_all_rule_switches(self):
@@ -66,16 +69,20 @@ class ContractTests(unittest.TestCase):
         for key in ("cookie", "do_income", "do_work", "do_interact", "do_tasks",
                     "do_commission", "do_settle", "do_posters", "do_protect", "do_buy",
                     "do_release", "interact_mode", "interact_budget", "buy_max_price",
-                    "reserved_uids", "poster_gift_recipients",
-                    "proxy_url", "proxy_bypass", "do_auction", "auction_auto_bid",
-                    "auction_budget", "auction_total_budget", "auction_snipe_seconds",
-                    "auction_rarities", "auction_poll_seconds", "auction_aggressive_steps",
-                    "do_consignment", "consignment_auto_bid", "consignment_budget",
-                    "consignment_wanted_poster_ids", "consignment_rarities",
-                    "consignment_unowned_only", "poster_claim_rarities"):
+                    "reserved_uids", "poster_gift_recipients", "proxy_url", "proxy_bypass",
+                    "request_interval", "do_poster_snipe", "poster_snipe_rounds",
+                    "poster_snipe_max_price", "poster_snipe_rarities",
+                    "poster_snipe_unowned_only", "poster_snipe_poll_seconds",
+                    "poster_claim_tasks", "snipe_range_normal", "snipe_range_excellent",
+                    "snipe_range_rare", "snipe_range_precious", "snipe_range_legendary"):
             self.assertIn(key, models)
-        self.assertEqual(defaults.get("do_auction"), False, "拍卖默认关")
-        self.assertEqual(defaults.get("auction_auto_bid"), False, "自动出价默认关")
+        # 高级兼容（旧版细分参数）已按用户要求删除：旧字段不再出现在配置页
+        form_text = json.dumps(form, ensure_ascii=False)
+        self.assertNotIn("高级兼容", form_text)
+        for legacy in ("auction_auto_bid", "consignment_wanted_poster_ids", "poster_claim_rarities"):
+            self.assertNotIn(f'"model": "{legacy}"', form_text)
+        self.assertEqual(defaults.get("do_poster_snipe"), False, "抢购默认关")
+        self.assertEqual(defaults.get("poster_snipe_rounds"), 3, "抢购轮次默认 3")
 
     def test_page_buttons_all_clickable(self):
         page = self.plugin.get_page()
@@ -101,7 +108,8 @@ class ContractTests(unittest.TestCase):
         for name in ("api_run", "api_dryrun", "api_probe", "api_preview", "api_status",
                      "api_auction_check", "api_auction_once", "api_auction_monitor", "api_auction_status",
                      "api_consignment_check", "api_consignment_grab",
-                     "api_scan_tasks", "api_snipe_check", "api_snipe_once", "api_snipe_monitor"):
+                     "api_scan_tasks", "api_snipe_check", "api_snipe_once", "api_snipe_monitor",
+                     "api_snipe_reset"):
             result = getattr(self.plugin, name)()
             self.assertIsNotNone(result)
             self.assertTrue(hasattr(result, "success"), name)

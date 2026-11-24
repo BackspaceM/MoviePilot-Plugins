@@ -33,6 +33,7 @@ _PROBE_KEY = "panda_ft_probe_v1"
 _AUCTION_KEY = "panda_ft_auction_v1"
 _CONSIGNMENT_KEY = "panda_ft_consignment_v1"
 _TASK_OPTIONS_KEY = "panda_ft_task_options_v1"
+_SNIPE_ATTEMPTED_KEY = "panda_ft_snipe_attempted_v1"  # 已出价记录（含未中标），防重复扣手续费
 _CMD_ACTION = "pandafriendtrade_run"
 _DEFAULT_CRON = "0 */6 * * *"
 
@@ -55,7 +56,7 @@ class PandaFriendTrade(_PluginBase):
                    "海报任务；海报拍卖行与寄售场合并为一个「低价抢购」项目，按价格从低到高捡漏。"
                    "档位从页面任务实时扫描。默认试运行，出价/买人/释放需显式开启。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pandafriendtrade.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_label = "熊猫PT,好友买卖,海报拍卖,寄售场,代理,规则引擎"
@@ -86,6 +87,7 @@ class PandaFriendTrade(_PluginBase):
         self._viewer_uid: int = 0                  # 我的 UID，寄售场需要
         self._task_options: list = []              # 扫描任务板得到的中文领奖档位
         self._snipe_state: Dict[str, Any] = {}     # 合并抢购项目只读缓存
+        self._snipe_attempted: List[str] = []     # 已出价过的 dedup_key（含未中标）
         self._net_fail_streak: int = 0             # 连续网络失败次数，用于降噪
 
     # ------------------------------------------------------------------ 生命周期
@@ -104,6 +106,7 @@ class PandaFriendTrade(_PluginBase):
         self._consignment_state = dict(self.get_data(_CONSIGNMENT_KEY) or {})
         self._task_options = list(self.get_data(_TASK_OPTIONS_KEY) or core.parse_task_options(None))
         self._snipe_state = dict(self.get_data("panda_ft_snipe_v1") or {})
+        self._snipe_attempted = [str(x) for x in (self.get_data(_SNIPE_ATTEMPTED_KEY) or [])]
         if self._enabled and not self._cfg.cookie:
             logger.warning(f"{LOG_TAG}尚未填写站点 Cookie，运行会失败")
         # 配置重载后按开关决定是否常驻「海报低价抢购」监控线程
@@ -161,6 +164,8 @@ class PandaFriendTrade(_PluginBase):
                                      if self._consignment_state else "还没检查过寄售场"),
                 "snipe": self._snipe_state,
                 "snipe_on": self._auction_running,
+                "snipe_rounds": self._cfg.poster_snipe_rounds,
+                "snipe_attempted": len(self._snipe_attempted),
                 "snipe_text": (f'{self._snipe_state.get("checked_at", "")}　'
                                f'{self._snipe_state.get("summary", "")}'
                                if self._snipe_state else "还没检查过海报行情"),
@@ -201,6 +206,8 @@ class PandaFriendTrade(_PluginBase):
              "auth": "bear", "summary": "按低价优先规则抢一次海报（试运行只出计划）"},
             {"path": "/snipe_monitor", "endpoint": self.api_snipe_monitor, "methods": ["POST"],
              "auth": "bear", "summary": "启动/停止统一的海报低价抢购监控"},
+            {"path": "/snipe_reset", "endpoint": self.api_snipe_reset, "methods": ["POST"],
+             "auth": "bear", "summary": "清空已抢记录（新一轮拍卖可重新参与）"},
         ]
 
     # ------------------------------------------------------------------ 按钮端点
@@ -311,14 +318,17 @@ class PandaFriendTrade(_PluginBase):
             return _api_fail("切换拍卖监控", exc)
 
     def api_auction_status(self) -> schemas.Response:
+        """合并项目的抢购状态：行情、轮次、已抢记录。"""
         try:
-            state = self._auction_state or {}
+            state = self._snipe_state or {}
             status = "运行中" if self._auction_running else "已停止"
-            text = (f"监控{status}｜每 {self._cfg.auction_poll_seconds} 秒｜"
+            text = (f"抢购监控{status}｜每 {self._cfg.poster_snipe_poll_seconds} 秒｜"
+                    f"抢购轮次 {self._cfg.poster_snipe_rounds}｜"
+                    f"已抢记录 {len(self._snipe_attempted)} 条｜"
                     f'最近 {state.get("checked_at", "未检查")}｜{state.get("summary", "无行情")}')
             return schemas.Response(success=True, message=text, data=state)
         except Exception as exc:  # noqa: BLE001
-            return _api_fail("读取拍卖状态", exc)
+            return _api_fail("读取抢购状态", exc)
 
     def api_consignment_check(self) -> schemas.Response:
         """只读检查寄售场行情，展示未拥有的可抢海报。"""
@@ -416,11 +426,13 @@ class PandaFriendTrade(_PluginBase):
             if a_view is None and c_view is None:
                 return schemas.Response(success=False,
                                         message=f"两个市场都读失败：{a_res.message}；{c_res.message}")
-            decisions = core.plan_snipe(self._cfg, a_view, c_view, now=int(time.time()))
+            decisions = core.plan_snipe(self._cfg, a_view, c_view, now=int(time.time()),
+                                        attempted=set(self._snipe_attempted))
             summary = core.snipe_summary(a_view, c_view)
             self._save_snipe_state(a_view, c_view, decisions, summary)
             balance = (a_view or c_view or {}).get("balance", 0)
-            text = f"{summary}｜余额 {balance} 魔力。符合低价规则 {len(decisions)} 件"
+            text = (f"{summary}｜余额 {balance} 魔力。本轮可抢 {len(decisions)} 件"
+                    f"（抢购轮次上限 {self._cfg.poster_snipe_rounds}，已抢记录 {len(self._snipe_attempted)} 条）")
             if decisions:
                 text += "：" + "；".join(d.reason for d in decisions[:6])
             errs = [m for ok, m in ((a_res.ok, a_res.message), (c_res.ok, c_res.message)) if not ok]
@@ -445,17 +457,18 @@ class PandaFriendTrade(_PluginBase):
             if a_view is None and c_view is None:
                 return schemas.Response(success=False,
                                         message=f"两个市场都读失败：{a_res.message}；{c_res.message}")
-            decisions = core.plan_snipe(self._cfg, a_view, c_view, now=int(time.time()))
+            decisions = core.plan_snipe(self._cfg, a_view, c_view, now=int(time.time()),
+                                        attempted=set(self._snipe_attempted))
             if not decisions:
-                reason = ("低价抢购未开启或价格上限为 0" if not self._cfg.do_poster_snipe
-                          or self._cfg.poster_snipe_max_price <= 0
-                          else "当前没有符合规则的海报（价格上限/稀有度/未拥有/余额等条件未满足）")
+                reason = ("低价抢购未开启，或全局上限与各稀有度区间都没设" if not self._cfg.do_poster_snipe
+                          or (self._cfg.poster_snipe_max_price <= 0 and not self._cfg.poster_snipe_ranges)
+                          else "当前没有符合规则的海报（价格区间/稀有度/未拥有/余额/已抢记录等条件未满足）")
                 return schemas.Response(success=True, message=reason)
             lines = [d.reason for d in decisions]
             if self._dry_run:
                 return schemas.Response(success=True,
-                                        message="试运行，未抢购。低价计划：" + "；".join(lines))
-            done = self._apply_snipe_decisions({d.lot_id: d for d in decisions}, a_view, c_view)
+                                        message=f"试运行，未抢购（本轮 {len(decisions)} 笔）：" + "；".join(lines))
+            done = self._apply_snipe_decisions(decisions, a_view, c_view)
             return schemas.Response(success=True,
                                     message=f"本轮抢购 {done}/{len(decisions)} 件：" + "；".join(lines))
         except Exception as exc:  # noqa: BLE001
@@ -670,7 +683,9 @@ class PandaFriendTrade(_PluginBase):
                                 self._save_auction_state(a_view)
                             if c_view is not None:
                                 self._save_consignment_state(c_view)
-                            decisions = core.plan_snipe(self._cfg, a_view, c_view, now=int(time.time()))
+                            decisions = core.plan_snipe(self._cfg, a_view, c_view,
+                                                        now=int(time.time()),
+                                                        attempted=set(self._snipe_attempted))
                             summary = core.snipe_summary(a_view, c_view)
                             self._save_snipe_state(a_view, c_view, decisions, summary)
                             if decisions:
@@ -678,8 +693,7 @@ class PandaFriendTrade(_PluginBase):
                                     logger.info(f"{LOG_TAG}[试运行]低价抢购计划：" +
                                                 "；".join(d.reason for d in decisions))
                                 else:
-                                    self._apply_snipe_decisions({d.lot_id: d for d in decisions},
-                                                                a_view, c_view)
+                                    self._apply_snipe_decisions(decisions, a_view, c_view)
                     except Exception as exc:  # noqa: BLE001 - 单轮异常不能终止循环
                         self._net_fail_streak += 1
                         level = logger.warning if self._net_fail_streak >= 3 else logger.debug
@@ -753,28 +767,34 @@ class PandaFriendTrade(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{LOG_TAG}保存寄售状态失败：{exc}")
 
-    def _apply_snipe_decisions(self, decisions_by_id: Dict[int, Any],
+    def _apply_snipe_decisions(self, decisions: List[core.SnipeDecision],
                                a_view: Optional[Dict[str, Any]],
                                c_view: Optional[Dict[str, Any]]) -> int:
-        """执行统一抢购：按来源找 lot 校验状态后，dutch 直买 / 其它出价。"""
+        """执行统一抢购：dutch 直买 / 其它出价。
+
+        关键：出价请求一旦发出，站点就扣手续费（未中标本金退、手续费不退），
+        所以无论返回成功或失败都立即记入「已抢记录」，避免下一轮重复扣费。
+        """
         client = self._client()
         uid = self._ensure_viewer_uid(client)
-        views = [(a_view, "拍卖行"), (c_view, "寄售场")]
+        views = {"拍卖行": a_view, "寄售场": c_view}
         done = 0
-        for lot_id, d in decisions_by_id.items():
+        for d in decisions:
+            key = d.dedup_key or core.snipe_dedup_key(d.source, d.lot_id)
+            if key in self._snipe_attempted:
+                continue
             lot = None
-            for view, source in views:
-                for candidate in (view or {}).get("lots") or []:
-                    if isinstance(candidate, core.AuctionLot) and candidate.id == lot_id:
-                        lot = candidate
-                        break
-                if lot is not None:
+            for candidate in (views.get(d.source) or {}).get("lots") or []:
+                if isinstance(candidate, core.AuctionLot) and candidate.id == d.lot_id:
+                    lot = candidate
                     break
             if not lot or lot.status != "open" or lot.is_mine:
-                logger.info(f"{LOG_TAG}抢购跳过 lot {lot_id}：状态已变化")
+                logger.info(f"{LOG_TAG}抢购跳过 {key}：状态已变化")
                 continue
-            if d.amount > self._cfg.poster_snipe_max_price:
+            if not core.snipe_price_allowed(self._cfg, d.amount, lot.rarity):
                 continue
+            # 出价即扣手续费：先落盘记录，再发请求，杜绝并发/异常导致的重复出价
+            self._record_attempted(key)
             if d.action_kind == "dutch_buy":
                 result = client.dutch_buy(lot.id, d.amount, lot.rule_version, uid)
             else:
@@ -783,8 +803,33 @@ class PandaFriendTrade(_PluginBase):
                 done += 1
                 logger.info(f"{LOG_TAG}抢购成功：{d.reason}｜{result.message}")
             else:
-                logger.warning(f"{LOG_TAG}抢购失败：{d.reason}｜{result.message}")
+                logger.warning(f"{LOG_TAG}抢购失败（已计入已抢记录，不再重试）：{d.reason}｜{result.message}")
         return done
+
+    def _record_attempted(self, key: str) -> None:
+        """记录已出价的拍品，持久化；保留最近 2000 条避免无限增长。"""
+        if key in self._snipe_attempted:
+            return
+        self._snipe_attempted.append(key)
+        if len(self._snipe_attempted) > 2000:
+            self._snipe_attempted = self._snipe_attempted[-2000:]
+        try:
+            self.save_data(_SNIPE_ATTEMPTED_KEY, self._snipe_attempted)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{LOG_TAG}保存已抢记录失败：{exc}")
+
+    def api_snipe_reset(self) -> schemas.Response:
+        """清空已抢记录：新一轮拍卖/重新上架后可再次参与。"""
+        try:
+            count = len(self._snipe_attempted)
+            self._snipe_attempted = []
+            try:
+                self.save_data(_SNIPE_ATTEMPTED_KEY, [])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"{LOG_TAG}清空已抢记录失败：{exc}")
+            return schemas.Response(success=True, message=f"已清空 {count} 条已抢记录，下一轮可重新参与")
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("清空已抢记录", exc)
 
     def _save_snipe_state(self, a_view: Optional[Dict[str, Any]],
                           c_view: Optional[Dict[str, Any]],

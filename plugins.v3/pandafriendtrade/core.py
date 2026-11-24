@@ -140,11 +140,13 @@ class Config:
 
     # ---- 合并后的「海报低价抢购」：拍卖行 + 寄售场归为一个项目 ----
     do_poster_snipe: bool = False            # 总开关；缺省兼容旧 do_auction/do_consignment
-    poster_snipe_max_price: int = 0          # 单件价格上限(魔力)，0=不买
+    poster_snipe_max_price: int = 0          # 全局单件价格上限(魔力)，0=不按全局抢
     poster_snipe_rarities: Tuple[str, ...] = ()  # 稀有度白名单，空=不限
     poster_snipe_unowned_only: bool = True   # 只抢未拥有
     poster_snipe_poll_seconds: int = 15      # 统一轮询间隔
     poster_claim_tasks: Tuple[str, ...] = ()  # 领奖档位多选（站点 task_key），空=全部可领
+    poster_snipe_rounds: int = 3             # 抢购轮次：每轮扫描最多连续出价几笔
+    poster_snipe_ranges: Dict[str, Tuple[int, int]] = field(default_factory=dict)  # 每稀有度价格区间
 
     @property
     def interact_cost_limit(self) -> int:
@@ -215,6 +217,39 @@ def parse_choices(value: Any, allowed: Tuple[str, ...]) -> Tuple[str, ...]:
     else:
         parts = [x.strip().lower() for x in re.split(r"[,，;；\s]+", str(value or ""))]
     return tuple(x for x in dict.fromkeys(parts) if x in allowed)
+
+
+# 每个稀有度的独立价格区间：snipe_range_<rarity> = "最低-最高"，如 excellent = "5000-7000"
+SNIPE_RARITY_KEYS: Tuple[str, ...] = ("normal", "excellent", "rare", "precious", "legendary")
+
+
+def parse_snipe_ranges(raw: Dict[str, Any]) -> Dict[str, Tuple[int, int]]:
+    """解析「每个稀有度一个价格区间」配置。
+
+    支持 "5000-7000" / "5000~7000" / 单个 "5000"（视为 0-5000）与
+    (low, high) 列表/元组。留空或非法值忽略。最低/最高写反会自动纠正。
+    """
+    result: Dict[str, Tuple[int, int]] = {}
+    for key in SNIPE_RARITY_KEYS:
+        value = raw.get(f"snipe_range_{key}")
+        low = high = 0
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            low, high = _to_int(value[0]), _to_int(value[1])
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            high = _to_int(value)
+        elif value is not None:
+            nums = re.findall(r"\d+", str(value))
+            if len(nums) >= 2:
+                low, high = int(nums[0]), int(nums[1])
+            elif len(nums) == 1:
+                high = int(nums[0])
+        if high <= 0:
+            continue
+        low = max(0, low)
+        if low > high:
+            low, high = high, low
+        result[key] = (low, high)
+    return result
 
 
 def normalize_proxy(value: Any) -> str:
@@ -318,6 +353,8 @@ def parse_config(raw: Dict[str, Any]) -> Config:
         poster_claim_tasks=tuple(str(x).strip() for x in
                                  (raw.get("poster_claim_tasks") or ())
                                  if str(x).strip()),
+        poster_snipe_rounds=max(1, min(50, _to_int(raw.get("poster_snipe_rounds"), 3))),
+        poster_snipe_ranges=parse_snipe_ranges(raw),
     )
 
 
@@ -1200,26 +1237,62 @@ class SnipeDecision:
     action_kind: str      # dutch_buy / bid
     rule_version: str
     reason: str
+    dedup_key: str = ""   # 已抢记录用的去重键（来源:lot_id）
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "lot_id": self.lot_id, "poster_id": self.poster_id, "title": self.title,
+            "rarity": self.rarity, "source": self.source, "mode": self.mode,
+            "amount": self.amount, "fee": self.fee, "action_kind": self.action_kind,
+            "rule_version": self.rule_version, "reason": self.reason,
+            "dedup_key": self.dedup_key,
+        }
+
+
+def snipe_dedup_key(source: str, lot_id: int) -> str:
+    """已出价记录键。两个市场的 lot_id 可能撞号，故带来源前缀。"""
+    return f"{source}:{lot_id}"
+
+
+def snipe_price_allowed(cfg: Config, amount: int, rarity: str) -> bool:
+    """价格门槛：优先用「该稀有度价格区间」，未配区间的稀有度退回全局上限。
+
+    全局 poster_snipe_max_price > 0 时始终作为总闸门（不得超过）。
+    配了任一稀有度区间后，未配区间的稀有度仍可用全局上限抢；两者都为 0 则不抢。
+    """
+    if amount <= 0:
+        return False
+    if cfg.poster_snipe_max_price > 0 and amount > cfg.poster_snipe_max_price:
+        return False
+    rng = cfg.poster_snipe_ranges.get(rarity)
+    if rng is not None:
+        low, high = rng
+        return low <= amount <= high
+    return cfg.poster_snipe_max_price > 0
 
 
 def plan_snipe(cfg: Config,
                auction_view: Optional[Dict[str, Any]],
                consignment_view: Optional[Dict[str, Any]],
-               now: Optional[int] = None) -> List[SnipeDecision]:
+               now: Optional[int] = None,
+               attempted: Optional[set] = None) -> List[SnipeDecision]:
     """把拍卖行与寄售场的在售海报合并成一个候选池，按价格从低到高产出抢购决策。
 
     规则（单一项目、逻辑收敛）：
-    - 总开关 do_poster_snipe + 价格上限 poster_snipe_max_price（0=不抢）；
-    - 来自两个市场的所有 open 拍品，排除我的、已拥有的（可选）、稀有度不在白名单的；
+    - 总开关 do_poster_snipe；价格闸门 = 每稀有度区间，未配的用全局上限（都为 0 则不抢）；
+    - 「抢购轮次」poster_snipe_rounds：一次扫描最多连续出价 N 笔，避免一轮把手续费全砸出去；
+    - attempted 为已出价记录（含未中标）：跳过，因为出价即扣手续费、未中标不退；
     - 每个候选的「到手价」：dutch 用当前价直接买，open/sealed 用最低有效出价 minimum_bid；
-    - 按到手价升序排列——先抢最便宜的，价格超过上限或余额不足就跳过后面更贵的；
-    - 不设抢拍倒计时策略（低价优先，不等最后几秒，避免错过便宜货）；
-    - 出价动作仍受单点规则保护：不领先、不重复、金额≥站点最低有效价。
+    - 按到手价升序排列——先抢最便宜的；
+    - 出价动作仍受单点规则保护：不领先、金额≥站点最低有效价、余额覆盖金额+手续费。
     """
-    if not cfg.do_poster_snipe or cfg.poster_snipe_max_price <= 0:
+    if not cfg.do_poster_snipe:
+        return []
+    if cfg.poster_snipe_max_price <= 0 and not cfg.poster_snipe_ranges:
         return []
     now_ts = int(now if now is not None else time.time())
     rarities = set(cfg.poster_snipe_rarities)
+    tried = set(attempted or ())
     balance = 0.0
     for view in (auction_view, consignment_view):
         if isinstance(view, dict) and _to_float(view.get("balance")) > balance:
@@ -1231,6 +1304,10 @@ def plan_snipe(cfg: Config,
             continue
         for lot in view.get("lots") or []:
             if not isinstance(lot, AuctionLot):
+                continue
+            key = snipe_dedup_key(source, lot.id)
+            # 已抢过的（含未中标）不再出价：手续费已扣，重复出价会再扣一次
+            if key in tried or str(lot.id) in tried or lot.id in tried:
                 continue
             if lot.status != "open" or lot.is_mine or lot.can_bid is False and lot.can_buy is False:
                 continue
@@ -1246,7 +1323,7 @@ def plan_snipe(cfg: Config,
                 kind = "bid"
                 if lot.is_leading:
                     continue
-            if amount <= 0 or amount > cfg.poster_snipe_max_price:
+            if not snipe_price_allowed(cfg, amount, lot.rarity):
                 continue
             fee = auction_fee(amount, lot.bid_fee_bps)
             if balance > 0 and amount + fee > balance:
@@ -1254,15 +1331,16 @@ def plan_snipe(cfg: Config,
             candidates.append(SnipeDecision(
                 lot_id=lot.id, poster_id=lot.poster_id, title=lot.title, rarity=lot.rarity,
                 source=source, mode=lot.mode, amount=amount, fee=fee, action_kind=kind,
-                rule_version=lot.rule_version,
+                rule_version=lot.rule_version, dedup_key=key,
                 reason=(f"[{source}]《{lot.title}》{lot.rarity_label} "
                         f"{'荷兰现价' if kind == 'dutch_buy' else '最低出价'}{amount}魔力"
-                        f"（手续费{fee}，未拥有）"),
+                        f"｜手续费{fee}魔力（出价即扣，未中标不退）"),
             ))
 
     # 核心：低价优先。同价时寄售场在前（可直接买、无需等落槌）
     candidates.sort(key=lambda d: (d.amount, 0 if d.source == "寄售场" else 1))
-    return candidates
+    # 抢购轮次：本轮最多出价 N 笔，按价格从低到高取
+    return candidates[:max(1, cfg.poster_snipe_rounds)]
 
 
 def snipe_summary(auction_view: Optional[Dict[str, Any]],

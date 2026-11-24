@@ -119,6 +119,12 @@ DEFAULTS: dict[str, Any] = {
     "poster_snipe_unowned_only": True,
     "poster_snipe_poll_seconds": 15,
     "poster_claim_tasks": "",
+    "poster_snipe_rounds": 3,
+    "snipe_range_normal": "",
+    "snipe_range_excellent": "",
+    "snipe_range_rare": "",
+    "snipe_range_precious": "",
+    "snipe_range_legendary": "",
 }
 
 
@@ -158,11 +164,15 @@ def form(task_options: list | None = None) -> tuple[list[dict], dict[str, Any]]:
             _field("VSwitch", "notify", "发送通知", 4),
         ),
 
-        _section("① 登录与网络", "Cookie 只存本机；代理按需开启，SOCKS 需容器装 PySocks"),
+        _section("连接与网络", "Cookie 只存本机；代理按需开启，SOCKS 需容器装 PySocks"),
         _row(
             _field("VTextField", "site", "站点地址", 6, placeholder=core.DEFAULT_SITE),
             _field("VTextField", "timeout", "请求超时(秒)", 3),
             _field("VTextField", "max_actions", "每轮动作上限", 3),
+        ),
+        _row(
+            _field("VTextField", "request_interval", "请求间隔(秒)", 12,
+                   hint="默认 1.5 秒，别调太小以免触发站点风控", persistentHint=True),
         ),
         _row(
             _field("VTextField", "proxy_url", "代理地址（可选）", 8,
@@ -227,26 +237,43 @@ def form(task_options: list | None = None) -> tuple[list[dict], dict[str, Any]]:
         _alert(
             "海报低价抢购：拍卖行和寄售场合并为一个项目，统一按「价格从低到高」捡漏，先抢最便宜的。"
             "荷兰降价品按当前价直接买，竞价品按站点最低有效价出价（暗拍，不重复加价）。"
-            "拍卖看板偶发断连会自动重试，连续失败才会写警告日志。", "info"),
+            "注意：出价即扣手续费，未中标本金退还但手续费不退；已出价过的海报会自动跳过，不再重复扣费。", "info"),
         _row(
-            _field("VSwitch", "do_poster_snipe", "开启海报低价抢购", 6,
+            _field("VSwitch", "do_poster_snipe", "开启海报低价抢购", 4,
                    hint="一个开关同时管拍卖行+寄售场；关闭则完全不碰抢购", persistentHint=True),
-            _field("VTextField", "poster_snipe_max_price", "单件价格上限(魔力)", 6,
-                   hint="0=不抢；超过此价的海报跳过，只抢更便宜的", persistentHint=True),
+            _field("VTextField", "poster_snipe_rounds", "抢购轮次（每轮最多出价几笔）", 4,
+                   hint="默认 3；一次扫描按价格从低到高最多抢 N 笔，防止一轮把手续费全砸出去", persistentHint=True),
+            _field("VTextField", "poster_snipe_max_price", "全局价格上限(魔力)", 4,
+                   hint="0=不按全局抢；设了下面的稀有度区间时，本项作为总闸门", persistentHint=True),
         ),
         _row(
             {
                 "component": "VCol", "props": {"cols": 12, "md": 6},
                 "content": [_multi_select("poster_snipe_rarities", "只抢这些稀有度（不选=全部）",
-                                          RARITY_ITEMS, "中文多选，可多选；留空不限稀有度")],
+                                          RARITY_ITEMS, "中文多选；留空不限稀有度")],
             },
-            _field("VSwitch", "poster_snipe_unowned_only", "只要未拥有的海报", 6,
+            _field("VSwitch", "poster_snipe_unowned_only", "只要未拥有的海报", 3,
                    hint="默认开，避免重复买已有的", persistentHint=True),
+            _field("VTextField", "poster_snipe_poll_seconds", "抢购轮询间隔(秒)", 3,
+                   hint="建议 15 秒", persistentHint=True),
+        ),
+
+        _alert(
+            "按稀有度设置价格档位（价格区间）：填「最低-最高」，如优秀填 5000-7000、稀有的填 15000-20000。"
+            "只抢价格落在区间内的海报；留空的稀有度按上面的全局上限判断。只填一个数字视为 0 到该价。", "info"),
+        _row(
+            _field("VTextField", "snipe_range_normal", "普通 · 价格区间", 4,
+                   placeholder="如 1000-3000", hint="留空则按全局上限", persistentHint=True),
+            _field("VTextField", "snipe_range_excellent", "优秀 · 价格区间", 4,
+                   placeholder="如 5000-7000", hint="留空则按全局上限", persistentHint=True),
+            _field("VTextField", "snipe_range_rare", "稀有 · 价格区间", 4,
+                   placeholder="如 15000-20000", hint="留空则按全局上限", persistentHint=True),
         ),
         _row(
-            _field("VTextField", "poster_snipe_poll_seconds", "抢购轮询间隔(秒)", 6,
-                   hint="建议 15 秒；两个市场各查一次", persistentHint=True),
-            _field("VTextField", "max_actions", "每轮动作上限", 6),
+            _field("VTextField", "snipe_range_precious", "珍贵 · 价格区间", 6,
+                   placeholder="如 30000-50000", hint="留空则按全局上限", persistentHint=True),
+            _field("VTextField", "snipe_range_legendary", "传说 · 价格区间", 6,
+                   placeholder="如 80000-120000", hint="留空则按全局上限", persistentHint=True),
         ),
 
         _alert(
@@ -285,46 +312,6 @@ def form(task_options: list | None = None) -> tuple[list[dict], dict[str, Any]]:
         _row(
             _field("VSwitch", "release_temporary", "自动释放临时佣人", 12,
                    hint="需同时打开「启用释放」；临时佣人到期会被释放，不可撤回", persistentHint=True),
-        ),
-
-        # ===== 高级兼容：旧拍卖/寄售细分字段，仅保留给老配置与旧脚本，正常无需改 =====
-        _section("高级兼容（旧版细分参数，正常无需修改）",
-                 "新用户只用上面的「③ 海报低价抢购」即可；这里保留旧字段以兼容已有配置。"),
-        _row(
-            _field("VSwitch", "do_auction", "旧·开启拍卖监控", 4),
-            _field("VSwitch", "auction_auto_bid", "旧·自动出价", 4),
-            _field("VSwitch", "auction_require_no_leader", "旧·只抢无人出价", 4),
-        ),
-        _row(
-            _field("VTextField", "auction_budget", "旧·单品出价上限", 4),
-            _field("VTextField", "auction_total_budget", "旧·本轮总占用上限", 4),
-            _field("VTextField", "auction_snipe_seconds", "旧·抢拍窗口(秒)", 4),
-        ),
-        _row(
-            _field("VTextField", "auction_rarities", "旧·只抢稀有度", 6),
-            _field("VTextField", "auction_aggressive_steps", "旧·额外加价档数", 6),
-        ),
-        _row(
-            _field("VTextField", "auction_max_bids_per_lot", "旧·单品最多加价次数", 4),
-            _field("VTextField", "auction_min_gap", "旧·加价最小间隔(秒)", 4),
-            _field("VTextField", "auction_poll_seconds", "旧·轮询间隔(秒)", 4),
-        ),
-        _row(
-            _field("VSwitch", "do_consignment", "旧·开启寄售场监控", 4),
-            _field("VSwitch", "consignment_auto_bid", "旧·自动抢购", 4),
-            _field("VSwitch", "consignment_unowned_only", "旧·只要未拥有", 4),
-        ),
-        _row(
-            _field("VTextField", "consignment_budget", "旧·单品价格上限", 6),
-            _field("VTextField", "consignment_modes", "旧·参与模式", 6),
-        ),
-        _row(
-            _field("VTextarea", "consignment_wanted_poster_ids", "旧·想要的指定海报 ID", 6, rows=3),
-            _field("VTextField", "consignment_rarities", "旧·想要的档位", 6),
-        ),
-        _row(
-            _field("VTextField", "poster_claim_rarities", "旧·领奖稀有度", 6),
-            _field("VTextField", "request_interval", "请求间隔(秒)", 6),
         ),
 
         _alert("所有动作都会先产出计划并写进插件日志（卡片右上角「…」→ 查看日志）。试运行时只记录不执行。", "info"),
@@ -389,8 +376,8 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         _button("检查海报行情", "snipe_check", "post", "mdi-magnify"),
         _button("立即低价抢购", "snipe_once", "post", "mdi-cart-arrow-down", "warning"),
         _button("启动/停止抢购", "snipe_monitor", "post", "mdi-fast-forward", "primary"),
-        _button("检查寄售场", "consignment_check", "post", "mdi-store-search"),
-        _button("拍卖状态", "auction_status", "get", "mdi-pulse"),
+        _button("清空已抢记录", "snipe_reset", "post", "mdi-backup-restore"),
+        _button("抢购状态", "auction_status", "get", "mdi-pulse"),
     ]
 
     badge = '<span class="pf-badge on">正在运行</span>' if running else '<span class="pf-badge">空闲</span>'
@@ -438,12 +425,16 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + f'<span class="pf-line-v">{_e(data.get("snipe_text") or "还没检查过")}</span></div>'
         + f'<div class="pf-line"><span class="pf-line-k">当前余额</span>'
         + f'<span class="pf-line-v">{_e(snipe.get("balance", "—"))} 魔力</span></div>'
-        + f'<div class="pf-line"><span class="pf-line-k">符合低价规则</span>'
-        + f'<span class="pf-line-v">{_e(snipe.get("candidates", 0))} 件（按价格从低到高）</span></div>'
+        + f'<div class="pf-line"><span class="pf-line-k">本轮可抢</span>'
+        + f'<span class="pf-line-v">{_e(snipe.get("candidates", 0))} 件（按价格从低到高，'
+        + f'抢购轮次上限 {_e(data.get("snipe_rounds", 3))}）</span></div>'
+        + f'<div class="pf-line"><span class="pf-line-k">已抢记录</span>'
+        + f'<span class="pf-line-v">{_e(data.get("snipe_attempted", 0))} 条（出过价的不再重复抢）</span></div>'
         + s_rows
         + '</div>'
         + '<div class="pf-note">拍卖行与寄售场已合并为一个项目，统一按价格从低到高捡漏，先抢最便宜的。'
-        + '「检查海报行情」只读不出价；自动抢购请在配置页开启「海报低价抢购」并设置价格上限。'
+        + '可为每个稀有度单独设价格区间；出价即扣手续费、未中标手续费不退，因此已出价过的海报自动记入'
+        + '「已抢记录」不再重复抢（想重新参与请点「清空已抢记录」）。'
         + '领奖档位请先点「扫描任务档位」，再到配置页下拉框选择。</div>'
     )
 
