@@ -61,6 +61,7 @@ DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "dry_run": True,
     "notify": False,
+    "cron": core.DEFAULT_CRON,
     "cookie": "",
     "site": core.DEFAULT_SITE,
     "proxy_url": "",
@@ -163,6 +164,12 @@ def form(task_options: list | None = None) -> tuple[list[dict], dict[str, Any]]:
                    hint="开启时只产出计划写日志，不真正点按钮；确认无误再关掉", persistentHint=True),
             _field("VSwitch", "notify", "发送通知", 4),
         ),
+        _row(
+            _field("VTextField", "cron", "定时执行周期（5 位 crontab）", 12,
+                   placeholder=core.DEFAULT_CRON,
+                   hint="分 时 日 月 周；默认 0 3,9,18,23 * * * 即凌晨3点、9点、18点、23点整各跑一轮。改完保存即生效", persistentHint=True),
+        ),
+        _alert("定时任务由插件注册给宿主调度器：只有「启用插件」开启时才会注册；同一天已工作/互动过的佣人不会再被安排。", "info"),
 
         _section("连接与网络", "Cookie 只存本机；代理按需开启，SOCKS 需容器装 PySocks"),
         _row(

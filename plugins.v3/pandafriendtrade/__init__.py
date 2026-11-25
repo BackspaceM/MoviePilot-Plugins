@@ -34,8 +34,8 @@ _AUCTION_KEY = "panda_ft_auction_v1"
 _CONSIGNMENT_KEY = "panda_ft_consignment_v1"
 _TASK_OPTIONS_KEY = "panda_ft_task_options_v1"
 _SNIPE_ATTEMPTED_KEY = "panda_ft_snipe_attempted_v1"  # 已出价记录（含未中标），防重复扣手续费
+_SERVANT_DONE_KEY = "panda_ft_servant_done_v1"        # 当天已工作/互动过的佣人 UID
 _CMD_ACTION = "pandafriendtrade_run"
-_DEFAULT_CRON = "0 */6 * * *"
 
 
 def _api_fail(action: str, exc: Exception) -> schemas.Response:
@@ -56,7 +56,7 @@ class PandaFriendTrade(_PluginBase):
                    "海报任务；海报拍卖行与寄售场合并为一个「低价抢购」项目，按价格从低到高捡漏。"
                    "档位从页面任务实时扫描。默认试运行，出价/买人/释放需显式开启。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pandafriendtrade.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
     plugin_label = "熊猫PT,好友买卖,海报拍卖,寄售场,代理,规则引擎"
@@ -88,6 +88,7 @@ class PandaFriendTrade(_PluginBase):
         self._task_options: list = []              # 扫描任务板得到的中文领奖档位
         self._snipe_state: Dict[str, Any] = {}     # 合并抢购项目只读缓存
         self._snipe_attempted: List[str] = []     # 已出价过的 dedup_key（含未中标）
+        self._servant_done: Dict[str, Any] = {}   # 当天已工作/互动的佣人 UID
         self._net_fail_streak: int = 0             # 连续网络失败次数，用于降噪
 
     # ------------------------------------------------------------------ 生命周期
@@ -107,6 +108,7 @@ class PandaFriendTrade(_PluginBase):
         self._task_options = list(self.get_data(_TASK_OPTIONS_KEY) or core.parse_task_options(None))
         self._snipe_state = dict(self.get_data("panda_ft_snipe_v1") or {})
         self._snipe_attempted = [str(x) for x in (self.get_data(_SNIPE_ATTEMPTED_KEY) or [])]
+        self._servant_done = self._load_servant_done()
         if self._enabled and not self._cfg.cookie:
             logger.warning(f"{LOG_TAG}尚未填写站点 Cookie，运行会失败")
         # 配置重载后按开关决定是否常驻「海报低价抢购」监控线程
@@ -127,6 +129,30 @@ class PandaFriendTrade(_PluginBase):
                 remover(self.__class__.__name__, "run")
             except Exception:  # noqa: BLE001
                 pass
+
+    def get_service(self) -> list[dict[str, Any]]:
+        """注册定时执行周期（5 位 crontab）。禁用时返回空，宿主不调度。"""
+        if not self._enabled:
+            return []
+        try:
+            trigger = CronTrigger.from_crontab(self._cfg.cron)
+        except (ValueError, TypeError):
+            trigger = CronTrigger.from_crontab(core.DEFAULT_CRON)
+        return [{
+            "id": "PandaFriendTrade",
+            "name": "熊猫好友买卖",
+            "trigger": trigger,
+            "func": self.run_scheduled,
+            "kwargs": {},
+            "func_kwargs": {},
+        }]
+
+    def run_scheduled(self) -> None:
+        """定时服务入口：走与手动按钮相同的一轮执行。"""
+        if not self._enabled or not self._cfg.cookie or self._running:
+            logger.info(f"{LOG_TAG}定时跳过：未启用/无 Cookie/上一轮未结束")
+            return
+        self._start(force_dry=False)
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
         try:
@@ -151,8 +177,8 @@ class PandaFriendTrade(_PluginBase):
                              if self._last else "还没跑过",
                 "probe_text": (f'{self._probe.get("checked_at", "")}　{self._probe.get("message", "")}'
                                if self._probe else "还没检测过"),
-                "schedule_text": (f"计划任务 {_DEFAULT_CRON}" if self._cfg.enabled
-                                  else "定时已禁用，用下方按钮手动运行"),
+                "schedule_text": (f"定时执行周期 {self._cfg.cron}（分 时 日 月 周）"
+                                  if self._cfg.enabled else "插件未启用，定时任务未注册；用下方按钮手动运行"),
                 "auction": self._auction_state,
                 "auction_running": self._auction_running,
                 "auction_text": (f'{self._auction_state.get("checked_at", "")}　'
@@ -874,7 +900,11 @@ class PandaFriendTrade(_PluginBase):
         board = board_r.data if board_r.ok and isinstance(board_r.data, dict) else {}
         poster_board = poster_board_r.data if poster_board_r.ok and isinstance(poster_board_r.data, dict) else {}
 
-        actions = core.build_plan(cfg, home, board, poster_board)
+        actions = core.build_plan(
+            cfg, home, board, poster_board,
+            done_work=set(self._servant_done.get("work") or ()),
+            done_interact=set(self._servant_done.get("interact") or ()),
+        )
 
         # 买人：先查市场 + 逐个查详情，再按实时价格与属性过滤
         if cfg.do_buy and cfg.buy_max_price > 0:
@@ -921,6 +951,7 @@ class PandaFriendTrade(_PluginBase):
             ok, message = self._run_action(client, action)
             if ok:
                 done += 1
+                self._mark_servant_done(action)  # 当天已执行，后续轮次不再安排
                 logger.info(f"{LOG_TAG}  ✓ {action.label}：{message}")
             else:
                 failed += 1
@@ -1004,6 +1035,39 @@ class PandaFriendTrade(_PluginBase):
                 logger.info(f"{LOG_TAG}  ✓ 赠送《{poster.get('title_cn') or poster.get('title') or poster_id}》给 {uid}")
                 sent += 1
                 break
+
+    # ------------------------------------------------------------------ 佣人按天去重
+
+    @staticmethod
+    def _today() -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _load_servant_done(self) -> Dict[str, Any]:
+        """读取当天已工作/互动记录；日期不匹配（跨天）自动清空。"""
+        data = self.get_data(_SERVANT_DONE_KEY) or {}
+        if not isinstance(data, dict) or data.get("date") != self._today():
+            return {"date": self._today(), "work": [], "interact": []}
+        return {
+            "date": self._today(),
+            "work": [int(x) for x in (data.get("work") or []) if str(x).isdigit()],
+            "interact": [int(x) for x in (data.get("interact") or []) if str(x).isdigit()],
+        }
+
+    def _mark_servant_done(self, action: core.Action) -> None:
+        """动作执行成功后，把佣人 UID 记入当天对应类别，避免同一天重复安排。"""
+        if action.action not in ("friendTradeWork", "friendTradeInteract"):
+            return
+        uid = core._to_int(action.params.get("target_uid"))
+        if uid <= 0:
+            return
+        key = "work" if action.action == "friendTradeWork" else "interact"
+        if uid not in self._servant_done.setdefault(key, []):
+            self._servant_done[key].append(uid)
+        self._servant_done["date"] = self._today()
+        try:
+            self.save_data(_SERVANT_DONE_KEY, self._servant_done)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{LOG_TAG}保存佣人去重记录失败：{exc}")
 
     # ------------------------------------------------------------------ 落盘
 

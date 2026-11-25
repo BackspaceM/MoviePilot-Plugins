@@ -240,5 +240,54 @@ class TestDecisions(unittest.TestCase):
         self.assertEqual(core.summarize(actions), {"total": 4, "safe": 2, "cost": 1, "irreversible": 1})
 
 
+class TestCronAndDedup(unittest.TestCase):
+    """v1.5.0：5 位 cron 定时周期 + 佣人工作/互动按天去重。"""
+
+    def test_cron_default(self):
+        self.assertEqual(core.parse_config({}).cron, "0 3,9,18,23 * * *")
+        self.assertEqual(core.normalize_cron("0  3,9 * * ?"), "0 3,9 * * *")
+
+    def test_cron_validate(self):
+        good = ("0 3,9,18,23 * * *", "*/30 * * * *", "0 0 1 * 1-5", "5,10 2 * * *")
+        for expr in good:
+            ok, text = core.validate_cron(expr)
+            self.assertTrue(ok, expr)
+            self.assertEqual(len(text.split(" ")), 5, expr)
+        bad = ("", "0 3 * *", "60 3 * * *", "0 25 * * *", "0 3 * * * *", "a 3 * * *")
+        for expr in bad:
+            self.assertFalse(core.validate_cron(expr)[0], expr)
+
+    def test_cron_invalid_falls_back(self):
+        self.assertEqual(core.parse_config({"cron": "bad cron"}).cron, core.DEFAULT_CRON)
+
+    def _home(self):
+        return {"claimable_income": "0", "task_status": [], "my_owner": {}, "my_assets": [
+            {"slave_uid": 11, "username": "甲",
+             "cultivation_summary": {"can_work_today": True, "can_interact_today": True,
+                                     "work_options": {"clean": {}}, "available_works": {"clean": {}}}},
+            {"slave_uid": 22, "username": "乙",
+             "cultivation_summary": {"can_work_today": True, "can_interact_today": True,
+                                     "work_options": {"clean": {}}, "available_works": {"clean": {}}}},
+        ]}
+
+    def _uids(self, actions, kind):
+        return sorted(a.params["target_uid"] for a in actions if a.action == kind)
+
+    def test_dedup_work_and_interact(self):
+        cfg = core.parse_config({"do_work": True, "do_interact": True})
+        acts = core.build_plan(cfg, self._home(), {}, {})
+        self.assertEqual(self._uids(acts, "friendTradeWork"), [11, 22])
+        self.assertEqual(self._uids(acts, "friendTradeInteract"), [11, 22])
+        done = core.build_plan(cfg, self._home(), {}, {}, done_work={11}, done_interact={22})
+        self.assertEqual(self._uids(done, "friendTradeWork"), [22])
+        self.assertEqual(self._uids(done, "friendTradeInteract"), [11])
+
+    def test_dedup_independent(self):
+        cfg = core.parse_config({"do_work": True, "do_interact": True})
+        done = core.build_plan(cfg, self._home(), {}, {}, done_work={11, 22}, done_interact=set())
+        self.assertEqual(self._uids(done, "friendTradeWork"), [])
+        self.assertEqual(self._uids(done, "friendTradeInteract"), [11, 22])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

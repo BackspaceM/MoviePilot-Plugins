@@ -21,6 +21,33 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_SITE = "https://pandapt.net"
 
+# 定时执行周期：默认凌晨 3/9/18/23 点整（5 位 crontab：分 时 日 月 周）
+DEFAULT_CRON = "0 3,9,18,23 * * *"
+_CRON_TOKEN = re.compile(r"^[0-9*,/?\-]+$")
+
+
+def normalize_cron(expression: Any) -> str:
+    """归一化 crontab：? 视作 *，压缩空白。"""
+    return " ".join(str(expression or "").replace("?", "*").split())
+
+
+def validate_cron(expression: Any) -> tuple[bool, str]:
+    """校验 5 位 crontab 的段数、字符集与数值范围；合法时返回归一化结果。"""
+    text = normalize_cron(expression)
+    if not text:
+        return False, "执行周期为空"
+    fields = text.split(" ")
+    if len(fields) != 5:
+        return False, "必须是 5 位 crontab：分 时 日 月 周"
+    limits = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+    for field, (low, high) in zip(fields, limits):
+        if not _CRON_TOKEN.fullmatch(field):
+            return False, f"非法字符：{field}"
+        for number in re.findall(r"\d+", field):
+            if not low <= int(number) <= high:
+                return False, f"字段 {field} 超出范围 {low}-{high}"
+    return True, text
+
 # 互动选项：站点 interactionOptions 的固定 key 与魔力成本（实测，2026-11）
 INTERACTIONS: Dict[str, Dict[str, Any]] = {
     "praise": {"label": "夸夸", "cost": 0, "exp": 3},
@@ -79,6 +106,7 @@ class Config:
     timeout: int = 30
     request_interval: float = 1.0
     max_actions: int = 60
+    cron: str = DEFAULT_CRON  # 5 位 crontab 定时执行周期
 
     # 代理：http/https/socks5，格式 [user:pass@]host:port；空则直连
     proxy_url: str = ""
@@ -277,8 +305,12 @@ def parse_config(raw: Dict[str, Any]) -> Config:
     commission_preference = str(raw.get("commission_preference") or "experience").strip()
     if commission_preference not in {"experience", "magic", "posters"}:
         commission_preference = "experience"
+    cron_ok, cron = validate_cron(raw.get("cron") or DEFAULT_CRON)
+    if not cron_ok:
+        cron = DEFAULT_CRON
 
     return Config(
+        cron=cron,
         cookie=str(raw.get("cookie") or "").strip(),
         site=normalize_site(raw.get("site")),
         enabled=parse_bool(raw.get("enabled")),
@@ -717,9 +749,17 @@ def plan_commission(cfg: Config, board: Dict[str, Any], running_count: int = 0) 
 # ---------------------------------------------------------------- 决策：主计划
 
 def build_plan(cfg: Config, home: Dict[str, Any], board: Dict[str, Any],
-               poster_board: Dict[str, Any]) -> List[Action]:
-    """汇总各玩法计划。顺序：零风险领取 → 工作/互动 → 派遣 → 海报 → 保护/交易。"""
+               poster_board: Dict[str, Any],
+               done_work: Optional[set] = None,
+               done_interact: Optional[set] = None) -> List[Action]:
+    """汇总各玩法计划。顺序：零风险领取 → 工作/互动 → 派遣 → 海报 → 保护/交易。
+
+    done_work / done_interact 是当天已执行过工作/互动的佣人 UID，
+    传入后这些佣人不再被安排对应动作（站点本身也有一天一次的限制）。
+    """
     actions: List[Action] = []
+    worked = set(done_work or ())
+    interacted = set(done_interact or ())
 
     if cfg.do_income and claimable_income(home) > 0:
         actions.append(Action("friendTradeClaimIncome", {}, "领取挂机收益", "safe"))
@@ -741,7 +781,7 @@ def build_plan(cfg: Config, home: Dict[str, Any], board: Dict[str, Any],
 
     if cfg.do_work:
         for s in servants:
-            if not s.can_work or s.uid in reserved:
+            if not s.can_work or s.uid in reserved or s.uid in worked:
                 continue
             key = choose_work(s, cfg.work_policy)
             if key and key != s.current_work:
@@ -753,7 +793,7 @@ def build_plan(cfg: Config, home: Dict[str, Any], board: Dict[str, Any],
         key = choose_interaction(cfg)
         if key:
             for s in servants:
-                if not s.can_interact or s.uid in reserved:
+                if not s.can_interact or s.uid in reserved or s.uid in interacted:
                     continue
                 meta = INTERACTIONS[key]
                 actions.append(Action("friendTradeInteract",

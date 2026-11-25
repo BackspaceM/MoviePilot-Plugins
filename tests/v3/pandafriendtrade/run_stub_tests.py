@@ -38,9 +38,10 @@ class ContractTests(unittest.TestCase):
 
     def test_metadata_and_lifecycle(self):
         self.assertEqual(PLUGIN_ID, "PandaFriendTrade")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.4.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.5.0")
         self.assertTrue(PLUGIN_CLS.plugin_icon.endswith("/icons/pandafriendtrade.png"))
-        for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service"):
+        for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service",
+                     "get_service", "run_scheduled"):
             self.assertTrue(callable(getattr(PLUGIN_CLS, name, None)), name)
 
     def test_routes_register_in_fastapi(self):
@@ -66,7 +67,7 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(defaults.get("do_release"))
         models = {node.get("props", {}).get("model") for node in _walk(form)
                   if isinstance(node.get("props"), dict)}
-        for key in ("cookie", "do_income", "do_work", "do_interact", "do_tasks",
+        for key in ("cron", "cookie", "do_income", "do_work", "do_interact", "do_tasks",
                     "do_commission", "do_settle", "do_posters", "do_protect", "do_buy",
                     "do_release", "interact_mode", "interact_budget", "buy_max_price",
                     "reserved_uids", "poster_gift_recipients", "proxy_url", "proxy_bypass",
@@ -192,6 +193,56 @@ class FlowTests(unittest.TestCase):
         acts = CORE.merchant_candidates(market, cfg, details)
         self.assertEqual(len(acts), 1)
         self.assertEqual(acts[0].action, "friendTradeBuy")
+
+
+class ScheduleAndDedupTests(unittest.TestCase):
+    """v1.5.0：定时服务注册 + 佣人按天去重落盘。"""
+
+    def setUp(self):
+        cc.install_stubs()
+        self.plugin = PLUGIN_CLS()
+
+    def test_service_registered_when_enabled(self):
+        self.plugin.init_plugin({"enabled": True, "cookie": "fake", "cron": "0 3,9,18,23 * * *"})
+        services = self.plugin.get_service()
+        self.assertEqual(len(services), 1)
+        self.assertEqual(services[0]["id"], "PandaFriendTrade")
+        self.assertEqual(services[0]["func"].__name__, "run_scheduled")
+        self.assertIs(services[0]["func"].__self__, self.plugin)
+        self.assertTrue(callable(services[0]["trigger"]))
+
+    def test_service_empty_when_disabled(self):
+        self.plugin.init_plugin({})
+        self.assertEqual(self.plugin.get_service(), [])
+
+    def test_service_uses_fallback_cron(self):
+        self.plugin.init_plugin({"enabled": True, "cookie": "fake", "cron": "bad"})
+        self.assertEqual(self.plugin._cfg.cron, CORE.DEFAULT_CRON)
+        self.assertEqual(len(self.plugin.get_service()), 1)
+
+    def test_servant_done_cross_day_reset(self):
+        today = self.plugin._today()
+        self.plugin._servant_done = {"date": "2000-01-01", "work": [11], "interact": [22]}
+        self.plugin.get_data = lambda key, default=None: (
+            dict(self.plugin._servant_done) if key == "panda_ft_servant_done_v1" else default)
+        loaded = self.plugin._load_servant_done()
+        self.assertEqual(loaded["date"], today)
+        self.assertEqual(loaded["work"], [])
+        self.assertEqual(loaded["interact"], [])
+
+    def test_mark_servant_done(self):
+        self.plugin.init_plugin({})
+        self.plugin.save_data = lambda key, value: None
+        self.plugin._mark_servant_done(CORE.Action(
+            "friendTradeWork", {"target_uid": 11}, "work"))
+        self.plugin._mark_servant_done(CORE.Action(
+            "friendTradeInteract", {"target_uid": 22}, "interact"))
+        self.plugin._mark_servant_done(CORE.Action(
+            "friendTradeWork", {"target_uid": 11}, "work"))  # 重复不叠加
+        self.assertEqual(self.plugin._servant_done["work"], [11])
+        self.assertEqual(self.plugin._servant_done["interact"], [22])
+        self.plugin._mark_servant_done(CORE.Action("friendTradeClaimIncome", {}, "income"))
+        self.assertEqual(self.plugin._servant_done["work"], [11])
 
 
 if __name__ == "__main__":
