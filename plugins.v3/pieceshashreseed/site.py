@@ -15,14 +15,20 @@ from app.sdk.network import RequestUtils
 from .core import (
     DEFAULT_API_PATHS,
     DEFAULT_DOWNLOAD_TPL,
+    HDWING_API_URL,
     PROBE_PIECES_HASH,
+    PieceMatch,
     SiteCredential,
     build_api_url,
+    build_auth_headers,
+    build_request_payload,
     build_torrent_url,
     chunked,
     classify_probe,
+    is_bearer_api,
     is_torrent_content,
     normalize_site_url,
+    parse_pieces_matches,
     parse_pieces_response,
 )
 
@@ -127,13 +133,16 @@ def _client_kwargs(site: SiteConfig, timeout: int) -> dict[str, Any]:
     ua = site.ua or str(getattr(settings, "USER_AGENT", "") or "") or "MoviePilot/PiecesHashReseed"
     proxy_setting = getattr(settings, "PROXY", None) if site.proxy else None
     proxies = proxy_setting if isinstance(proxy_setting, dict) else None
+    headers = {
+        "User-Agent": ua,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "referer": site.url,
+    }
+    # HDWing 等独立 API 用 Bearer 头认证，passkey 不进请求体
+    headers.update(build_auth_headers(site.api_path, site.passkey))
     return {
-        "headers": {
-            "User-Agent": ua,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "referer": site.url,
-        },
+        "headers": headers,
         "cookies": site.cookie or None,
         "proxies": proxies,
         "timeout": timeout,
@@ -173,7 +182,7 @@ def probe_site(site: SiteConfig, timeout: int = 15) -> SiteSupportResult:
     再以 GET 405 作为接口存在的补充判据（NexusPHP 常见行为）。
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    payload = {"passkey": site.passkey, "pieces_hash": [PROBE_PIECES_HASH]}
+    payload = build_request_payload(site.api_path, site.passkey, [PROBE_PIECES_HASH])
     last_reason = "未找到可用的 pieces-hash 接口"
     for path in _candidate_paths(site):
         url = build_api_url(site.url, path)
@@ -228,15 +237,33 @@ def query_pieces(
     batch_size: int = 200,
     timeout: int = 20,
 ) -> dict[str, str]:
-    """按批次向站点查询本地 pieces_hash 对应的站点种子 ID。"""
+    """按批次查询 pieces_hash 对应的站点种子 ID（兼容旧调用）。"""
+    return {
+        key: (match.torrent_id or match.download_url)
+        for key, match in query_matches(site, pieces_hashes, batch_size, timeout).items()
+    }
+
+
+def query_matches(
+    site: SiteConfig,
+    pieces_hashes: Sequence[str],
+    batch_size: int = 200,
+    timeout: int = 20,
+) -> dict[str, PieceMatch]:
+    """按批次查询，返回种子 ID 与可选直链下载地址。
+
+    Bearer 模式（HDWing）带 return_download_url=true，响应里直接给出种子
+    下载地址，后续无需再拼 download.php；旧模式保持只取种子 ID。
+    """
     if not site.api_path:
         return {}
     url = build_api_url(site.url, site.api_path)
     if not url:
         return {}
-    matched: dict[str, str] = {}
+    matched: dict[str, PieceMatch] = {}
+    bearer = is_bearer_api(site.api_path)
     for batch in chunked(list(pieces_hashes), batch_size):
-        payload = {"passkey": site.passkey, "pieces_hash": list(batch)}
+        payload = build_request_payload(site.api_path, site.passkey, batch)
         try:
             response = RequestUtils(**_client_kwargs(site, timeout)).post_res(url, json=payload)
             if response is None:
@@ -244,10 +271,11 @@ def query_pieces(
                 continue
             status = int(getattr(response, "status_code", 0) or 0)
             if status >= 400:
-                logger.warning(f"{LOG_TAG}站点 {site.name} 查询返回 HTTP {status}")
+                reason = "认证失败，检查 Passkey" if status in (401, 403) else f"HTTP {status}"
+                logger.warning(f"{LOG_TAG}站点 {site.name} 查询返回 {reason}")
                 continue
             _, _, body = _response_body(response)
-            matched.update(parse_pieces_response(body))
+            matched.update(parse_pieces_matches(body))
         except Exception as err:  # noqa: BLE001
             logger.warning(f"{LOG_TAG}站点 {site.name} 查询异常：{err}")
         if site.gap:
@@ -255,35 +283,48 @@ def query_pieces(
     return matched
 
 
-def download_torrent(site: SiteConfig, torrent_id: str, timeout: int = 30) -> bytes | None:
-    """下载站点种子文件内容，校验其确为可解析的 torrent。"""
-    try:
-        url = build_torrent_url(site.url, site.download_tpl, torrent_id, site.passkey)
-    except (KeyError, IndexError, ValueError) as err:
-        logger.error(f"{LOG_TAG}站点 {site.name} 下载模板无效：{err}")
-        return None
+def download_torrent(
+    site: SiteConfig, torrent_id: str, timeout: int = 30, download_url: str = ""
+) -> bytes | None:
+    """下载站点种子文件内容，校验其确为可解析的 torrent。
+
+    download_url 非空时直接用接口返回的直链（HDWing 模式），不再拼下载模板；
+    否则按站点 download_tpl 拼接。两种路径都保留 Bearer 认证头。
+    """
+    if download_url:
+        url = download_url
+        label = "直链"
+    else:
+        try:
+            url = build_torrent_url(site.url, site.download_tpl, torrent_id, site.passkey)
+        except (KeyError, IndexError, ValueError) as err:
+            logger.error(f"{LOG_TAG}站点 {site.name} 下载模板无效：{err}")
+            return None
+        label = "模板"
     if not url:
         return None
     safe_url = url.split("?", 1)[0]
     try:
-        # 种子下载使用默认表单/二进制请求头，不复用 JSON 请求头
+        # 种子下载用二进制请求头；保留 Bearer 认证（HDWing 直链需要）
         kwargs = _client_kwargs(site, timeout)
-        kwargs["headers"] = {
+        headers = {
             "User-Agent": kwargs["headers"]["User-Agent"],
             "Accept": "*/*",
         }
+        headers.update(build_auth_headers(site.api_path, site.passkey))
+        kwargs["headers"] = headers
         response = RequestUtils(**kwargs).get_res(url)
         if response is None:
-            logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} 下载失败：无响应")
+            logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}下载失败：无响应")
             return None
         status = int(getattr(response, "status_code", 0) or 0)
         content = getattr(response, "content", None)
         if status != 200 or not is_torrent_content(content):
-            logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} 不是有效种子（HTTP {status}）")
+            logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}不是有效种子（HTTP {status}）")
             return None
         return content
     except Exception as err:  # noqa: BLE001
-        logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} 下载异常 {safe_url}：{err}")
+        logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}下载异常 {safe_url}：{err}")
         return None
 
 

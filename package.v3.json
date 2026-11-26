@@ -199,9 +199,9 @@
   },
   "PiecesHashReseed": {
     "name": "Hash 辅种",
-    "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验。",
+    "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验；新增 HDWing 独立 API（Bearer 认证 + return_download_url 直链下载）。",
     "labels": "做种,辅种,站点,下载器",
-    "version": "1.0.4",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png",
     "author": "BackspaceM",
     "level": 1,
@@ -214,7 +214,8 @@
       "v1.0.3": "统一插件图标（同一渐变底板与线性符号）与显示名「Hash 辅种」；纳入全仓 API 契约校验，确认按钮路径与动态路由一致。",
       "v1.0.2": "修复详情页按钮：按钮文字改为组件顶层 text 渲染（VBtn 的 props.text 会被当作 variant 布尔属性导致空白按钮）；插件 API 统一声明 auth: bear，确保宿主正常注册、消除点击 Not Found；配置页与详情页提示改为可渲染文字，去掉只有图标没有说明的元素；同步 package 索引版本与类内 plugin_version 字面量。",
       "v1.0.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
-      "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。"
+      "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。",
+      "v1.1.0": "新增 HDWing 独立 API 模式：接口路径填完整 URL（含 api.hdwing.org 或 /v1/comp/pieces-hash）自动切 Bearer 认证——Passkey 放 Authorization 头、请求体改为 {\"pieces_hash\", \"return_download_url\":true}；响应解析兼容 hash→种子ID / hash→下载URL / hash→{id,download_url} / [{pieces_hash,id,download_url}] 多种形态，命中直链时优先用 download_url 下载（保留 Bearer 头），无直链回退拼 download.php。旧 NexusPHP 站点行为不变。"
     }
   },
   "CFRouterOS": {

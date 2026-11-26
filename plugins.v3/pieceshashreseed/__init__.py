@@ -32,7 +32,7 @@ from .site import (
     load_sites,
     probe_all,
     probe_site,
-    query_pieces,
+    query_matches,
     site_options,
     summarize_support,
 )
@@ -116,7 +116,7 @@ class PiecesHashReseed(_PluginBase):
     plugin_name = "Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.1.0"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
@@ -352,11 +352,13 @@ class PiecesHashReseed(_PluginBase):
                                persistentHint=True),
                     ),
                     _row(
-                        _field("VTextarea", "credentials", "站点 Passkey", 12,
-                               rows=5,
+                        _field("VTextarea", "credentials", "站点 Passkey / API Key", 12,
+                               rows=6,
                                placeholder="每行一个：站点名:Passkey[:接口路径[:请求间隔]]\n"
-                                           "例如：青蛙:xxxxxxxxxx\n憨憨:yyyyyyyyyy:nexusapi/pieces-hash:2",
-                               hint="站点名需与上方选项完全一致；请求间隔单位为秒，用于站点流控",
+                                           "青蛙:xxxxxxxxxx\n"
+                                           "憨憨:yyyyyyyyyy:nexusapi/pieces-hash:2\n"
+                                           "HDWing:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash",
+                               hint="站点名需与上方选项完全一致；填完整 API 地址（如 HDWing）会自动用 Bearer 认证并按直链下载；请求间隔单位为秒",
                                persistentHint=True),
                     ),
                     _row(
@@ -655,9 +657,9 @@ class PiecesHashReseed(_PluginBase):
         for site in sites:
             if self._event.is_set():
                 return
-            matched = query_pieces(site, list(pieces_paths), self._batch_size, self._timeout)
+            matched = query_matches(site, list(pieces_paths), self._batch_size, self._timeout)
             stats["matched"] += len(matched)
-            for pieces_hash, torrent_id in matched.items():
+            for pieces_hash, match in matched.items():
                 if self._event.is_set():
                     return
                 if stats["success"] + stats["would_seed"] >= self._max_per_run:
@@ -666,7 +668,10 @@ class PiecesHashReseed(_PluginBase):
                 if not save_path:
                     stats["skipped"] += 1
                     continue
-                self._seed_one(site, torrent_id, pieces_hash, save_path, destination, existing_hashes, stats)
+                # 直链模式下 ID 可能为空，用 pieces_hash 作缓存标识
+                torrent_id = match.torrent_id or pieces_hash[:12]
+                self._seed_one(site, torrent_id, pieces_hash, save_path, destination,
+                               existing_hashes, stats, match.download_url)
 
     def _seed_one(
         self,
@@ -677,6 +682,7 @@ class PiecesHashReseed(_PluginBase):
         service: Any,
         existing_hashes: set[str],
         stats: dict[str, Any],
+        download_url: str = "",
     ) -> None:
         """下载并添加一个站点种子，完成指纹复核、去重与状态回写。"""
         cache_key = f"{site.name}:{torrent_id}"
@@ -687,7 +693,7 @@ class PiecesHashReseed(_PluginBase):
             stats["skipped"] += 1
             return
 
-        content = download_torrent(site, torrent_id, self._timeout)
+        content = download_torrent(site, torrent_id, self._timeout, download_url)
         if not content:
             stats["failed"] += 1
             self._remember(self._error_cache, cache_key)

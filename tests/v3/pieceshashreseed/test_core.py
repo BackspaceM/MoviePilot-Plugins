@@ -134,5 +134,58 @@ class TestSiteContracts(unittest.TestCase):
         self.assertEqual(core.parse_pieces_response(None), {})
 
 
+class TestBearerApi(unittest.TestCase):
+    """HDWing 独立 API：Bearer 认证 + return_download_url + 直链响应。"""
+
+    def test_mode_detection(self):
+        self.assertTrue(core.is_bearer_api(core.HDWING_API_URL))
+        self.assertTrue(core.is_bearer_api("https://other/v1/comp/pieces-hash"))
+        self.assertFalse(core.is_bearer_api("api/pieces-hash"))
+        self.assertFalse(core.is_bearer_api("nexusapi/pieces-hash"))
+
+    def test_request_payload(self):
+        legacy = core.build_request_payload("api/pieces-hash", "pk", ["a", "b"])
+        self.assertEqual(legacy, {"passkey": "pk", "pieces_hash": ["a", "b"]})
+        bearer = core.build_request_payload(core.HDWING_API_URL, "pk", ["a"])
+        self.assertEqual(bearer, {"pieces_hash": ["a"], "return_download_url": True})
+        self.assertNotIn("passkey", bearer)
+
+    def test_auth_headers(self):
+        self.assertEqual(
+            core.build_auth_headers(core.HDWING_API_URL, "pk"),
+            {"Authorization": "Bearer pk"},
+        )
+        self.assertEqual(core.build_auth_headers("api/pieces-hash", "pk"), {})
+        self.assertEqual(core.build_auth_headers(core.HDWING_API_URL, ""), {})
+
+    def test_parse_matches_string_url(self):
+        key = "a" * 40
+        matches = core.parse_pieces_matches(
+            {"status": "success", "data": {key: "https://api.hdwing.org/d/9?passkey=x"}}
+        )
+        self.assertEqual(matches[key].torrent_id, "")
+        self.assertTrue(matches[key].download_url.startswith("https://api.hdwing.org/"))
+        # 旧包装函数仍返回可用标识
+        self.assertEqual(core.parse_pieces_response({"data": {key: "888"}}), {key: "888"})
+
+    def test_parse_matches_object(self):
+        key = "b" * 40
+        matches = core.parse_pieces_matches(
+            {"status": "success", "data": [
+                {"pieces_hash": key, "id": 12, "download_url": "https://d/12"},
+                {"pieces_hash": "c" * 40, "torrent_id": 13, "url": "https://d/13"},
+            ]}
+        )
+        self.assertEqual(matches[key].torrent_id, "12")
+        self.assertEqual(matches[key].download_url, "https://d/12")
+        self.assertEqual(matches["c" * 40].download_url, "https://d/13")
+
+    def test_credential_full_url(self):
+        parsed = core.parse_credentials("HDWing:pk123:https://api.hdwing.org/v1/comp/pieces-hash:2")
+        self.assertEqual(parsed["HDWing"].api_path, core.HDWING_API_URL)
+        self.assertEqual(parsed["HDWing"].gap, 2)
+        self.assertTrue(core.is_bearer_api(parsed["HDWing"].api_path))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,9 @@ from urllib.parse import quote, urljoin, urlparse
 
 # 站点 pieces-hash 接口的常见路径；憨憨等站点使用 nexusapi 前缀
 DEFAULT_API_PATHS: tuple[str, ...] = ("api/pieces-hash", "nexusapi/pieces-hash")
+# 独立 API 域名（Bearer 认证 + return_download_url），与站点域名解耦
+HDWING_API_URL = "https://api.hdwing.org/v1/comp/pieces-hash"
+_BEARER_API_HINTS = ("api.hdwing.org", "/v1/comp/pieces-hash")
 DEFAULT_DOWNLOAD_TPL = "download.php?id={id}&passkey={passkey}"
 DEFAULT_CRON = "0 4 * * *"
 PROBE_PIECES_HASH = "0" * 40
@@ -265,6 +268,87 @@ def build_torrent_url(site_url: str, template: str, torrent_id: str, passkey: st
     return rendered if rendered.startswith(("http://", "https://")) else urljoin(base, rendered.lstrip("/"))
 
 
+def is_bearer_api(api_path: str | None) -> bool:
+    """判断是否走独立 API 的 Bearer 认证模式（HDWing 等）。
+
+    旧 NexusPHP 站点把 passkey 放在请求体；HDWing 这类独立 API 用
+    Authorization: Bearer 头，并在响应里直接给出种子下载地址。
+    """
+    text = (api_path or "").strip().lower()
+    return any(hint in text for hint in _BEARER_API_HINTS)
+
+
+def build_request_payload(api_path: str | None, passkey: str, pieces_hashes: Sequence[str]) -> dict[str, Any]:
+    """按接口模式构造查询请求体。
+
+    Bearer 模式（HDWing）：不含 passkey，附加 return_download_url=true；
+    旧模式：passkey 放请求体，只返回种子 ID。
+    """
+    hashes = list(pieces_hashes)
+    if is_bearer_api(api_path):
+        return {"pieces_hash": hashes, "return_download_url": True}
+    return {"passkey": passkey, "pieces_hash": hashes}
+
+
+def build_auth_headers(api_path: str | None, passkey: str) -> dict[str, str]:
+    """Bearer 模式返回认证头，旧模式返回空字典。"""
+    if is_bearer_api(api_path) and passkey:
+        return {"Authorization": f"Bearer {passkey}"}
+    return {}
+
+
+@dataclass(frozen=True)
+class PieceMatch:
+    """一条查询命中：种子 ID 与可选的直链下载地址。"""
+
+    torrent_id: str
+    download_url: str = ""
+
+
+def parse_pieces_matches(body: Any) -> dict[str, PieceMatch]:
+    """把接口响应规范化为 {pieces_hash: PieceMatch}，兼容三种返回形态。
+
+    - 旧 NexusPHP：{data: {hash: 种子ID}}
+    - HDWing 直链：{data: {hash: 下载URL}} 或 {data: [{pieces_hash, id, download_url}]}
+    - 对象值：{data: {hash: {id, download_url}}}；键名兼容 id/torrent_id/torrentId
+      与 download_url/url/download。
+    """
+    result: dict[str, PieceMatch] = {}
+    if not isinstance(body, dict):
+        return result
+    data = body.get("data", body)
+    if isinstance(data, dict):
+        pairs = data.items()
+    elif isinstance(data, list):
+        pairs = [
+            (item.get("pieces_hash") or item.get("piecesHash"), item)
+            for item in data if isinstance(item, dict)
+        ]
+    else:
+        return result
+
+    def accept(key: Any, value: Any) -> None:
+        hash_text = str(key or "")
+        if not re.fullmatch(r"[0-9a-fA-F]{32,64}", hash_text):
+            return
+        if isinstance(value, dict):
+            torrent_id = value.get("id") or value.get("torrent_id") or value.get("torrentId") or ""
+            download_url = value.get("download_url") or value.get("downloadUrl") or value.get("url") or ""
+        elif isinstance(value, (str, int)):
+            text = str(value)
+            if text.startswith(("http://", "https://")):
+                torrent_id, download_url = "", text
+            else:
+                torrent_id, download_url = text, ""
+        else:
+            return
+        result[hash_text.lower()] = PieceMatch(str(torrent_id), str(download_url))
+
+    for key, value in pairs:
+        accept(key, value)
+    return result
+
+
 def normalize_cron(expression: str | None) -> str:
     """把 crontab 中的 ? 归一为 *，并统一空白。"""
     return " ".join((expression or "").replace("?", "*").split())
@@ -331,25 +415,12 @@ def classify_probe(status_code: int, content_type: str, body: Any) -> tuple[bool
 
 
 def parse_pieces_response(body: Any) -> dict[str, str]:
-    """把站点 pieces-hash 响应规范化为 {pieces_hash: 种子ID}。"""
-    if not isinstance(body, dict):
-        return {}
-    data = body.get("data", body)
-    result: dict[str, str] = {}
+    """把站点 pieces-hash 响应规范化为 {pieces_hash: 种子ID}。
 
-    def accept(key: Any, value: Any) -> None:
-        """只接受看起来像 pieces hash 的键，跳过 success/message 等元数据。"""
-        text = str(key or "")
-        if value is not None and re.fullmatch(r"[0-9a-fA-F]{32,64}", text):
-            result[text.lower()] = str(value)
-
-    if isinstance(data, dict):
-        for pieces_hash, torrent_id in data.items():
-            accept(pieces_hash, torrent_id)
-    elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                key = item.get("pieces_hash") or item.get("piecesHash")
-                value = item.get("id") or item.get("torrent_id") or item.get("torrentId")
-                accept(key, value)
-    return result
+    保留旧签名供调用方/测试使用；直链响应也归约为 ID（ID 为空时用直链占位），
+    需要下载地址时请用 parse_pieces_matches。
+    """
+    return {
+        key: (match.torrent_id or match.download_url)
+        for key, match in parse_pieces_matches(body).items()
+    }

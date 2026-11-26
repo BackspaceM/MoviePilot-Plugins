@@ -11,6 +11,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 | --- | --- |
 | pieces hash 辅种 | 自建零依赖 bencode 解析器，计算 info_hash / pieces_hash，添加前复核远端种子指纹 |
 | 站点支持检测 | 自动探测 `api/pieces-hash`、`nexusapi/pieces-hash` 及自定义路径；GET 405 或 POST 标准 JSON 判为支持；结果记下来，明细看宿主日志 |
+| 独立 API（Bearer） | HDWing 等独立 API：填完整地址 `https://api.hdwing.org/v1/comp/pieces-hash`，自动改用 `Authorization: Bearer` 认证 + `return_download_url`，响应直链直接下载，无需拼 `download.php` |
 | cron 定时 | 5 段 crontab（默认 `0 4 * * *`）/ 固定间隔 / 禁用；支持「立即辅种一次」 |
 | 下载器选择 | 下拉多选要扫描的下载器；可另选目标下载器，并配置跨下载器路径映射 |
 | 跳过哈希校验 | qBittorrent 通过 `is_skip_checking`（兼容 seedMode）跳过校验；Transmission 自动 recheck |
@@ -22,8 +23,9 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 ## 开始前
 
 1. MoviePilot **V3**（索引声明 `system_version: ">=3.0.0"`）。
-2. 站点提供 pieces-hash 接口（青蛙、AGSVPT、红豆饭、麒麟、UBits、聆音、憨憨等 NexusPHP 系常见），并在站点管理中启用、Cookie 有效。
-3. 每个站点填写 **Passkey**（通常在站点「个人设置 / 密钥」页）。
+2. 站点提供 pieces-hash 接口（青蛙、AGSVPT、红豆饭、麒麟、UBits、聆音、憨憨等 NexusPHP 系常见），并在站点管理中启用、Cookie 有效；HDWing 使用独立 API，见下。
+3. 每个站点填写 **Passkey / API Key**（通常在站点「个人设置 / 密钥」页）。HDWing 只需一行凭据，
+   无需站点 Cookie：`HDWing:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash`。
 4. 把下载器的种子缓存目录映射进 MoviePilot 容器：
    - qBittorrent：`/config/qBittorrent/BT_backup`（常见映射为 `/qb`）
    - Transmission：`/config/transmission/torrents`（常见映射为 `/tr`）
@@ -38,7 +40,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 | 扫描的下载器 | 下拉多选；不选则使用全部已启用下载器 |
 | 辅种目标下载器 | 默认「同下载器」；跨下载器需填路径映射 |
 | 辅种站点 | 下拉多选，仅选中站点参与辅种 |
-| 站点 Passkey | 每行 `站点名:Passkey[:接口路径[:请求间隔]]`，站点名需与下拉选项一致；接口路径可填 `nexusapi/pieces-hash` 或完整 URL；请求间隔单位秒，用于站点流控 |
+| 站点 Passkey / API Key | 每行 `站点名:Passkey[:接口路径[:请求间隔]]`，站点名需与下拉选项一致；接口路径可填 `nexusapi/pieces-hash` 或完整 URL；请求间隔单位秒，用于站点流控。HDWing 填 `HDWing:Passkey:https://api.hdwing.org/v1/comp/pieces-hash`，自动切 Bearer 认证 + 直链下载 |
 | 种子缓存目录 | 每行 `下载器名:目录1,目录2`；不带下载器名时对所有下载器生效 |
 | 定时方式 / 执行周期 | `计划任务（cron）` / `固定间隔` / `禁用`；cron 为 5 段，如 `0 4 * * *` |
 | qBittorrent 跳过哈希校验 | 开启后不触发 recheck，直接以完成状态开始做种 |
@@ -62,11 +64,23 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 ```
 下载器已完成任务 → 扫描本地 .torrent 建立 info_hash → 指纹索引
     → 聚合 pieces_hash → 保存路径（可选路径映射）
-    → 站点 POST {"passkey": "...", "pieces_hash": [...]}
-    → 下载命中的种子 → 复核 pieces_hash 一致、info_hash 未存在
+    → 普通站点 POST {"passkey": "...", "pieces_hash": [...]}（passkey 在请求体）
+       HDWing    POST {"pieces_hash": [...], "return_download_url": true}
+                 + Authorization: Bearer <Passkey>
+    → 下载命中的种子（HDWing 用响应返回的 download_url 直链）
+    → 复核 pieces_hash 一致、info_hash 未存在
     → 暂停状态添加到目标下载器（同路径 + 辅种标签 + qB 跳验）
     → 启动做种 / 写入缓存与统计
 ```
+
+### HDWing 独立 API 说明
+
+- 凭据示例：`HDWing:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash`。
+- 只要接口路径是完整 URL 且含 `api.hdwing.org` 或 `/v1/comp/pieces-hash`，插件自动进入 Bearer 模式：
+  Passkey 放进 `Authorization` 头，请求体不再包含 passkey，并附加 `return_download_url: true`。
+- 响应同时兼容 `data` 为「hash→种子ID」「hash→下载URL」「hash→{id, download_url}」以及
+  `[{pieces_hash, id, download_url}]` 数组；有直链时优先用直链下载，否则回退拼 `download.php`。
+- 接口返回 401 时日志提示「认证失败，检查 Passkey」；GET 返回 405 仍判为接口存在。
 
 ## 手动接口
 
