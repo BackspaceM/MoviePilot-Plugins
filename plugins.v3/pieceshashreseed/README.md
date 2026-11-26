@@ -24,8 +24,9 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 
 1. MoviePilot **V3**（索引声明 `system_version: ">=3.0.0"`）。
 2. 站点提供 pieces-hash 接口（青蛙、AGSVPT、红豆饭、麒麟、UBits、聆音、憨憨等 NexusPHP 系常见），并在站点管理中启用、Cookie 有效；HDWing 使用独立 API，见下。
-3. 每个站点填写 **Passkey / API Key**（通常在站点「个人设置 / 密钥」页）。HDWing 只需一行凭据，
-   无需站点 Cookie：`HDWing:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash`。
+3. 每个站点填写 **Passkey / API Key**（通常在站点「个人设置 / 密钥」页）。HDWing 这类独立 API 只需一行凭据，
+   无需站点 Cookie；`站点名` 填 MoviePilot 站点管理里的名字（如 `瓷器`）：
+   `瓷器:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash`。
 4. 把下载器的种子缓存目录映射进 MoviePilot 容器：
    - qBittorrent：`/config/qBittorrent/BT_backup`（常见映射为 `/qb`）
    - Transmission：`/config/transmission/torrents`（常见映射为 `/tr`）
@@ -40,7 +41,7 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
 | 扫描的下载器 | 下拉多选；不选则使用全部已启用下载器 |
 | 辅种目标下载器 | 默认「同下载器」；跨下载器需填路径映射 |
 | 辅种站点 | 下拉多选，仅选中站点参与辅种 |
-| 站点 Passkey / API Key | 每行 `站点名:Passkey[:接口路径[:请求间隔]]`，站点名需与下拉选项一致；接口路径可填 `nexusapi/pieces-hash` 或完整 URL；请求间隔单位秒，用于站点流控。HDWing 填 `HDWing:Passkey:https://api.hdwing.org/v1/comp/pieces-hash`，自动切 Bearer 认证 + 直链下载 |
+| 站点 Passkey / API Key | 每行 `站点名:Passkey[:接口路径[:请求间隔]]`，**站点名填 MP 站点管理里的名字（如『瓷器』）**，需与下拉选项一致；接口路径可填 `nexusapi/pieces-hash` 或完整 URL；请求间隔单位秒，用于站点流控。HDWing 这类独立 API 填 `瓷器:Passkey:https://api.hdwing.org/v1/comp/pieces-hash`，自动切 Bearer 认证 + 直链下载 |
 | 种子缓存目录 | 每行 `下载器名:目录1,目录2`；不带下载器名时对所有下载器生效 |
 | 定时方式 / 执行周期 | `计划任务（cron）` / `固定间隔` / `禁用`；cron 为 5 段，如 `0 4 * * *` |
 | qBittorrent 跳过哈希校验 | 开启后不触发 recheck，直接以完成状态开始做种 |
@@ -73,9 +74,10 @@ MoviePilot V3 插件。读取下载器中已有种子文件的 **pieces hash**�
     → 启动做种 / 写入缓存与统计
 ```
 
-### HDWing 独立 API 说明
+### 独立 API（HDWing 等）说明
 
-- 凭据示例：`HDWing:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash`。
+- 凭据示例：`瓷器:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash`（第一段的 `瓷器` 是 MoviePilot 站点管理里的站点名，请按你的实际站点名填写，不是接口域名）。
+- 填了完整 API 地址即视为明确指定接口：辅种时不再做通用探测、也不会 fallback 到站点域名下的 `api/pieces-hash`；检测与辅种同时勾选时串行执行，避免并发探测互相覆盖结果。
 - 只要接口路径是完整 URL 且含 `api.hdwing.org` 或 `/v1/comp/pieces-hash`，插件自动进入 Bearer 模式：
   Passkey 放进 `Authorization` 头，请求体不再包含 passkey，并附加 `return_download_url: true`。
 - 响应同时兼容 `data` 为「hash→种子ID」「hash→下载URL」「hash→{id, download_url}」以及

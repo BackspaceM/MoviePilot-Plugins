@@ -169,7 +169,14 @@ def _response_body(response: Any) -> tuple[int, str, Any]:
 
 
 def _candidate_paths(site: SiteConfig) -> list[str]:
-    """优先使用已探测/自定义路径，再依次尝试内置候选路径。"""
+    """优先使用已探测/自定义路径，再依次尝试内置候选路径。
+
+    Bearer 模式（显式填了完整 API 地址，如 HDWing）只探测这一个地址：
+    它是独立 API 域名，站点 URL 下没有 api/pieces-hash 这类相对接口，
+    fallback 过去只会超时并产生误导日志。
+    """
+    if is_bearer_api(site.api_path) and site.api_path:
+        return [site.api_path]
     candidates = [site.api_path] if site.api_path else []
     candidates.extend(DEFAULT_API_PATHS)
     return list(dict.fromkeys(path for path in candidates if path))

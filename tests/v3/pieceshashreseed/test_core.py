@@ -181,10 +181,20 @@ class TestBearerApi(unittest.TestCase):
         self.assertEqual(matches["c" * 40].download_url, "https://d/13")
 
     def test_credential_full_url(self):
-        parsed = core.parse_credentials("HDWing:pk123:https://api.hdwing.org/v1/comp/pieces-hash:2")
-        self.assertEqual(parsed["HDWing"].api_path, core.HDWING_API_URL)
-        self.assertEqual(parsed["HDWing"].gap, 2)
-        self.assertTrue(core.is_bearer_api(parsed["HDWing"].api_path))
+        parsed = core.parse_credentials("瓷器:pk123:https://api.hdwing.org/v1/comp/pieces-hash:2")
+        self.assertEqual(parsed["瓷器"].api_path, core.HDWING_API_URL)
+        self.assertEqual(parsed["瓷器"].gap, 2)
+        self.assertTrue(core.is_bearer_api(parsed["瓷器"].api_path))
+
+    def test_bearer_probe_does_not_fallback_to_relative_paths(self):
+        """Bearer 站点只探测完整 API 地址，不 fallback 到站点域名下的相对接口。"""
+        from app.plugins.pieceshashreseed import site
+        cfg = site.SiteConfig(name="瓷器", url="https://hdwing.org/", passkey="pk",
+                              api_path=core.HDWING_API_URL)
+        self.assertEqual(site._candidate_paths(cfg), [core.HDWING_API_URL])
+        legacy = site.SiteConfig(name="青蛙", url="https://pt.site/", passkey="pk",
+                                 api_path="api/pieces-hash")
+        self.assertIn("nexusapi/pieces-hash", site._candidate_paths(legacy))
 
 
 if __name__ == "__main__":

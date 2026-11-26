@@ -116,7 +116,7 @@ class PiecesHashReseed(_PluginBase):
     plugin_name = "Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
@@ -223,15 +223,20 @@ class PiecesHashReseed(_PluginBase):
             self._clearcache = False
             config["clearcache"] = False
             changed = True
-        if self._checkonce:
+        # 检测与辅种同时开时串行执行：先检测再辅种，避免并发探测同一站点
+        # 互相覆盖支持缓存（曾导致检测通过但辅种被判不支持而跳过）。
+        if self._checkonce or self._onlyonce:
+            do_check, do_run = self._checkonce, self._onlyonce
             self._checkonce = False
-            config["checkonce"] = False
-            self._schedule_once(self.check_sites, "check", "站点支持检测", 3)
-            changed = True
-        if self._onlyonce:
             self._onlyonce = False
+            config["checkonce"] = False
             config["onlyonce"] = False
-            self._schedule_once(self.run_reseed, "run", "立即辅种一次", 3)
+            if do_check and do_run:
+                self._schedule_once(self._check_then_run, "checkrun", "检测并辅种", 3)
+            elif do_check:
+                self._schedule_once(self.check_sites, "check", "站点支持检测", 3)
+            else:
+                self._schedule_once(self.run_reseed, "run", "立即辅种一次", 3)
             changed = True
         if changed:
             self.update_config(config)
@@ -357,8 +362,8 @@ class PiecesHashReseed(_PluginBase):
                                placeholder="每行一个：站点名:Passkey[:接口路径[:请求间隔]]\n"
                                            "青蛙:xxxxxxxxxx\n"
                                            "憨憨:yyyyyyyyyy:nexusapi/pieces-hash:2\n"
-                                           "HDWing:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash",
-                               hint="站点名需与上方选项完全一致；填完整 API 地址（如 HDWing）会自动用 Bearer 认证并按直链下载；请求间隔单位为秒",
+                                           "瓷器:你的Passkey:https://api.hdwing.org/v1/comp/pieces-hash",
+                               hint="站点名填 MP 站点管理里的名字（如『瓷器』），需与上方选项完全一致；填完整 API 地址会自动用 Bearer 认证并按直链下载；请求间隔单位为秒",
                                persistentHint=True),
                     ),
                     _row(
@@ -507,6 +512,12 @@ class PiecesHashReseed(_PluginBase):
 
     # ------------------------------------------------------------------ 站点检测
 
+    def _check_then_run(self) -> None:
+        """串行执行「先检测站点支持、再辅种」，避免并发覆盖缓存。"""
+        self.check_sites()
+        if not self._stopped:
+            self.run_reseed()
+
     def check_sites(self) -> dict[str, Any]:
         """强制重新检测所有已配置站点的 pieces-hash 接口。"""
         sites = load_sites(self._credentials, self._sites, self._site_support)
@@ -527,12 +538,26 @@ class PiecesHashReseed(_PluginBase):
         return result
 
     def _ensure_support(self, sites: list[SiteConfig]) -> list[SiteConfig]:
-        """按缓存与自动检测开关筛出可用站点，并回填接口路径。"""
+        """按缓存与自动检测开关筛出可用站点，并回填接口路径。
+
+        Bearer 模式（显式填了完整 API 地址）直接信任，不探测、不受探测缓存
+        覆盖影响——它是用户明确指定的独立 API，不需要也不应该走通用探测。
+        """
         if not sites:
             return []
         changed = False
         for site in sites:
             cached = self._site_support.get(site.name) if isinstance(self._site_support.get(site.name), dict) else {}
+            if core.is_bearer_api(site.api_path):
+                # 已显式指定完整 API 地址：直接标记为支持，跳过探测
+                if not cached.get("supported"):
+                    self._site_support[site.name] = {
+                        "name": site.name, "supported": True, "api_path": site.api_path,
+                        "reason": "已指定完整 API 地址（Bearer 模式），跳过探测",
+                        "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    changed = True
+                continue
             if self._auto_detect and not cached.get("supported"):
                 result = probe_site(site, self._timeout)
                 self._site_support[site.name] = result.to_dict()
@@ -543,7 +568,10 @@ class PiecesHashReseed(_PluginBase):
             self.save_data(_SUPPORT_KEY, self._site_support)
         supported_names = {name for name, item in self._site_support.items()
                            if isinstance(item, dict) and item.get("supported")}
-        usable = [site for site in sites if not self._auto_detect or site.name in supported_names]
+        usable = [
+            site for site in sites
+            if core.is_bearer_api(site.api_path) or not self._auto_detect or site.name in supported_names
+        ]
         skipped = [site.name for site in sites if site not in usable]
         if skipped:
             logger.warning(f"{LOG_TAG}以下站点未通过支持检测，本次跳过：{', '.join(skipped)}")
