@@ -196,6 +196,39 @@ class TestBearerApi(unittest.TestCase):
                                  api_path="api/pieces-hash")
         self.assertIn("nexusapi/pieces-hash", site._candidate_paths(legacy))
 
+    def test_request_retry_on_no_response(self):
+        """网络抖动：前两次无响应、第三次成功，查询应命中。"""
+        from app.plugins.pieceshashreseed import site
+        cfg = site.SiteConfig(name="瓷器", url="https://hdwing.org/", passkey="pk",
+                              api_path=core.HDWING_API_URL, gap=0)
+        calls = []
+
+        class Resp:
+            status_code = 200
+            headers = {"Content-Type": "application/json"}
+            def json(self):
+                return {"status": "success", "data": {"a" * 40: {"id": 9}}}
+            text = ""
+
+        class Client:
+            def __init__(self, **kwargs):
+                pass
+            def post_res(self, url, json=None):
+                calls.append(1)
+                return Resp() if len(calls) >= 3 else None
+
+        original_client = site.RequestUtils
+        original_sleep = site.time.sleep
+        site.RequestUtils = Client
+        site.time.sleep = lambda seconds: None
+        try:
+            matched = site.query_matches(cfg, ["a" * 40])
+        finally:
+            site.RequestUtils = original_client
+            site.time.sleep = original_sleep
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(matched["a" * 40].torrent_id, "9")
+
 
 if __name__ == "__main__":
     unittest.main()

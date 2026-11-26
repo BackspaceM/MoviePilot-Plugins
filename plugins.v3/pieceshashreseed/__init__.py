@@ -116,7 +116,7 @@ class PiecesHashReseed(_PluginBase):
     plugin_name = "Hash 辅种"
     plugin_desc = "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时与下载器选择。"
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.2.0"
     plugin_author = "BackspaceM"
     # 前端插件卡片会用该地址拼接 https://github.com/<owner>.png 作为作者头像
     author_url = "https://github.com/BackspaceM"
@@ -225,6 +225,7 @@ class PiecesHashReseed(_PluginBase):
             changed = True
         # 检测与辅种同时开时串行执行：先检测再辅种，避免并发探测同一站点
         # 互相覆盖支持缓存（曾导致检测通过但辅种被判不支持而跳过）。
+        once_job: tuple[Callable[[], Any], str, str] | None = None
         if self._checkonce or self._onlyonce:
             do_check, do_run = self._checkonce, self._onlyonce
             self._checkonce = False
@@ -232,14 +233,17 @@ class PiecesHashReseed(_PluginBase):
             config["checkonce"] = False
             config["onlyonce"] = False
             if do_check and do_run:
-                self._schedule_once(self._check_then_run, "checkrun", "检测并辅种", 3)
+                once_job = (self._check_then_run, "checkrun", "检测并辅种")
             elif do_check:
-                self._schedule_once(self.check_sites, "check", "站点支持检测", 3)
+                once_job = (self.check_sites, "check", "站点支持检测")
             else:
-                self._schedule_once(self.run_reseed, "run", "立即辅种一次", 3)
+                once_job = (self.run_reseed, "run", "立即辅种一次")
             changed = True
         if changed:
             self.update_config(config)
+        # 0 秒延迟必须等开关复位落盘后再调度，否则任务会读到未更新的配置
+        if once_job:
+            self._schedule_once(*once_job, 0)
 
         if self._enabled and not self._downloaders:
             logger.warning(f"{LOG_TAG}尚未选择下载器，定时辅种不会执行")
@@ -302,7 +306,7 @@ class PiecesHashReseed(_PluginBase):
         data = getattr(event, "event_data", None) or {}
         if data.get("action") != "pieceshashreseed_run":
             return
-        self._schedule_once(self.run_reseed, "run", "远程触发辅种", 3)
+        self._schedule_once(self.run_reseed, "run", "远程触发辅种", 0)
         self.post_message(
             channel=data.get("channel"),
             title="Hash 辅种",
@@ -495,14 +499,14 @@ class PiecesHashReseed(_PluginBase):
         """异步触发站点支持检测。"""
         if self._running:
             return ActionResult(success=False, message="辅种任务正在执行，请稍后再试")
-        self._schedule_once(self.check_sites, "check", "API 触发站点检测", 2)
+        self._schedule_once(self.check_sites, "check", "API 触发站点检测", 0)
         return ActionResult(success=True, message="站点检测已加入调度")
 
     def trigger_run(self) -> ActionResult:
         """异步触发一次辅种。"""
         if self._running:
             return ActionResult(success=False, message="辅种任务正在执行，请稍后再试")
-        self._schedule_once(self.run_reseed, "run", "API 触发辅种", 2)
+        self._schedule_once(self.run_reseed, "run", "API 触发辅种", 0)
         return ActionResult(success=True, message="辅种任务已加入调度")
 
     def trigger_clear_cache(self) -> ActionResult:

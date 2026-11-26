@@ -201,7 +201,7 @@
     "name": "Hash 辅种",
     "description": "按 pieces hash 匹配站点同内容种子并自动辅种，支持站点能力检测、cron 定时、下载器选择与跳过哈希校验；新增 HDWing 独立 API（Bearer 认证 + return_download_url 直链下载）。",
     "labels": "做种,辅种,站点,下载器",
-    "version": "1.1.1",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pieceshashreseed.png",
     "author": "BackspaceM",
     "level": 1,
@@ -216,7 +216,8 @@
       "v1.0.1": "主界面精简：去掉日志、清单、历史这些区块，只留按钮和一行状态；明细看宿主日志。",
       "v1.0.0": "首个版本：pieces hash 指纹辅种、站点接口支持检测、cron 定时、下载器下拉、qBittorrent 跳过校验、缓存去重、试运行与运行统计。",
       "v1.1.0": "新增 HDWing 独立 API 模式：接口路径填完整 URL（含 api.hdwing.org 或 /v1/comp/pieces-hash）自动切 Bearer 认证——Passkey 放 Authorization 头、请求体改为 {\"pieces_hash\", \"return_download_url\":true}；响应解析兼容 hash→种子ID / hash→下载URL / hash→{id,download_url} / [{pieces_hash,id,download_url}] 多种形态，命中直链时优先用 download_url 下载（保留 Bearer 头），无直链回退拼 download.php。旧 NexusPHP 站点行为不变。",
-      "v1.1.1": "修复「检测通过但辅种时站点被判不支持而跳过」：根因是「立即检测」与「立即辅种」两个一次性任务并发，辅种任务在检测缓存写入前自行探测，并发请求失败后 fallback 到站点域名下的相对路径 api/pieces-hash/nexusapi/pieces-hash 超时，并用失败结果覆盖缓存。修复：①填了完整 API 地址的 Bearer 站点直接信任、跳过探测、不受探测缓存覆盖，且探测不再 fallback 相对路径；②检测+辅种同时勾选时改为串行执行（先检测后辅种）。③配置页与 README 凭据示例的站点名由 HDWing 改为「瓷器」，明确第一段填 MP 站点管理里的站点名。"
+      "v1.1.1": "修复「检测通过但辅种时站点被判不支持而跳过」：根因是「立即检测」与「立即辅种」两个一次性任务并发，辅种任务在检测缓存写入前自行探测，并发请求失败后 fallback 到站点域名下的相对路径 api/pieces-hash/nexusapi/pieces-hash 超时，并用失败结果覆盖缓存。修复：①填了完整 API 地址的 Bearer 站点直接信任、跳过探测、不受探测缓存覆盖，且探测不再 fallback 相对路径；②检测+辅种同时勾选时改为串行执行（先检测后辅种）。③配置页与 README 凭据示例的站点名由 HDWing 改为「瓷器」，明确第一段填 MP 站点管理里的站点名。",
+      "v1.2.0": "针对 HDWing 走 Cloudflare 国际链路频繁超时（实测 5 次 4 次 15 秒无响应）：查询与直链下载统一加带退避重试（默认 2 次，认证/4xx 不重试、5xx 与无响应重试），日志区分「重试后仍无响应」与「认证失败检查 Passkey」；一次性任务延迟由 3/2 秒改为 0 秒（与其他插件一致），并把调度移到配置落盘之后避免竞态。"
     }
   },
   "CFRouterOS": {

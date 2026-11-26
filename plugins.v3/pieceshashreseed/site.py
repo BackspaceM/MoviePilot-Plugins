@@ -168,6 +168,47 @@ def _response_body(response: Any) -> tuple[int, str, Any]:
     return status, content_type, body
 
 
+def _request_with_retry(
+    site: SiteConfig,
+    method: str,
+    url: str,
+    timeout: int,
+    retries: int = 2,
+    headers: dict[str, str] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """带重试的请求：网络抖动（无响应/超时/5xx）退避重试，认证失败不重试。
+
+    HDWing 走 Cloudflare，国际链路常出现偶发超时——实测 5 次里 4 次 15 秒无响应、
+    1 次正常返回。单次请求失败就放弃会导致辅种命中 0，故统一在这层重试。
+    """
+    last: Any = None
+    for attempt in range(max(1, retries + 1)):
+        try:
+            client_kwargs = _client_kwargs(site, timeout)
+            if headers is not None:
+                merged = dict(client_kwargs.get("headers") or {})
+                merged.update(headers)
+                client_kwargs["headers"] = merged
+            if method == "post":
+                response = RequestUtils(**client_kwargs).post_res(url, **kwargs)
+            else:
+                response = RequestUtils(**client_kwargs).get_res(url, **kwargs)
+            if response is None:
+                last = None
+            else:
+                status = int(getattr(response, "status_code", 0) or 0)
+                # 认证/客户端错误是确定性失败，不必重试
+                if status < 500:
+                    return response
+                last = response
+        except Exception:  # noqa: BLE001 - 退避后重试
+            last = None
+        if attempt < retries:
+            time.sleep(min(2.0, 0.5 * (attempt + 1)))
+    return last
+
+
 def _candidate_paths(site: SiteConfig) -> list[str]:
     """优先使用已探测/自定义路径，再依次尝试内置候选路径。
 
@@ -271,20 +312,17 @@ def query_matches(
     bearer = is_bearer_api(site.api_path)
     for batch in chunked(list(pieces_hashes), batch_size):
         payload = build_request_payload(site.api_path, site.passkey, batch)
-        try:
-            response = RequestUtils(**_client_kwargs(site, timeout)).post_res(url, json=payload)
-            if response is None:
-                logger.warning(f"{LOG_TAG}站点 {site.name} 查询失败：请求无响应")
-                continue
-            status = int(getattr(response, "status_code", 0) or 0)
-            if status >= 400:
-                reason = "认证失败，检查 Passkey" if status in (401, 403) else f"HTTP {status}"
-                logger.warning(f"{LOG_TAG}站点 {site.name} 查询返回 {reason}")
-                continue
-            _, _, body = _response_body(response)
-            matched.update(parse_pieces_matches(body))
-        except Exception as err:  # noqa: BLE001
-            logger.warning(f"{LOG_TAG}站点 {site.name} 查询异常：{err}")
+        response = _request_with_retry(site, "post", url, timeout, json=payload)
+        if response is None:
+            logger.warning(f"{LOG_TAG}站点 {site.name} 查询失败：重试后仍无响应（网络链路不稳定，可稍后重试）")
+            continue
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            reason = "认证失败，检查 Passkey" if status in (401, 403) else f"HTTP {status}"
+            logger.warning(f"{LOG_TAG}站点 {site.name} 查询返回 {reason}")
+            continue
+        _, _, body = _response_body(response)
+        matched.update(parse_pieces_matches(body))
         if site.gap:
             time.sleep(site.gap)
     return matched
@@ -311,28 +349,19 @@ def download_torrent(
     if not url:
         return None
     safe_url = url.split("?", 1)[0]
-    try:
-        # 种子下载用二进制请求头；保留 Bearer 认证（HDWing 直链需要）
-        kwargs = _client_kwargs(site, timeout)
-        headers = {
-            "User-Agent": kwargs["headers"]["User-Agent"],
-            "Accept": "*/*",
-        }
-        headers.update(build_auth_headers(site.api_path, site.passkey))
-        kwargs["headers"] = headers
-        response = RequestUtils(**kwargs).get_res(url)
-        if response is None:
-            logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}下载失败：无响应")
-            return None
-        status = int(getattr(response, "status_code", 0) or 0)
-        content = getattr(response, "content", None)
-        if status != 200 or not is_torrent_content(content):
-            logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}不是有效种子（HTTP {status}）")
-            return None
-        return content
-    except Exception as err:  # noqa: BLE001
-        logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}下载异常 {safe_url}：{err}")
+    # 种子下载用二进制请求头；保留 Bearer 认证（HDWing 直链需要）
+    headers = {"Accept": "*/*"}
+    headers.update(build_auth_headers(site.api_path, site.passkey))
+    response = _request_with_retry(site, "get", url, timeout, headers=headers)
+    if response is None:
+        logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}下载失败：重试后仍无响应（{safe_url}）")
         return None
+    status = int(getattr(response, "status_code", 0) or 0)
+    content = getattr(response, "content", None)
+    if status != 200 or not is_torrent_content(content):
+        logger.warning(f"{LOG_TAG}站点 {site.name} 种子 {torrent_id} {label}不是有效种子（HTTP {status}）")
+        return None
+    return content
 
 
 def summarize_support(results: dict[str, Any]) -> tuple[list[str], list[str]]:
