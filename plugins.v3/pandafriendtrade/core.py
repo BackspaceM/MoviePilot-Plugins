@@ -126,6 +126,13 @@ class Config:
     do_protect: bool = False
     do_buy: bool = False
     do_release: bool = False
+    do_screening: bool = False        # 每日放映 SSS 自动化总开关
+
+    # 每日放映
+    screening_games: Tuple[str, ...] = ()  # 只玩这些游戏，空=全部
+    screening_assist_uid: int = 0          # 助阵佣人 UID，0=独自放映
+    screening_target_min_score: int = 97   # 目标最低分（97=SSS），仅用于日志提示
+    screening_once_per_day: bool = True    # 每天只在首轮跑满次数，避免多轮重复提交
 
     # 策略与预算
     work_policy: str = "income"
@@ -334,6 +341,14 @@ def parse_config(raw: Dict[str, Any]) -> Config:
         do_protect=parse_bool(raw.get("do_protect")),
         do_buy=parse_bool(raw.get("do_buy")),
         do_release=parse_bool(raw.get("do_release")),
+        do_screening=parse_bool(raw.get("do_screening")),
+        screening_games=tuple(
+            x for x in parse_choices(raw.get("screening_games"),
+                                     ("film_calibration", "missing_frame", "poster_memory"))
+        ),
+        screening_assist_uid=max(0, _to_int(raw.get("screening_assist_uid"))),
+        screening_target_min_score=max(0, min(100, _to_int(raw.get("screening_target_min_score"), 97))),
+        screening_once_per_day=parse_bool(raw.get("screening_once_per_day"), True),
         work_policy=work_policy,
         interact_mode=interact_mode,
         interact_budget=max(0, _to_int(raw.get("interact_budget"), 300)),
@@ -784,7 +799,9 @@ def build_plan(cfg: Config, home: Dict[str, Any], board: Dict[str, Any],
             if not s.can_work or s.uid in reserved or s.uid in worked:
                 continue
             key = choose_work(s, cfg.work_policy)
-            if key and key != s.current_work:
+            # 是否可工作只看站点的 can_work_today；current_work 只是上一次的工作标签，
+            # 站点允许每天重新工作（可与上次相同），用它做过滤会误跳过一批佣人。
+            if key:
                 actions.append(Action("friendTradeWork",
                                       {"target_uid": s.uid, "work_key": key},
                                       f"{s.name} 工作→{(s.work_options.get(key) or {}).get('label', key)}", "safe"))
@@ -1397,3 +1414,248 @@ def snipe_summary(auction_view: Optional[Dict[str, Any]],
         price = cheapest.current_price or cheapest.minimum_bid
         parts.append(f"{name}{len(lots)}件，最低{price}《{cheapest.title}》")
     return "；".join(parts)
+
+
+# ---------------------------------------------------------------- 每日放映 SSS 自动化
+#
+# 站点放映页（friend-trade-screening.php）三种小游戏，全部走 POST /ajax.php：
+#   friendTradeScreeningHome / Start / Submit
+# 提交格式：challenge_token + events_json(JSON字符串) + answer_json(JSON字符串)。
+# 服务端信任客户端上报的 elapsed_ms / option_key，用同一套公式复算得分，
+# 因此这里按站点前端逻辑精确构造答案。SSS 门槛 min_score=97。
+
+SCREENING_GAME_KEYS = ("film_calibration", "missing_frame", "poster_memory")
+SCREENING_GAME_LABELS = {
+    "film_calibration": "胶片校准",
+    "missing_frame": "缺帧补全",
+    "poster_memory": "海报闪记",
+}
+SCREENING_GRADE_ORDER = ("SSS", "SS", "S", "A", "B", "C")
+
+
+def best_grade(grades: Any) -> str:
+    """从评级列表里取最好的一档（站点顺序 SSS>SS>S>A>B>C）。"""
+    items = {str(x) for x in (grades or []) if isinstance(x, (str, int, float))}
+    for grade in SCREENING_GRADE_ORDER:
+        if grade in items:
+            return grade
+    return "-"
+
+# 卡片视觉属性取值顺序（与站点 visualCardClassMaps 一致）
+CARD_TONES = ("coral", "amber", "teal", "blue", "plum", "mint")
+CARD_MOTIFS = ("orbit", "beam", "tower", "waves", "prism", "steps")
+CARD_LAYOUTS = ("center", "split", "diagonal")
+CARD_ROTATIONS = (0, 90, 180, 270)
+
+
+def _clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, value))
+
+
+def calibration_position_for_elapsed(elapsed_ms: int, prompt: Dict[str, Any]) -> int:
+    """复刻站点前端 calibrationPositionForElapsed：由经过毫秒数算指针位置(bp)。"""
+    cycle = _to_int(prompt.get("cycle_ms"))
+    if cycle < 2 or cycle % 2 != 0:
+        return 0
+    center = _to_int(prompt.get("target_center_bp"))
+    width = _to_int(prompt.get("target_width_bp"))
+    wave_phase = (max(0, elapsed_ms) % cycle) / cycle
+    half_progress = wave_phase * 2 if wave_phase <= 0.5 else (1 - wave_phase) * 2
+    half_width = round(width / 2)
+    target_start = _clamp(center - half_width, 0, 10000)
+    target_end = _clamp(center + half_width, 0, 10000)
+    multiplier = 1.11
+    weighted_target_len = (target_end - target_start) / multiplier
+    weighted_len = target_start + weighted_target_len + (10000 - target_end)
+    weighted_dist = half_progress * weighted_len
+    target_exit = target_start + weighted_target_len
+    if weighted_dist <= target_start:
+        pos = weighted_dist
+    elif weighted_dist <= target_exit:
+        pos = target_start + (weighted_dist - target_start) * multiplier
+    else:
+        pos = target_end + (weighted_dist - target_exit)
+    return _clamp(round(pos), 0, 10000)
+
+
+def solve_calibration_elapsed(prompt: Dict[str, Any], prefer: str = "rise") -> int:
+    """求使指针最贴近 target_center 的 elapsed_ms（数值搜索，<=cycle）。
+
+    指针是分段线性三角波，cycle 站点限制为偶数且通常几秒，步长 1ms 搜索代价可忽略。
+    prefer=rise 取上升沿、fall 取下降沿，便于挑一个剩余时间充足的点。
+    """
+    cycle = _to_int(prompt.get("cycle_ms"))
+    if cycle < 2 or cycle % 2 != 0:
+        return 0
+    center = _to_int(prompt.get("target_center_bp"))
+    best_e, best_err = 0, 10 ** 9
+    for e in range(0, cycle + 1):
+        wave_phase = e / cycle
+        if prefer == "rise" and wave_phase > 0.5:
+            continue
+        if prefer == "fall" and wave_phase <= 0.5:
+            continue
+        err = abs(calibration_position_for_elapsed(e, prompt) - center)
+        if err < best_err:
+            best_err, best_e = err, e
+        if best_err == 0:
+            break
+    return best_e
+
+
+def solve_film_calibration(challenge: Dict[str, Any]) -> Dict[str, Any]:
+    """胶片校准：在指针最贴近靶心处「定格」。返回 submit 的 events/answer。"""
+    prompt = (challenge or {}).get("prompt") or {}
+    # 优先上升沿的中点附近；若靶心在边界被裁切导致上升沿误差大，改取下降沿
+    rise_e = solve_calibration_elapsed(prompt, "rise")
+    fall_e = solve_calibration_elapsed(prompt, "fall")
+    center = _to_int(prompt.get("target_center_bp"))
+    rise_err = abs(calibration_position_for_elapsed(rise_e, prompt) - center)
+    fall_err = abs(calibration_position_for_elapsed(fall_e, prompt) - center)
+    elapsed = rise_e if rise_err <= fall_err else fall_e
+    return {
+        "events": [{"type": "freeze", "elapsed_ms": elapsed}],
+        "answer": {},
+        "explain": (f"定格 {elapsed}ms → 位置 {calibration_position_for_elapsed(elapsed, prompt)}bp"
+                    f"（靶心 {center}bp）"),
+    }
+
+
+def _card_signature(card: Any) -> tuple:
+    """卡片的可比较签名（六个视觉字段）。"""
+    if not isinstance(card, dict):
+        return ()
+    return (str(card.get("tone", "")), str(card.get("motif", "")),
+            str(card.get("layout", "")), str(card.get("rotation", "")),
+            str(card.get("title", "")), str(card.get("code", "")))
+
+
+def _same_card(a: Any, b: Any) -> bool:
+    return _card_signature(a) == _card_signature(b) and bool(_card_signature(a))
+
+
+def _predict_attr(known: list, missing_pos: int, enum: tuple, key: str) -> Any:
+    """按 position 推断某视觉属性在缺失位的取值。
+
+    站点序列按固定步进循环（tone/motif/rotation/layout 各有周期）。
+    枚举所有步进，取能解释全部已知位置者；无唯一解时退回最近邻。
+    """
+    pairs = []
+    for pos, card in known:
+        try:
+            pairs.append((pos, enum.index(card.get(key))))
+        except (ValueError, TypeError):
+            return None
+    if not pairs:
+        return None
+    n = len(enum)
+    base_pos, base_idx = pairs[0]
+    candidates = []
+    for step in range(n):
+        if all((base_idx + step * (pos - base_pos)) % n == idx for pos, idx in pairs):
+            candidates.append(step)
+    if len(candidates) == 1:
+        return enum[(base_idx + candidates[0] * (missing_pos - base_pos)) % n]
+    if len(candidates) > 1:
+        # 多个步进都能解释（如所有值相同）：若预测一致则采纳
+        predicted = {enum[(base_idx + s * (missing_pos - base_pos)) % n] for s in candidates}
+        if len(predicted) == 1:
+            return predicted.pop()
+    # 兜底：取离缺失位最近的已知卡片的值
+    nearest = min(pairs, key=lambda p: abs(p[0] - missing_pos))
+    return enum[nearest[1]]
+
+
+def solve_missing_frame(challenge: Dict[str, Any]) -> Dict[str, Any]:
+    """缺帧补全：观察 5 格序列的颜色/图形/布局/旋转循环规律，推断缺失画格。
+
+    对每个视觉属性推断循环步进，预测缺失位应有的取值，构建目标卡片签名，
+    在 3 个选项里取属性吻合度最高者；平局时取第一个。
+    """
+    prompt = (challenge or {}).get("prompt") or {}
+    sequence = prompt.get("sequence") or []
+    options = prompt.get("options") or []
+    missing_index = _to_int(prompt.get("missing_index"))
+    if not isinstance(sequence, list) or not isinstance(options, list) or not options:
+        return {"events": [], "answer": {}, "explain": "题目数据缺失"}
+
+    # 已知位置的卡片（跳过缺失格）
+    known = [(i, f.get("card")) for i, f in enumerate(sequence)
+             if isinstance(f, dict) and isinstance(f.get("card"), dict)]
+    attrs = [
+        ("tone", CARD_TONES), ("motif", CARD_MOTIFS),
+        ("layout", CARD_LAYOUTS), ("rotation", CARD_ROTATIONS),
+    ]
+    predicted: Dict[str, Any] = {}
+    for key, enum in attrs:
+        value = _predict_attr(known, missing_index, enum, key)
+        if value is not None:
+            predicted[key] = value
+
+    # 逐选项打分：属性吻合 +1
+    best, best_score = options[0], -1
+    for opt in options:
+        card = opt.get("card") if isinstance(opt, dict) else None
+        if not isinstance(card, dict):
+            continue
+        score = sum(1 for k, v in predicted.items() if card.get(k) == v)
+        if score > best_score:
+            best, best_score = opt, score
+    option_key = str(best.get("option_key", "")) if isinstance(best, dict) else ""
+    return {
+        "events": [{"type": "select", "option_key": option_key, "elapsed_ms": 1000}],
+        "answer": {"option_key": option_key},
+        "explain": (f"选 {option_key}（属性吻合 {best_score}/{len(predicted)}："
+                    f"{predicted or '无规律，取首项'}）"),
+    }
+
+
+def solve_poster_memory(challenge: Dict[str, Any]) -> Dict[str, Any]:
+    """海报闪记：preview 里就是要记住的三张卡，在 options 中按视觉签名精确找回。"""
+    prompt = (challenge or {}).get("prompt") or {}
+    preview = prompt.get("preview") or []
+    options = prompt.get("options") or []
+    required = _to_int(prompt.get("required_selection_count"), 3) or 3
+    if not isinstance(preview, list) or not isinstance(options, list):
+        return {"events": [], "answer": {}, "explain": "题目数据缺失"}
+
+    selected: List[str] = []
+    for card in preview:
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            okey = str(opt.get("option_key", ""))
+            if okey and okey not in selected and _same_card(card, opt.get("card")):
+                selected.append(okey)
+                break
+    # 精确匹配不足时按顺序补齐（极端情况：站点给了别名/字段差异）
+    if len(selected) < required:
+        for opt in options:
+            if len(selected) >= required:
+                break
+            if not isinstance(opt, dict):
+                continue
+            okey = str(opt.get("option_key", ""))
+            if okey and okey not in selected:
+                selected.append(okey)
+    selected = selected[:required]
+    events = [{"type": "toggle", "option_key": k, "selected": True, "elapsed_ms": 1000}
+              for k in selected]
+    events.append({"type": "submit", "elapsed_ms": 1000})
+    return {
+        "events": events,
+        "answer": {"selected_option_keys": selected},
+        "explain": f"找回 {len(selected)}/{required} 张：{','.join(selected)}",
+    }
+
+
+def solve_screening(challenge: Dict[str, Any]) -> Dict[str, Any]:
+    """按 game_key 分派到具体求解器。"""
+    game = str((challenge or {}).get("game_key") or "")
+    if game == "film_calibration":
+        return solve_film_calibration(challenge)
+    if game == "missing_frame":
+        return solve_missing_frame(challenge)
+    if game == "poster_memory":
+        return solve_poster_memory(challenge)
+    return {"events": [], "answer": {}, "explain": f"未知游戏 {game}"}

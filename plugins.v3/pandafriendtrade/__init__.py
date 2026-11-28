@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import datetime
@@ -35,6 +36,7 @@ _CONSIGNMENT_KEY = "panda_ft_consignment_v1"
 _TASK_OPTIONS_KEY = "panda_ft_task_options_v1"
 _SNIPE_ATTEMPTED_KEY = "panda_ft_snipe_attempted_v1"  # 已出价记录（含未中标），防重复扣手续费
 _SERVANT_DONE_KEY = "panda_ft_servant_done_v1"        # 当天已工作/互动过的佣人 UID
+_SCREENING_KEY = "panda_ft_screening_v1"              # 每日放映状态（当天跑过/成绩缓存）
 _CMD_ACTION = "pandafriendtrade_run"
 
 
@@ -53,13 +55,14 @@ class PandaFriendTrade(_PluginBase):
 
     plugin_name = "熊猫好友买卖"
     plugin_desc = ("按你的规则自动完成熊猫PT好友买卖：领收益/任务、佣人工作互动、事务所派遣结算、"
-                   "海报任务；海报拍卖行与寄售场合并为一个「低价抢购」项目，按价格从低到高捡漏。"
+                   "海报任务；海报拍卖行与寄售场合并为一个「低价抢购」项目，按价格从低到高捡漏；"
+                   "每日放映（胶片校准/缺帧补全/海报闪记）自动作答冲 SSS。"
                    "档位从页面任务实时扫描。默认试运行，出价/买人/释放需显式开启。")
     plugin_icon = "https://raw.githubusercontent.com/BackspaceM/MoviePilot-Plugins/main/icons/pandafriendtrade.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
     plugin_author = "BackspaceM"
     author_url = "https://github.com/BackspaceM"
-    plugin_label = "熊猫PT,好友买卖,海报拍卖,寄售场,代理,规则引擎"
+    plugin_label = "熊猫PT,好友买卖,每日放映,SSS,海报拍卖,寄售场,代理,规则引擎"
     plugin_config_prefix = "pandafriendtrade_"
     plugin_order = 22
     auth_level = 1
@@ -89,6 +92,8 @@ class PandaFriendTrade(_PluginBase):
         self._snipe_state: Dict[str, Any] = {}     # 合并抢购项目只读缓存
         self._snipe_attempted: List[str] = []     # 已出价过的 dedup_key（含未中标）
         self._servant_done: Dict[str, Any] = {}   # 当天已工作/互动的佣人 UID
+        self._screen_state: Dict[str, Any] = {}   # 每日放映状态/成绩缓存（只读供页面展示）
+        self._screen_running = False              # 放映循环是否在进行
         self._net_fail_streak: int = 0             # 连续网络失败次数，用于降噪
 
     # ------------------------------------------------------------------ 生命周期
@@ -109,6 +114,7 @@ class PandaFriendTrade(_PluginBase):
         self._snipe_state = dict(self.get_data("panda_ft_snipe_v1") or {})
         self._snipe_attempted = [str(x) for x in (self.get_data(_SNIPE_ATTEMPTED_KEY) or [])]
         self._servant_done = self._load_servant_done()
+        self._screen_state = dict(self.get_data(_SCREENING_KEY) or {})
         if self._enabled and not self._cfg.cookie:
             logger.warning(f"{LOG_TAG}尚未填写站点 Cookie，运行会失败")
         # 配置重载后按开关决定是否常驻「海报低价抢购」监控线程
@@ -195,6 +201,13 @@ class PandaFriendTrade(_PluginBase):
                 "snipe_text": (f'{self._snipe_state.get("checked_at", "")}　'
                                f'{self._snipe_state.get("summary", "")}'
                                if self._snipe_state else "还没检查过海报行情"),
+                "screening": self._screen_state,
+                "screening_on": bool(self._cfg.do_screening),
+                "screening_text": (f'{self._screen_state.get("checked_at", "")}　'
+                                   f'开局 {self._screen_state.get("games", 0)}，'
+                                   f'结算 {self._screen_state.get("settled", 0)}，'
+                                   f'最佳 {self._screen_state.get("best_grade", "-")}'
+                                   if self._screen_state else "还没检查过放映"),
             })
         except Exception as err:  # noqa: BLE001
             logger.error(f"{LOG_TAG}详情页渲染失败：{err}")
@@ -234,6 +247,12 @@ class PandaFriendTrade(_PluginBase):
              "auth": "bear", "summary": "启动/停止统一的海报低价抢购监控"},
             {"path": "/snipe_reset", "endpoint": self.api_snipe_reset, "methods": ["POST"],
              "auth": "bear", "summary": "清空已抢记录（新一轮拍卖可重新参与）"},
+            {"path": "/screening_check", "endpoint": self.api_screening_check, "methods": ["POST"],
+             "auth": "bear", "summary": "只读检查今日放映状态/剩余次数，不做答"},
+            {"path": "/screening_run", "endpoint": self.api_screening_run, "methods": ["POST"],
+             "auth": "bear", "summary": "跑完当天剩余放映次数（自动作答，非试运行时真正提交）"},
+            {"path": "/screening_status", "endpoint": self.api_screening_status, "methods": ["GET"],
+             "auth": "bear", "summary": "查询最近一次放映成绩与评级分布"},
         ]
 
     # ------------------------------------------------------------------ 按钮端点
@@ -857,6 +876,109 @@ class PandaFriendTrade(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             return _api_fail("清空已抢记录", exc)
 
+    # ------------------------------------------------------------------ 放映端点
+
+    def api_screening_check(self) -> schemas.Response:
+        """只读检查今日放映：解锁状态、剩余次数、今日成绩摘要；不开局不提交。"""
+        try:
+            cfg = self._cfg
+            if not cfg.cookie:
+                return schemas.Response(success=False, message="先在配置页填写站点 Cookie")
+            client = self._client()
+            r = client.screening_home()
+            if not r.ok:
+                return schemas.Response(success=False, message=f"读取放映状态失败：{r.message}")
+            home = r.data if isinstance(r.data, dict) else {}
+            unlocked = bool(home.get("unlocked"))
+            remaining = int(home.get("remaining_attempts") or 0)
+            limit = int(home.get("daily_limit") or 0)
+            records = home.get("today_records") or []
+            grades = [str(x.get("grade") or "-") for x in records if isinstance(x, dict)]
+            best = core.best_grade(grades)
+            msg = (f"放映{'已解锁' if unlocked else '未解锁'}，今日 {len(records)}/{limit} 局，"
+                   f"剩余 {remaining} 次，最佳评级 {best}")
+            if home.get("current_challenge"):
+                msg += "｜有一局进行中（会自动接管）"
+            self._screen_state = dict(self._screen_state)
+            self._screen_state.update({"checked_at": _now(), "unlocked": unlocked,
+                                       "remaining": remaining, "daily_limit": limit,
+                                       "today_grades": grades, "best_grade": best})
+            self._save_screen_state()
+            return schemas.Response(success=True, message=msg)
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("检查放映", exc)
+
+    def api_screening_run(self) -> schemas.Response:
+        """跑完当天剩余放映次数；后台线程执行，立即返回。"""
+        try:
+            if not self._enabled:
+                return schemas.Response(success=False, message="插件未启用")
+            if not self._cfg.cookie:
+                return schemas.Response(success=False, message="先在配置页填写站点 Cookie")
+            if self._screen_running:
+                return schemas.Response(success=False, message="放映正在运行中")
+            with self._lock:
+                self._screen_running = True
+            self._stop_event.clear()
+            dry = self._dry_run
+
+            def runner() -> None:
+                binder = None
+                try:
+                    from app.runtime.log import bind_plugin_instance  # noqa: PLC0415
+                    binder = bind_plugin_instance
+                except Exception:  # noqa: BLE001
+                    pass
+                restore = None
+                try:
+                    if callable(binder):
+                        restore = binder(self)
+                    self._run_screening(self._client(), dry)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(f"{LOG_TAG}放映运行异常：{type(exc).__name__}: {exc}")
+                finally:
+                    if callable(restore):
+                        try:
+                            restore()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    with self._lock:
+                        self._screen_running = False
+
+            threading.Thread(target=runner, daemon=True, name="PandaScreenRun").start()
+            return schemas.Response(success=True,
+                                    message=("放映试运行已开始，看插件日志" if dry
+                                             else "放映已开始，自动作答并记录成绩，看插件日志"))
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._screen_running = False
+            return _api_fail("启动放映", exc)
+
+    def api_screening_status(self) -> schemas.Response:
+        """最近一次放映统计与成绩明细（只读内存缓存）。"""
+        try:
+            st = self._screen_state or {}
+            if not st:
+                return schemas.Response(success=True, message="还没跑过放映，点「检查放映」或「跑一轮放映」")
+            reviews = st.get("reviews") or []
+            parts = []
+            for row in reviews[:8]:
+                if not isinstance(row, dict):
+                    continue
+                g = row.get("game", "")
+                if row.get("dry"):
+                    parts.append(f"{g}：试运行")
+                else:
+                    parts.append(f"{g}：{row.get('grade', '-')}（{row.get('score', '-')}分）")
+            head = (f"放映状态：开局 {st.get('games', 0)}，结算 {st.get('settled', 0)}，"
+                    f"过期 {st.get('expired', 0)}，失败 {st.get('failed', 0)}；"
+                    f"检查于 {st.get('checked_at') or st.get('last_run_at', '-')}")
+            if st.get("error"):
+                head += f"｜{st['error']}"
+            return schemas.Response(success=True, message=head + ("｜" + "；".join(parts) if parts else ""))
+        except Exception as exc:  # noqa: BLE001
+            return _api_fail("读取放映状态", exc)
+
     def _save_snipe_state(self, a_view: Optional[Dict[str, Any]],
                           c_view: Optional[Dict[str, Any]],
                           decisions: List[Any], summary: str) -> None:
@@ -877,6 +999,191 @@ class PandaFriendTrade(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{LOG_TAG}保存抢购状态失败：{exc}")
 
+    # ------------------------------------------------------------------ 每日放映 SSS 自动化
+
+    def _screen_today_key(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _save_screen_state(self) -> None:
+        try:
+            self.save_data(_SCREENING_KEY, self._screen_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{LOG_TAG}保存放映状态失败：{exc}")
+
+    def _screen_rounds_done_today(self) -> int:
+        return int(self._screen_state.get("date") == self._screen_today_key()
+                   and self._screen_state.get("rounds_done", 0) or 0)
+
+    def _mark_screen_round_done(self) -> None:
+        self._screen_state["date"] = self._screen_today_key()
+        self._screen_state["rounds_done"] = self._screen_rounds_done_today() + 1
+        self._screen_state["last_run_at"] = _now()
+        self._save_screen_state()
+
+    @staticmethod
+    def _screen_challenge_view(challenge: Dict[str, Any]) -> str:
+        """把 challenge 压成一行可读摘要（不含敏感数据）。"""
+        game = str(challenge.get("game_key") or "")
+        label = core.SCREENING_GAME_LABELS.get(game, game)
+        attempt = challenge.get("attempt_no")
+        expired = challenge.get("expires_at") or ""
+        return f"{label}（第{attempt}局，到期 {expired}）"
+
+    def _screen_pick_game_key(self, home: Dict[str, Any]) -> str:
+        """从 home.games 里按配置挑一个游戏；优先补齐今日片单（variety bonus）。"""
+        games = [str(g.get("key") or "") for g in (home.get("games") or [])
+                 if isinstance(g, dict) and g.get("key") in core.SCREENING_GAME_KEYS]
+        allowed = set(core.parse_choices(self._cfg.screening_games, core.SCREENING_GAME_KEYS))
+        pool = [g for g in games if not allowed or g in allowed] or games
+        if not pool:
+            return ""
+        # 今日片单还没完成的游戏优先（首次完成有额外 EXP，集齐还有套装奖励）
+        variety = home.get("variety_bonus") or {}
+        completed = set(variety.get("completed_game_keys") or []) if isinstance(variety, dict) else set()
+        for g in pool:
+            if g not in completed:
+                return g
+        return pool[0]
+
+    def _run_screening(self, client: site.PandaClient, dry: bool) -> Dict[str, Any]:
+        """连续跑完当天剩余放映次数；每次 start→求解→submit，直到次数用尽。
+
+        dry=True 时只读一局题目并给出决策，不真正 start/submit。
+        返回统计字典，同时写入 _screen_state 供页面展示。
+        """
+        cfg = self._cfg
+        stats = {"checked_at": _now(), "dry": dry, "games": 0, "settled": 0,
+                 "expired": 0, "failed": 0, "reviews": []}
+
+        home_r = client.screening_home()
+        if not home_r.ok or not isinstance(home_r.data, dict):
+            stats["error"] = home_r.message or "读取放映首页失败"
+            logger.warning(f"{LOG_TAG}放映：读取首页失败：{stats['error']}")
+            self._screen_state = dict(stats)
+            self._save_screen_state()
+            return stats
+        home = home_r.data
+
+        if not home.get("unlocked"):
+            stats["error"] = f"放映未解锁（需等级 {home.get('unlock_level')}）"
+            logger.info(f"{LOG_TAG}放映：{stats['error']}")
+            self._screen_state = dict(stats)
+            self._save_screen_state()
+            return stats
+
+        # 若已有进行中的挑战，先处理掉它，避免 start 失败
+        challenge = home.get("current_challenge") if isinstance(home.get("current_challenge"), dict) else None
+        remaining = int(home.get("remaining_attempts") or 0)
+        logger.info(f"{LOG_TAG}放映：今日剩余 {remaining} 次，"
+                    f"当前挑战 {'有' if challenge else '无'}（试运行={dry}）")
+
+        # 单轮循环上限，防止站点异常导致死循环
+        max_loops = max(1, min(20, int(home.get("daily_limit") or 5) + 1))
+        loops = 0
+        while loops < max_loops:
+            loops += 1
+            if self._stop_event.is_set():
+                logger.warning(f"{LOG_TAG}放映：收到停止信号，提前结束")
+                break
+
+            # 没有挑战就开一局
+            if challenge is None:
+                if remaining <= 0:
+                    break
+                game_key = self._screen_pick_game_key(home)
+                if not game_key:
+                    stats["error"] = "没有可玩的放映游戏"
+                    break
+                if dry:
+                    # 试运行不真正 start：用 home.games 造一个示意 prompt 说明将做什么
+                    solved = {"events": [], "answer": {}, "explain": "试运行：将开局并提交答案（未真正执行）"}
+                    stats["reviews"].append({"game": core.SCREENING_GAME_LABELS.get(game_key, game_key),
+                                             "dry": True, "explain": solved["explain"]})
+                    logger.info(f"{LOG_TAG}放映[试运行]：将开局 {game_key} 并自动作答；关闭试运行后真正执行")
+                    break
+                assist = cfg.screening_assist_uid
+                start_r = client.screening_start(game_key, assist)
+                if not start_r.ok or not isinstance(start_r.data, dict):
+                    msg = start_r.message or "开局失败"
+                    logger.warning(f"{LOG_TAG}放映：开局 {game_key} 失败：{msg}")
+                    stats["failed"] += 1
+                    # 次数可能已用尽或助阵无效，停止本轮
+                    break
+                payload = start_r.data
+                home = payload.get("home") if isinstance(payload.get("home"), dict) else home
+                challenge = payload.get("challenge") if isinstance(payload.get("challenge"), dict) else None
+                remaining = int(home.get("remaining_attempts") or 0)
+                if challenge is None:
+                    logger.warning(f"{LOG_TAG}放映：开局响应缺少 challenge")
+                    stats["failed"] += 1
+                    break
+                logger.info(f"{LOG_TAG}放映：开局 {self._screen_challenge_view(challenge)}")
+
+            stats["games"] += 1
+            game_key = str(challenge.get("game_key") or "")
+            solved = core.solve_screening(challenge)
+            token = str(challenge.get("challenge_token") or "")
+            events_json = json.dumps(solved["events"], ensure_ascii=False, separators=(",", ":"))
+            answer_json = json.dumps(solved["answer"], ensure_ascii=False, separators=(",", ":"))
+            logger.info(f"{LOG_TAG}放映：{core.SCREENING_GAME_LABELS.get(game_key, game_key)}作答 — {solved['explain']}")
+
+            if dry:
+                stats["reviews"].append({"game": core.SCREENING_GAME_LABELS.get(game_key, game_key),
+                                         "dry": True, "explain": solved["explain"]})
+                break
+
+            submit_r = client.screening_submit(token, events_json, answer_json)
+            if not submit_r.ok:
+                logger.warning(f"{LOG_TAG}放映：提交失败：{submit_r.message}")
+                stats["failed"] += 1
+                # 提交失败时挑战可能仍占用，避免死循环：清掉本地 challenge 并停止
+                challenge = None
+                break
+            data = submit_r.data if isinstance(submit_r.data, dict) else {}
+            result = data.get("result") if isinstance(data.get("result"), dict) else None
+            status = str(data.get("status") or "")
+            if status == "expired" or result is None:
+                stats["expired"] += 1
+                logger.info(f"{LOG_TAG}放映：本局已过期/无结果，继续下一局")
+            else:
+                stats["settled"] += 1
+                grade = str(result.get("grade") or "-")
+                score = result.get("score")
+                feedback = result.get("feedback") or {}
+                fb_text = ""
+                if isinstance(feedback, dict):
+                    if game_key == "film_calibration":
+                        fb_text = f"，落点 {feedback.get('frozen_position_bp')}bp"
+                    elif game_key == "missing_frame":
+                        fb_text = f"，{'答对' if feedback.get('is_correct') else '答错'}"
+                    else:
+                        fb_text = f"，找对 {feedback.get('correct_count')}/{feedback.get('required_count')}"
+                stats["reviews"].append({
+                    "game": core.SCREENING_GAME_LABELS.get(game_key, game_key),
+                    "grade": grade, "score": score, "explain": solved["explain"] + fb_text,
+                })
+                logger.info(f"{LOG_TAG}放映：✓ {grade}（{score}分）{fb_text}")
+            # 提交后站点会返回新 home，用它刷新剩余次数；current_challenge 一般是 null。
+            # 若响应没带 home，必须强制清空 challenge，否则会从旧 home 读回同一个 token 重复提交。
+            new_home = data.get("home") if isinstance(data.get("home"), dict) else None
+            if new_home is not None:
+                home = new_home
+                remaining = int(home.get("remaining_attempts") or 0)
+                next_ch = home.get("current_challenge")
+                challenge = next_ch if isinstance(next_ch, dict) else None
+            else:
+                challenge = None
+                remaining = max(0, remaining - 1)
+            self._mark_screen_round_done()
+            # 温和处理：连续提交之间稍作停顿，避免触发风控
+            time.sleep(max(0.5, min(2.0, cfg.request_interval)))
+
+        self._screen_state = dict(stats)
+        self._save_screen_state()
+        logger.info(f"{LOG_TAG}放映完成：开局 {stats['games']}，结算 {stats['settled']}，"
+                    f"过期 {stats['expired']}，失败 {stats['failed']}")
+        return stats
+
     def _execute(self, dry: bool) -> None:
         cfg = self._cfg
         client = self._client()
@@ -884,6 +1191,11 @@ class PandaFriendTrade(_PluginBase):
         summary = {"total": 0, "safe": 0, "cost": 0, "irreversible": 0}
         done = failed = 0
         labels: List[str] = []
+
+        # 每轮开头重新读取「当天已工作/互动」记录：跨天会自动清空。
+        # 只依赖 init_plugin 加载一次的话，常驻进程过零点后旧 UID 仍留在名单里，
+        # 导致第二天工作/互动被整批漏安排（v1.5.0 反馈的问题）。
+        self._servant_done = self._load_servant_done()
 
         logger.info(f"{LOG_TAG}开始一轮（{'试运行' if dry else '执行'}）：读取首页/事务所/海报任务…")
         home_r = client.home()
@@ -968,6 +1280,15 @@ class PandaFriendTrade(_PluginBase):
                     failed += 1
                     logger.warning(f"{LOG_TAG}  ✗ 典藏册兑换：{r.message}")
             self._handle_poster_gift(client, cfg)
+
+        # 每日放映 SSS 自动化（独立循环，走同一 client/cookie）
+        if cfg.do_screening:
+            already = self._screen_rounds_done_today() > 0
+            if cfg.screening_once_per_day and already and not dry:
+                logger.info(f"{LOG_TAG}放映：今天已跑过 {self._screen_rounds_done_today()} 轮，"
+                            f"screening_once_per_day 开启，跳过")
+            else:
+                self._run_screening(client, dry)
 
         self._finish(dry, started, summary, done, failed, labels, "")
 

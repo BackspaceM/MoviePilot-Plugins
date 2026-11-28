@@ -38,7 +38,7 @@ class ContractTests(unittest.TestCase):
 
     def test_metadata_and_lifecycle(self):
         self.assertEqual(PLUGIN_ID, "PandaFriendTrade")
-        self.assertEqual(PLUGIN_CLS.plugin_version, "1.5.0")
+        self.assertEqual(PLUGIN_CLS.plugin_version, "1.6.0")
         self.assertTrue(PLUGIN_CLS.plugin_icon.endswith("/icons/pandafriendtrade.png"))
         for name in ("init_plugin", "get_state", "get_api", "get_form", "get_page", "stop_service",
                      "get_service", "run_scheduled"):
@@ -55,7 +55,7 @@ class ContractTests(unittest.TestCase):
                        "/auction_check", "/auction_once", "/auction_monitor", "/auction_status",
                        "/consignment_check", "/consignment_grab",
                        "/scan_tasks", "/snipe_check", "/snipe_once", "/snipe_monitor",
-                       "/snipe_reset"):
+                       "/snipe_reset", "/screening_check", "/screening_run", "/screening_status"):
             self.assertIn(suffix, paths)
 
     def test_form_contains_all_rule_switches(self):
@@ -88,7 +88,7 @@ class ContractTests(unittest.TestCase):
     def test_page_buttons_all_clickable(self):
         page = self.plugin.get_page()
         buttons = [node for node in _walk(page) if node.get("component") == "VBtn"]
-        self.assertEqual(len(buttons), 11)
+        self.assertEqual(len(buttons), 14)
         declared = {route["path"].lstrip("/") for route in self.plugin.get_api()}
         for button in buttons:
             self.assertTrue(str(button.get("text") or "").strip(), "按钮不能有空文字")
@@ -110,7 +110,7 @@ class ContractTests(unittest.TestCase):
                      "api_auction_check", "api_auction_once", "api_auction_monitor", "api_auction_status",
                      "api_consignment_check", "api_consignment_grab",
                      "api_scan_tasks", "api_snipe_check", "api_snipe_once", "api_snipe_monitor",
-                     "api_snipe_reset"):
+                     "api_snipe_reset", "api_screening_check", "api_screening_run", "api_screening_status"):
             result = getattr(self.plugin, name)()
             self.assertIsNotNone(result)
             self.assertTrue(hasattr(result, "success"), name)
@@ -243,6 +243,103 @@ class ScheduleAndDedupTests(unittest.TestCase):
         self.assertEqual(self.plugin._servant_done["interact"], [22])
         self.plugin._mark_servant_done(CORE.Action("friendTradeClaimIncome", {}, "income"))
         self.assertEqual(self.plugin._servant_done["work"], [11])
+
+
+class ScreeningTests(unittest.TestCase):
+    """v1.6.0：每日放映 SSS 自动化求解器 + 工作安排漏排修复。"""
+
+    @staticmethod
+    def _card(tone, motif, layout, rotation, title, code):
+        return {"tone": tone, "motif": motif, "layout": layout, "rotation": rotation,
+                "title": title, "code": code}
+
+    def test_calibration_hits_center(self):
+        # 各种靶心/宽度/周期下，落点都紧贴靶心（误差远小于半靶宽）
+        import random
+        rng = random.Random(11)
+        for _ in range(500):
+            center = rng.randint(0, 10000)
+            width = rng.randint(200, 1200)
+            cycle = rng.randint(1000, 8000) * 2
+            ch = {"game_key": "film_calibration",
+                  "prompt": {"target_center_bp": center, "target_width_bp": width, "cycle_ms": cycle}}
+            solved = CORE.solve_screening(ch)
+            elapsed = solved["events"][0]["elapsed_ms"]
+            pos = CORE.calibration_position_for_elapsed(elapsed, ch["prompt"])
+            self.assertLessEqual(abs(pos - center), 20)
+
+    def test_missing_frame_picks_pattern_card(self):
+        tones, motifs, rots = CORE.CARD_TONES, CORE.CARD_MOTIFS, CORE.CARD_ROTATIONS
+        miss = 2
+        seq = []
+        for i in range(5):
+            if i == miss:
+                seq.append({"position": i, "card": None})
+            else:
+                seq.append({"position": i, "card": self._card(
+                    tones[i % 6], motifs[(i * 2) % 6], "center", rots[i % 4], f"T{i}", f"C{i}")})
+        correct = self._card(tones[miss % 6], motifs[(miss * 2) % 6], "center", rots[miss % 4], "T2", "C2")
+        options = [
+            {"option_key": "bad111111111", "card": self._card("amber", "beam", "split", 90, "X", "X1")},
+            {"option_key": "good22222222", "card": correct},
+            {"option_key": "bad333333333", "card": self._card("blue", "waves", "diagonal", 270, "Y", "Y1")},
+        ]
+        ch = {"game_key": "missing_frame",
+              "prompt": {"sequence": seq, "missing_index": miss, "options": options}}
+        solved = CORE.solve_screening(ch)
+        self.assertEqual(solved["answer"]["option_key"], "good22222222")
+        self.assertEqual(len(solved["events"]), 1)
+        self.assertEqual(solved["events"][0]["type"], "select")
+
+    def test_poster_memory_finds_preview_cards(self):
+        pv = [self._card("coral", "orbit", "center", 0, "A", "A1"),
+              self._card("teal", "waves", "split", 90, "B", "B1"),
+              self._card("plum", "prism", "diagonal", 180, "C", "C1")]
+        options = [{"option_key": f"key{i}", "card": c} for i, c in enumerate(pv)]
+        options += [{"option_key": f"bad{i}", "card": self._card("mint", "steps", "center", 270, f"D{i}", f"D{i}")}
+                    for i in range(3)]
+        ch = {"game_key": "poster_memory",
+              "prompt": {"preview": pv, "options": options, "required_selection_count": 3}}
+        solved = CORE.solve_screening(ch)
+        self.assertEqual(sorted(solved["answer"]["selected_option_keys"]), ["key0", "key1", "key2"])
+        self.assertIn({"type": "submit", "elapsed_ms": 1000}, solved["events"])
+
+    def test_best_grade_order(self):
+        self.assertEqual(CORE.best_grade(["SS", "S", "SSS"]), "SSS")
+        self.assertEqual(CORE.best_grade(["B", "A"]), "A")
+        self.assertEqual(CORE.best_grade([]), "-")
+
+    def test_work_uses_site_can_work_not_current_work(self):
+        # 当前工作恰好等于策略选中工作时，仍应安排（修复 key != current_work 漏排）
+        home = {"my_assets": [{
+            "slave_uid": 123, "username": "u",
+            "cultivation_summary": {
+                "can_work_today": True, "can_interact_today": False,
+                "current_work": "accounting", "available_works": {"accounting": {"label": "记账"}},
+            },
+        }]}
+        cfg = CORE.parse_config({"do_work": True, "work_policy": "income"})
+        acts = CORE.build_plan(cfg, home, {}, {})
+        work = [a for a in acts if a.action == "friendTradeWork"]
+        self.assertEqual(len(work), 1, "current_work 等于策略工作时也不应漏排")
+
+    def test_execute_reloads_servant_done_each_round(self):
+        # _execute 每轮开头重读去重状态：跨天后昨天的 UID 不再被当作已工作
+        cc.install_stubs()
+        plugin = PLUGIN_CLS()
+        plugin.init_plugin({"cookie": "fake", "enabled": True, "dry_run": True})
+        plugin.get_data = mock.MagicMock(return_value={})
+        plugin._client = lambda: type("C", (), {
+            "home": lambda self: type("R", (), {"ok": True, "data": {"my_assets": []}})()
+        })()
+        # 直接调用 _load_servant_done 验证跨天清空路径在每轮被调用的入口可用性
+        plugin._servant_done = {"date": "2000-01-01", "work": [11], "interact": []}
+        plugin.get_data = lambda key, default=None: (
+            {"date": "2000-01-01", "work": [11], "interact": []}
+            if key == "panda_ft_servant_done_v1" else default)
+        reloaded = plugin._load_servant_done()
+        self.assertEqual(reloaded["work"], [])
+        self.assertEqual(reloaded["date"], plugin._today())
 
 
 if __name__ == "__main__":

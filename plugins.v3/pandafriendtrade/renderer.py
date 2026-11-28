@@ -126,6 +126,12 @@ DEFAULTS: dict[str, Any] = {
     "snipe_range_rare": "",
     "snipe_range_precious": "",
     "snipe_range_legendary": "",
+    # 每日放映 SSS 自动化
+    "do_screening": False,
+    "screening_games": "",
+    "screening_assist_uid": 0,
+    "screening_target_min_score": 97,
+    "screening_once_per_day": True,
 }
 
 
@@ -321,6 +327,31 @@ def form(task_options: list | None = None) -> tuple[list[dict], dict[str, Any]]:
                    hint="需同时打开「启用释放」；临时佣人到期会被释放，不可撤回", persistentHint=True),
         ),
 
+        # ===== 分类五：每日放映（SSS 自动化）=====
+        _section("⑤ 每日放映 · SSS 自动化", "胶片校准/缺帧补全/海报闪记，自动作答冲 SSS（97 分以上）"),
+        _alert(
+            "每日放映是站点小游戏（非买卖，零魔力消耗）：胶片校准按靶心定格、缺帧补全按序列规律选画格、"
+            "海报闪记按预览卡找回。插件复刻站点前端算法自动作答，目标是 SSS（≥97 分，海报掉落率最高）。"
+            "全部动作先走试运行出决策；关闭试运行后才真正开局并提交。每天 5 次用即可，选「每天只跑一轮」避免多轮重复。",
+            "info"),
+        _row(
+            _field("VSwitch", "do_screening", "开启每日放映自动化", 6,
+                   hint="总开关；关闭则完全不碰放映", persistentHint=True),
+            _field("VSwitch", "screening_once_per_day", "每天只跑一轮", 6,
+                   hint="默认开：当天跑过一次后，后续定时轮次不再重复开局", persistentHint=True),
+        ),
+        _row({
+            "component": "VCol", "props": {"cols": 12, "md": 6},
+            "content": [_multi_select("screening_games", "只玩这些游戏（不选=全部）",
+                                      [{"title": "胶片校准", "value": "film_calibration"},
+                                       {"title": "缺帧补全", "value": "missing_frame"},
+                                       {"title": "海报闪记", "value": "poster_memory"}],
+                                      "优先补齐今日片单，拿额外 EXP")],
+        },
+            _field("VTextField", "screening_assist_uid", "助阵佣人 UID（0=独自放映）", 6,
+                   hint="填有对应天赋的佣人助阵可加分；0 表示不助阵", persistentHint=True),
+        ),
+
         _alert("所有动作都会先产出计划并写进插件日志（卡片右上角「…」→ 查看日志）。试运行时只记录不执行。", "info"),
     ]
     return content, dict(DEFAULTS)
@@ -385,6 +416,9 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         _button("启动/停止抢购", "snipe_monitor", "post", "mdi-fast-forward", "primary"),
         _button("清空已抢记录", "snipe_reset", "post", "mdi-backup-restore"),
         _button("抢购状态", "auction_status", "get", "mdi-pulse"),
+        _button("检查放映", "screening_check", "post", "mdi-clipboard-check"),
+        _button("跑一轮放映", "screening_run", "post", "mdi-gamepad-variant", "primary"),
+        _button("放映状态", "screening_status", "get", "mdi-trophy"),
     ]
 
     badge = '<span class="pf-badge on">正在运行</span>' if running else '<span class="pf-badge">空闲</span>'
@@ -445,6 +479,45 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + '领奖档位请先点「扫描任务档位」，再到配置页下拉框选择。</div>'
     )
 
+    # 每日放映区（只读缓存）
+    screen = data.get("screening") if isinstance(data.get("screening"), dict) else {}
+    screen_on = bool(data.get("screening_on"))
+    f_badge = '<span class="pf-badge on">放映已开启</span>' if screen_on else '<span class="pf-badge">放映未开启</span>'
+    f_rows = ""
+    for row in (screen.get("reviews") or [])[:8]:
+        if not isinstance(row, dict):
+            continue
+        g = row.get("game", "")
+        if row.get("dry"):
+            val = "试运行（未提交）"
+        else:
+            val = f'{row.get("grade", "-")} · {row.get("score", "-")} 分'
+        f_rows += (
+            f'<div class="pf-line"><span class="pf-line-v">{_e(g)}</span>'
+            f'<span class="pf-line-k">{_e(val)}</span></div>'
+            f'<div class="pf-line"><span class="pf-line-v"><small>{_e(row.get("explain", ""))}</small></span></div>'
+        )
+    screen_html = (
+        '<div class="pf-sec">每日放映 · SSS 自动化' + f_badge + '</div>'
+        + '<div class="pf-card">'
+        + f'<div class="pf-line"><span class="pf-line-k">最近状态</span>'
+        + f'<span class="pf-line-v">{_e(data.get("screening_text") or "还没检查过放映")}</span></div>'
+        + f'<div class="pf-line"><span class="pf-line-k">今日进度</span>'
+        + f'<span class="pf-line-v">{_e(screen.get("today_grades") and len(screen["today_grades"]) or 0)} 局，'
+        + f'剩余 {_e(screen.get("remaining", "—"))} 次，最佳 {_e(screen.get("best_grade", "-"))}</span></div>'
+        + f'<div class="pf-line"><span class="pf-line-k">本轮统计</span>'
+        + f'<span class="pf-line-v">开局 {_e(screen.get("games", 0))}｜结算 {_e(screen.get("settled", 0))}'
+        + f'｜过期 {_e(screen.get("expired", 0))}｜失败 {_e(screen.get("failed", 0))}</span></div>'
+        + (f'<div class="pf-line"><span class="pf-line-v" style="color:#b91c1c">'
+           f'{_e(screen.get("error"))}</span></div>' if screen.get("error") else '')
+        + f_rows
+        + '</div>'
+        + '<div class="pf-note">放映是站点小游戏（不花魔力）：胶片校准按靶心定格、缺帧补全按序列规律、'
+        + '海报闪记按预览卡找回。插件复刻站点前端算法作答，冲 SSS（≥97 分，海报掉落率最高）。'
+        + '先点「检查放映」看今日进度，再点「跑一轮放映」；试运行时只出决策不提交。'
+        + '答题明细与每局评级写进插件日志（卡片右上角「…」→ 查看日志）。</div>'
+    )
+
     card = (
         '<div class="pf">' + _STYLE
         + '<div class="pf-head"><span class="pf-logo">🐼</span><span>'
@@ -457,6 +530,7 @@ def render_page(state: dict[str, Any]) -> list[dict]:
         + f'<div class="pf-card">{lines}</div>'
         + preview_html
         + snipe_html
+        + screen_html
         + '<div class="pf-sec">安全说明</div>'
         + '<div class="pf-note">不可逆动作（买入/抢人/追回/释放）默认全关，必须自己显式打开并设置价格与属性门槛。'
         + '站点已开启原生自动派遣时，插件不会重复派单，只结算已完成的委托。'
